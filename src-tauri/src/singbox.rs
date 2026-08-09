@@ -2,6 +2,33 @@ use crate::clash_yaml::ClashNode;
 use anyhow::{bail, Context, Result};
 use serde_json::json;
 
+/// 解析 Clash hysteria2 带宽字段为 Mbps 数值：支持纯数字（100）、
+/// 带单位字符串（"100 Mbps"）、浮点（"1.5 Gbps" → 1500）。
+fn parse_bandwidth_mbps(s: &str) -> Option<u64> {
+    let t = s.trim();
+    if t.is_empty() {
+        return None;
+    }
+    // 提取数字部分与单位
+    let num: String = t.chars().take_while(|c| c.is_ascii_digit() || *c == '.').collect();
+    let unit = t[num.len()..].to_ascii_lowercase();
+    let value: f64 = num.parse().ok()?;
+    let mbps = if unit.contains("gbps") || unit.contains("gbit") {
+        value * 1000.0
+    } else if unit.contains("mbps") || unit.contains("mbit") {
+        value
+    } else if unit.contains("kbps") || unit.contains("kbit") {
+        value / 1000.0
+    } else if unit.contains("mb") || unit.contains("m") {
+        value
+    } else if unit.contains("gb") || unit.contains("g") {
+        value * 1000.0
+    } else {
+        value
+    };
+    Some(mbps as u64)
+}
+
 /// 从 Clash 节点生成 sing-box outbound 配置
 fn build_outbound(node: &ClashNode) -> Result<serde_json::Value> {
     match node.node_type.as_str() {
@@ -157,10 +184,10 @@ fn build_outbound(node: &ClashNode) -> Result<serde_json::Value> {
                 }
                 outbound["obfs"] = obfs_value;
             }
-            if let Some(up) = node.up {
+            if let Some(up) = node.up.as_deref().and_then(parse_bandwidth_mbps) {
                 outbound["up_mbps"] = json!(up);
             }
-            if let Some(down) = node.down {
+            if let Some(down) = node.down.as_deref().and_then(parse_bandwidth_mbps) {
                 outbound["down_mbps"] = json!(down);
             }
             Ok(outbound)
@@ -258,6 +285,16 @@ pub fn build_singbox_config(node: &ClashNode, listen_port: u16) -> Result<String
 mod tests {
     use super::*;
     use crate::clash_yaml::parse_clash_yaml;
+
+    #[test]
+    fn test_parse_bandwidth_mbps() {
+        assert_eq!(parse_bandwidth_mbps("100 Mbps"), Some(100));
+        assert_eq!(parse_bandwidth_mbps("100"), Some(100));
+        assert_eq!(parse_bandwidth_mbps("1.5 Gbps"), Some(1500));
+        assert_eq!(parse_bandwidth_mbps("1000 Kbps"), Some(1));
+        assert_eq!(parse_bandwidth_mbps(""), None);
+        assert_eq!(parse_bandwidth_mbps("abc"), None);
+    }
 
     #[test]
     fn test_build_trojan_config() {

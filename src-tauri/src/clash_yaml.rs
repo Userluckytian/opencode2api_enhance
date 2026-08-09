@@ -19,9 +19,9 @@ pub struct ClashNode {
     #[serde(rename = "skip-cert-verify")]
     pub skip_cert_verify: Option<bool>,
     pub network: Option<String>,
-    /// hysteria2 带宽（Clash 配置里的 up / down）
-    pub up: Option<u64>,
-    pub down: Option<u64>,
+    /// hysteria2 带宽（Clash 配置里为字符串如 "100 Mbps"，或纯数字）
+    pub up: Option<String>,
+    pub down: Option<String>,
     /// hysteria2 obfs 混淆参数
     pub obfs: Option<String>,
     #[serde(rename = "obfs-password")]
@@ -422,6 +422,29 @@ proxies:
     fn test_parse_empty() {
         let nodes = parse_clash_yaml("dns:\n  enable: true\n").unwrap();
         assert!(nodes.is_empty());
+    }
+
+    /// 回归测试：Clash 的 hysteria2 带宽字段为字符串（"100 Mbps"），
+    /// 若按 u64 解析会失败导致整个 profile 被跳过（KR-家宽订阅不载入）。
+    #[test]
+    fn test_parse_hysteria2_string_bandwidth() {
+        let yaml = r#"
+proxies:
+  - name: "KR-Hysteria2"
+    type: hysteria2
+    server: 210.109.205.7
+    port: 10012
+    password: "test-pass"
+    up: "100 Mbps"
+    down: "150 Mbps"
+    sni: 210.109.205.7
+    skip-cert-verify: true
+"#;
+        let nodes = parse_clash_yaml(yaml).unwrap();
+        assert_eq!(nodes.len(), 1);
+        assert_eq!(nodes[0].name, "KR-Hysteria2");
+        assert_eq!(nodes[0].up.as_deref(), Some("100 Mbps"));
+        assert_eq!(nodes[0].down.as_deref(), Some("150 Mbps"));
     }
 
     #[test]
