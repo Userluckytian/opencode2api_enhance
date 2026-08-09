@@ -1,12 +1,12 @@
 use crate::clash_yaml;
 use crate::opencode_cfg;
 use crate::singbox;
-use anyhow::{Context, Result, bail};
+use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -20,6 +20,22 @@ pub(crate) fn no_window(cmd: &mut Command) -> &mut Command {
         cmd.creation_flags(0x08000000);
     }
     cmd
+}
+
+/// 解析子程序可执行文件路径：Windows 优先 `<name>.exe`，其他平台优先无扩展名
+/// `<name>`（与 embed.rs 的 platform_name 释放逻辑对应，避免 Linux 误选残留的
+/// Windows PE .exe 而无法执行）。
+pub(crate) fn resolve_platform_bin(bin_dir: &Path, name: &str) -> PathBuf {
+    let (preferred, fallback) = if cfg!(windows) {
+        (bin_dir.join(format!("{}.exe", name)), bin_dir.join(name))
+    } else {
+        (bin_dir.join(name), bin_dir.join(format!("{}.exe", name)))
+    };
+    if preferred.exists() {
+        preferred
+    } else {
+        fallback
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -167,19 +183,13 @@ impl InstanceManager {
         let singbox_cfg_path = instance_dir.join("singbox.json");
         fs::write(&singbox_cfg_path, singbox_cfg).context("写入 sing-box 配置失败")?;
 
-        let singbox_exe = self.binary_dir.join("sing-box.exe");
-        let singbox_bin = if singbox_exe.exists() {
-            singbox_exe
-        } else {
-            let fallback = self.binary_dir.join("sing-box");
-            if !fallback.exists() {
-                bail!(
-                    "未找到 sing-box 可执行文件: {}",
-                    self.binary_dir.join("sing-box.exe").display()
-                );
-            }
-            fallback
-        };
+        let singbox_bin = resolve_platform_bin(&self.binary_dir, "sing-box");
+        if !singbox_bin.exists() {
+            bail!(
+                "未找到 sing-box 可执行文件: {}",
+                self.binary_dir.join("sing-box.exe").display()
+            );
+        }
 
         let singbox_stdout = fs::File::create(log_dir.join("singbox.out.log"))
             .context("创建 sing-box 输出日志失败")?;
@@ -227,20 +237,14 @@ impl InstanceManager {
             e
         })?;
 
-        let oc_bin = self.binary_dir.join("opencode2api.exe");
-        let oc_bin = if oc_bin.exists() {
-            oc_bin
-        } else {
-            let fallback = self.binary_dir.join("opencode2api");
-            if !fallback.exists() {
-                cleanup_singbox(&mut self.instances, idx);
-                bail!(
-                    "未找到 opencode2api 可执行文件: {}",
-                    self.binary_dir.join("opencode2api.exe").display()
-                );
-            }
-            fallback
-        };
+        let oc_bin = resolve_platform_bin(&self.binary_dir, "opencode2api");
+        if !oc_bin.exists() {
+            cleanup_singbox(&mut self.instances, idx);
+            bail!(
+                "未找到 opencode2api 可执行文件: {}",
+                self.binary_dir.join("opencode2api.exe").display()
+            );
+        }
 
         let oc_stdout = fs::File::create(log_dir.join("opencode2api.out.log")).map_err(|e| {
             cleanup_singbox(&mut self.instances, idx);
@@ -1149,11 +1153,9 @@ mod tests {
         assert_eq!(manager.instances[0].pid, Some(4242));
 
         // apply_start_result 失败 → Error
-        assert!(
-            manager
-                .apply_start_result("u1", Err("启动失败".to_string()))
-                .is_err()
-        );
+        assert!(manager
+            .apply_start_result("u1", Err("启动失败".to_string()))
+            .is_err());
         assert!(matches!(
             manager.instances[0].status,
             InstanceStatus::Error(_)

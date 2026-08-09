@@ -31,7 +31,9 @@
   "bundle": {
     "active": true,
     "targets": [
-      "nsis"
+      "nsis",
+      "deb",
+      "appimage"
     ],
     "icon": [
       "icons/32x32.png",
@@ -39,6 +41,9 @@
       "icons/128x128@2x.png",
       "icons/icon.icns",
       "icons/icon.ico"
-    ]
+    ],
+    "category": "Utility",
+    "shortDescription": "多实例 LLM 代理管理器（opencode2api + sing-box 节点池，桌面/headless WebUI）",
+    "longDescription": "基于 Tauri 2 的本地多实例代理管理器：管理 opencode2api 代理与 sing-box 出口，支持节点扫描、统一网关、健康巡检、订阅批量导入与调用日志分析。桌面（Windows/Linux）与 headless WebUI 双模式。"
   }
 }

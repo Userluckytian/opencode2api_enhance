@@ -92,6 +92,22 @@ pub fn find_clash_profiles_dir() -> Option<PathBuf> {
             }
         }
     }
+    // Linux: ~/.local/share/io.github.clash-verge-rev.clash-verge-rev/profiles
+    //（Clash Verge Rev 的 Linux 数据目录，遵循 XDG data dir 约定）
+    #[cfg(not(windows))]
+    {
+        if let Some(base) = std::env::var_os("XDG_DATA_HOME")
+            .map(PathBuf::from)
+            .or_else(|| dirs::home_dir().map(|h| h.join(".local/share")))
+        {
+            let dir = base
+                .join("io.github.clash-verge-rev.clash-verge-rev")
+                .join("profiles");
+            if dir.exists() {
+                return Some(dir);
+            }
+        }
+    }
     None
 }
 

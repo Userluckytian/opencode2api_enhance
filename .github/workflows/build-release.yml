@@ -108,20 +108,21 @@ jobs:
         with:
           workspaces: src-tauri
 
-      # Linux 构建同样需要嵌入两个 Windows 子程序：交叉编译 + 下载
-      - name: Build opencode2api.exe (cross-compile, embedded)
+      # Linux 构建需嵌入 Linux 版子程序（Go ELF + sing-box ELF），
+      # 使 headless/deb 的实例启动可用（build.rs 检测到 bin/* 无扩展名则嵌入 ELF）。
+      - name: Build opencode2api (Linux, embedded)
         shell: bash
         run: |
           mkdir -p bin
-          GOOS=windows GOARCH=amd64 go build -trimpath -ldflags "-s -w" -o bin/opencode2api.exe .
+          go build -trimpath -ldflags "-s -w" -o bin/opencode2api .
 
-      - name: Download sing-box (1.13.15, embedded)
+      - name: Download sing-box (1.13.15, Linux embedded)
         shell: bash
         run: |
           mkdir -p bin
-          wget -q https://github.com/SagerNet/sing-box/releases/download/v1.13.15/sing-box-1.13.15-windows-amd64.zip
-          unzip -q -o sing-box-1.13.15-windows-amd64.zip
-          cp sing-box-1.13.15-windows-amd64/sing-box.exe bin/sing-box.exe
+          wget -q https://github.com/SagerNet/sing-box/releases/download/v1.13.15/sing-box-1.13.15-linux-amd64.tar.gz
+          tar -xzf sing-box-1.13.15-linux-amd64.tar.gz
+          cp sing-box-1.13.15-linux-amd64/sing-box bin/sing-box
 
       - name: Build Linux binary + deb package
         run: npm install && npm run tauri:build -- --bundles deb

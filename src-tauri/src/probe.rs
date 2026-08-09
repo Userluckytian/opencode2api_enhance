@@ -150,7 +150,10 @@ impl ScanController {
         }
 
         {
-            let mut g = self.progress.lock().map_err(|_| anyhow::anyhow!("扫描状态锁失败"))?;
+            let mut g = self
+                .progress
+                .lock()
+                .map_err(|_| anyhow::anyhow!("扫描状态锁失败"))?;
             *g = ScanProgress {
                 status: ScanStatus::Running,
                 total: nodes.len(),
@@ -170,7 +173,9 @@ impl ScanController {
         let running = Arc::clone(&self.running);
 
         thread::spawn(move || {
-            let max_workers = concurrency.unwrap_or(MAX_SCAN_CONCURRENCY).clamp(1, MAX_SCAN_CONCURRENCY);
+            let max_workers = concurrency
+                .unwrap_or(MAX_SCAN_CONCURRENCY)
+                .clamp(1, MAX_SCAN_CONCURRENCY);
             let result = run_scan_loop_parallel(
                 &binary_dir,
                 &runtime_dir,
@@ -333,15 +338,17 @@ fn wait_port_released(port: u16, timeout: Duration) {
 }
 
 fn resolve_bin(dir: &Path, name: &str) -> Result<PathBuf> {
-    let exe = dir.join(format!("{}.exe", name));
-    if exe.exists() {
-        return Ok(exe);
+    // 平台化优先：Windows 先 .exe，其他平台先无扩展名（Linux 有残留 .exe 时
+    // 也不会误选 Windows PE）。与 instance.rs resolve_platform_bin 保持一致。
+    let bin = crate::instance::resolve_platform_bin(dir, name);
+    if bin.exists() {
+        return Ok(bin);
     }
-    let plain = dir.join(name);
-    if plain.exists() {
-        return Ok(plain);
-    }
-    bail!("未找到可执行文件: {} 或 {}", exe.display(), plain.display());
+    bail!(
+        "未找到可执行文件: {} 或 {}",
+        dir.join(format!("{}.exe", name)).display(),
+        dir.join(name).display()
+    );
 }
 
 // ======================== F7b 并发扫描 ========================
@@ -1062,7 +1069,9 @@ pub fn scan_nodes_sync(
             break;
         }
         {
-            let mut g = progress_cb.lock().map_err(|_| anyhow::anyhow!("扫描状态锁失败"))?;
+            let mut g = progress_cb
+                .lock()
+                .map_err(|_| anyhow::anyhow!("扫描状态锁失败"))?;
             g.current = i + 1;
             g.current_node = Some(node.name.clone());
             on_progress(&g.snapshot());
@@ -1083,7 +1092,9 @@ pub fn scan_nodes_sync(
         );
 
         {
-            let mut g = progress_cb.lock().map_err(|_| anyhow::anyhow!("扫描状态锁失败"))?;
+            let mut g = progress_cb
+                .lock()
+                .map_err(|_| anyhow::anyhow!("扫描状态锁失败"))?;
             g.results.push(result);
             on_progress(&g.snapshot());
         }
@@ -1091,7 +1102,9 @@ pub fn scan_nodes_sync(
 
     procs.kill_all();
 
-    let mut g = progress.lock().map_err(|_| anyhow::anyhow!("扫描状态锁失败"))?;
+    let mut g = progress
+        .lock()
+        .map_err(|_| anyhow::anyhow!("扫描状态锁失败"))?;
     g.status = ScanStatus::Done;
     g.finished_ms = Some(now_ms());
     g.current_node = None;
