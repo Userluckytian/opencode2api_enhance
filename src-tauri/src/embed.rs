@@ -41,6 +41,15 @@ fn ensure_file(dir: &Path, name: &str, data: &[u8]) -> Result<bool> {
     if need_write {
         fs::write(&path, data)
             .with_context(|| format!("写入 {} 失败: {}", name, path.display()))?;
+        // Unix 下释放的子程序必须可执行：fs::write 默认 0644 无执行位，
+        // 直接执行会报 Permission denied（Windows 无执行位概念不受影响）。
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = fs::metadata(&path)?.permissions();
+            perms.set_mode(0o755);
+            fs::set_permissions(&path, perms)?;
+        }
         Ok(true)
     } else {
         Ok(false)
