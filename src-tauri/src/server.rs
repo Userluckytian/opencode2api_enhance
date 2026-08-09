@@ -92,14 +92,20 @@ pub fn build_router(core: Arc<AppCore>) -> Router {
 /// 支持 SPA 路由回退：未知路径（如 /settings 前端路由）返回 index.html。
 async fn embedded_assets(uri: Uri) -> impl IntoResponse {
     let path = uri.path().trim_start_matches('/');
-    let asset = if path.is_empty() || path == "index.html" {
-        EmbeddedAssets::get("index.html")
+    // 实际返回的资源名：请求文件存在则用它，否则 SPA 回退 index.html。
+    // MIME 必须基于实际资源名推断（若按请求路径，SPA 路由 /settings 回退
+    // index.html 时会因未知扩展名返回 octet-stream 导致浏览器下载而非渲染）。
+    let (served_name, asset) = if path.is_empty() || path == "index.html" {
+        ("index.html", EmbeddedAssets::get("index.html"))
     } else {
-        EmbeddedAssets::get(path).or_else(|| EmbeddedAssets::get("index.html"))
+        match EmbeddedAssets::get(path) {
+            Some(f) => (path, Some(f)),
+            None => ("index.html", EmbeddedAssets::get("index.html")),
+        }
     };
     match asset {
         Some(f) => {
-            let mime = mime_guess_from_path(path);
+            let mime = mime_guess_from_path(served_name);
             (
                 StatusCode::OK,
                 [(header::CONTENT_TYPE, mime)],
