@@ -43,11 +43,13 @@ export default function StatsPage({
   // 健康巡检状态
   const [health, setHealth] = useState<HealthSummary | null>(null)
   const [healthBusy, setHealthBusy] = useState(false)
+  const [healthExpanded, setHealthExpanded] = useState(false)
 
   const loadHealth = useCallback(async (silent = true) => {
     try {
       const h = await api.healthSummary()
       setHealth(h)
+      setHealthExpanded(false)
     } catch (e) {
       if (!silent) toast(String(e), false)
     }
@@ -148,6 +150,11 @@ export default function StatsPage({
 
   const instances = stats?.instances ?? []
   const isEmpty = !stats || instances.length === 0
+  const healthRecords = health
+    ? healthExpanded
+      ? health.records
+      : health.records.slice(0, 4)
+    : []
 
   return (
     <div className="p-6 flex flex-col gap-5">
@@ -248,7 +255,7 @@ export default function StatsPage({
                 </tr>
               </thead>
               <tbody>
-                {health.records.map((r) => (
+                {healthRecords.map((r) => (
                   <tr key={r.name} className="border-b border-zinc-50">
                     <td className="py-2 pr-3 font-medium text-zinc-800">{r.name}</td>
                     <td className="py-2 pr-3">
@@ -272,6 +279,18 @@ export default function StatsPage({
                 ))}
               </tbody>
             </table>
+            {health.records.length > 4 && (
+              <div className="mt-2 flex items-center gap-2 text-[11px]">
+                <button
+                  type="button"
+                  onClick={() => setHealthExpanded((expanded) => !expanded)}
+                  className="text-zinc-400 hover:text-zinc-600"
+                >
+                  {healthExpanded ? '收起' : `展开全部 (${health.records.length})`}
+                </button>
+                {!healthExpanded && <span className="text-zinc-400">{health.records.length - 4} 个实例已折叠</span>}
+              </div>
+            )}
             <div className="mt-3 text-[11px] text-zinc-400">
               每 15 秒自动刷新 · 连续失败达到「设置-健康巡检」阈值时自动重启实例
             </div>

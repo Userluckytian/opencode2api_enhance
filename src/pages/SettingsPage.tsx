@@ -7,6 +7,7 @@ export default function SettingsPage({ toast }: { toast: (msg: string, ok?: bool
   const [config, setConfig] = useState<ConfigView | null>(null)
   const [autostart, setAutostart] = useState<boolean>(false)
   const [binariesInfo, setBinariesInfo] = useState<BinariesInfo | null>(null)
+  const [section, setSection] = useState<'network' | 'subscribe' | 'system'>('network')
 
   // Clash 外部控制表单
   const [clashUrl, setClashUrl] = useState('')
@@ -280,6 +281,28 @@ export default function SettingsPage({ toast }: { toast: (msg: string, ok?: bool
     <div className="p-6 space-y-6 max-w-2xl mx-auto">
       <h1 className="text-2xl font-semibold text-zinc-900">设置</h1>
 
+      <div className="flex rounded-lg border border-zinc-200 overflow-hidden w-fit">
+        {([
+          ['network', '网络与网关'],
+          ['subscribe', '订阅与巡检'],
+          ['system', '系统'],
+        ] as const).map(([id, label]) => (
+          <button
+            key={id}
+            type="button"
+            onClick={() => setSection(id)}
+            className={clsx(
+              'px-4 py-2 text-sm transition-colors',
+              section === id ? 'bg-zinc-900 text-white' : 'text-zinc-600 hover:bg-zinc-100',
+            )}
+          >
+            {label}
+          </button>
+        ))}
+      </div>
+
+      {section === 'network' && (
+        <>
       {/* Clash 外部控制 */}
       <div className="bg-white rounded-2xl border p-5 space-y-4">
         <h2 className="text-lg font-medium text-zinc-900">Clash 外部控制</h2>
@@ -497,7 +520,11 @@ export default function SettingsPage({ toast }: { toast: (msg: string, ok?: bool
           保存网关配置
         </button>
       </div>
+        </>
+      )}
 
+      {section === 'subscribe' && (
+        <>
       {/* 订阅拉取 */}
       <div className="bg-white rounded-2xl border p-5 space-y-4">
         <h2 className="text-lg font-medium text-zinc-900">订阅拉取</h2>
@@ -632,7 +659,11 @@ export default function SettingsPage({ toast }: { toast: (msg: string, ok?: bool
           保存日志过滤
         </button>
       </div>
+        </>
+      )}
 
+      {section === 'system' && (
+        <>
       {/* 开机自启 */}
       <div className="bg-white rounded-2xl border p-5 space-y-4">
         <h2 className="text-lg font-medium text-zinc-900">开机自启</h2>
@@ -716,6 +747,8 @@ export default function SettingsPage({ toast }: { toast: (msg: string, ok?: bool
 
         <p className="text-zinc-500 text-xs">子程序随主程序内嵌，运行时不满足时自动释放</p>
       </div>
+        </>
+      )}
     </div>
   )
 }
