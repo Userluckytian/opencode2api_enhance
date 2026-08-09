@@ -447,7 +447,11 @@ var (
 func fetchOCVersion() string {
 	req, _ := http.NewRequest("GET", "https://registry.npmjs.org/opencode-ai/latest", nil)
 	req.Header.Set("Accept", "application/json")
-	resp, err := getHTTPClient().Do(req)
+	// 独立短超时：探测进程启动时经 socks 代理调用本函数，若代理链路（节点）
+	// 慢或未就绪，全局 httpClient 的 300s 超时会阻塞启动（探测 15s 等待
+	// 超时 → "探测 API 进程启动失败"）。3s 内取不到版本直接回退默认。
+	client := &http.Client{Timeout: 3 * time.Second}
+	resp, err := client.Do(req)
 	if err != nil {
 		return "1.15.3"
 	}
@@ -502,7 +506,10 @@ func fetchModels() ([]ModelInfo, error) {
 	req, _ := http.NewRequest("GET", "https://opencode.ai/zen/v1/models", nil)
 	req.Header.Set("Authorization", "Bearer public")
 	req.Header.Set("x-opencode-session", ocSessionID)
-	resp, err := getHTTPClient().Do(req)
+	// 独立短超时（同 fetchOCVersion）：启动期同步调用，代理链路挂起时
+	// 避免 300s 全局超时阻塞 server starting（探测场景会误报启动失败）。
+	client := &http.Client{Timeout: 3 * time.Second}
+	resp, err := client.Do(req)
 	if err != nil {
 		return nil, err
 	}
@@ -528,7 +535,9 @@ func fetchGoModels() ([]ModelInfo, error) {
 	req, _ := http.NewRequest("GET", "https://opencode.ai/zen/go/v1/models", nil)
 	req.Header.Set("Authorization", "Bearer public")
 	req.Header.Set("x-opencode-session", ocSessionID)
-	resp, err := getHTTPClient().Do(req)
+	// 独立短超时（同 fetchModels）：启动期同步调用，避免阻塞 server starting
+	client := &http.Client{Timeout: 3 * time.Second}
+	resp, err := client.Do(req)
 	if err != nil {
 		return nil, err
 	}
