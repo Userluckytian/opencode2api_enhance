@@ -145,6 +145,8 @@ export type BinariesInfo = {
   bin_dir: string
   oc_exists: boolean
   sb_exists: boolean
+  /** 当前平台："windows" / "linux" / "macos"（前端据此显示子程序文件名） */
+  platform: string
 }
 
 // ─── 全流程调用日志 ─────────────────────────────────────────────

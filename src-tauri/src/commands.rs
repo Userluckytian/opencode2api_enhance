@@ -234,6 +234,9 @@ pub struct BinariesInfo {
     pub bin_dir: String,
     pub oc_exists: bool,
     pub sb_exists: bool,
+    /// 当前运行平台（"windows"/"linux"/"macos"），前端据此展示正确的
+    /// 子程序文件名与开机自启说明（Linux 下无 .exe 后缀）。
+    pub platform: String,
 }
 
 // ======================== 节点 ========================
@@ -1779,11 +1782,19 @@ pub fn autostart_set(enabled: bool) -> Result<(), String> {
 
 pub fn get_binaries_info_core() -> BinariesInfo {
     let (_, binary_dir, _) = manager_paths();
+    let platform = if cfg!(windows) {
+        "windows"
+    } else if cfg!(target_os = "linux") {
+        "linux"
+    } else {
+        "macos"
+    };
     BinariesInfo {
         bin_dir: binary_dir.display().to_string(),
         oc_exists: binary_dir.join("opencode2api.exe").exists()
             || binary_dir.join("opencode2api").exists(),
         sb_exists: binary_dir.join("sing-box.exe").exists() || binary_dir.join("sing-box").exists(),
+        platform: platform.to_string(),
     }
 }
 

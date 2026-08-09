@@ -649,7 +649,11 @@ export default function SettingsPage({ toast }: { toast: (msg: string, ok?: bool
           </label>
           <span className="text-sm text-zinc-700">开机时自动启动管理器</span>
         </div>
-        <p className="text-zinc-500 text-xs">Windows 注册表</p>
+        <p className="text-zinc-500 text-xs">
+          {binariesInfo?.platform === 'windows'
+            ? 'Windows 注册表'
+            : '当前平台暂不支持开机自启（可配置 systemd 服务）'}
+        </p>
       </div>
 
       {/* 清除数据 */}
@@ -699,13 +703,13 @@ export default function SettingsPage({ toast }: { toast: (msg: string, ok?: bool
               <span className={binariesInfo.oc_exists ? 'text-green-600' : 'text-red-600'}>
                 {binariesInfo.oc_exists ? '✓' : '✗'}
               </span>
-              <span>opencode2api.exe</span>
+              <span>{binariesInfo?.platform === 'windows' ? 'opencode2api.exe' : 'opencode2api'}</span>
             </div>
             <div className="flex items-center space-x-2 text-sm">
               <span className={binariesInfo.sb_exists ? 'text-green-600' : 'text-red-600'}>
                 {binariesInfo.sb_exists ? '✓' : '✗'}
               </span>
-              <span>sing-box.exe</span>
+              <span>{binariesInfo?.platform === 'windows' ? 'sing-box.exe' : 'sing-box'}</span>
             </div>
           </div>
         </div>
