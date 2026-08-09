@@ -52,8 +52,57 @@ fn headless_main(args: &[String]) {
             opencode2api::subscribe::subscribe_loop(core_for_sub).await;
         });
     }
-    if let Err(e) = rt.block_on(server::serve(&format!("{}:{}", bind, port), core)) {
-        eprintln!("Headless 服务启动失败: {}", e);
-        std::process::exit(1);
+    // 同时等待：服务结束 或 收到 SIGTERM/SIGINT（Ctrl+C）。
+    // 信号处理必须在退出前完成子进程清理，否则直接终止会残留
+    // opencode2api/sing-box（桌面模式有 ExitRequested 兜底，headless 需显式处理）。
+    let (core2, core3) = (core.clone(), core.clone());
+    let serve_task = rt.spawn(async move {
+        server::serve(&format!("{}:{}", bind, port), core2).await
+    });
+    rt.block_on(async {
+        let signal = async {
+            #[cfg(unix)]
+            {
+                use tokio::signal::unix::{signal, SignalKind};
+                let mut term =
+                    signal(SignalKind::terminate()).expect("注册 SIGTERM handler 失败");
+                let mut int = signal(SignalKind::interrupt()).expect("注册 SIGINT handler 失败");
+                tokio::select! {
+                    _ = term.recv() => {}
+                    _ = int.recv() => {}
+                }
+            }
+            #[cfg(not(unix))]
+            {
+                let _ = tokio::signal::ctrl_c().await;
+            }
+        };
+        tokio::select! {
+            res = serve_task => {
+                if let Err(e) = res {
+                    eprintln!("Headless 服务异常: {}", e);
+                }
+            }
+            _ = signal => {
+                // 服务停止前先清理子进程
+                stop_all_processes(&core3);
+            }
+        }
+    });
+    // 正常路径（serve 返回）也清理一次，覆盖 serve 因端口占用等立即返回的情况
+    stop_all_processes(&core);
+    rt.shutdown_timeout(std::time::Duration::from_secs(3));
+}
+
+/// 停止统一网关与全部实例进程（headless 退出清理，防止子进程残留占端口）。
+fn stop_all_processes(core: &std::sync::Arc<opencode2api::core::AppCore>) {
+    if let Ok(mut gateway) = core.gateway.lock() {
+        gateway.stop();
+    }
+    if let Ok(mut mgr) = core.manager.lock() {
+        let names: Vec<String> = mgr.list_instances().iter().map(|i| i.name.clone()).collect();
+        for n in names {
+            let _ = mgr.stop_instance(&n);
+        }
     }
 }
