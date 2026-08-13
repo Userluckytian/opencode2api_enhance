@@ -180,6 +180,12 @@ var (
 	socks5ClientAddr string       // 缓存对应的代理地址
 )
 
+// 按代理地址缓存的 HTTP 客户端（连接池复用）；配置变更（proxies 列表变化）时整体清空。
+var (
+	proxyClientMu sync.Mutex
+	proxyClients  = map[string]*http.Client{}
+)
+
 // ======================== 代理健康池 ========================
 
 // badStatusCodes 坏状态码组：遇到这些状态码 → 立即切换节点并计数，
@@ -355,7 +361,20 @@ func getHTTPClientWithProxy() (*http.Client, string) {
 
 // clientForProxy 为指定代理构造 HTTP 客户端（复用一个可用池参数）。
 // 竞速（raceCandidates）与单发路径共用，保证行为一致。
+// 按代理地址缓存复用：历史实现每请求新建 http.Client+Transport，
+// 连接无法跨请求复用（keep-alive 失效、TLS 握手重复）；配置变更时整体失效。
 func clientForProxy(proxy Socks5Proxy) *http.Client {
+	proxyClientMu.Lock()
+	defer proxyClientMu.Unlock()
+	if c, ok := proxyClients[proxy.Addr]; ok {
+		return c
+	}
+	c := buildProxyClient(proxy)
+	proxyClients[proxy.Addr] = c
+	return c
+}
+
+func buildProxyClient(proxy Socks5Proxy) *http.Client {
 	dial := socks5Dial(proxy)
 	return &http.Client{
 		Timeout: 300 * time.Second,
