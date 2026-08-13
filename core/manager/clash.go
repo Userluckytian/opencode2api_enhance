@@ -3,32 +3,32 @@ package manager
 
 // ClashNode 单个 clash 节点（serde 名与 Rust ClashNode 一致）。
 type ClashNode struct {
-	Name              string `json:"name"`
-	Server            string `json:"server"`
-	Port              uint16 `json:"port"`
-	NodeType          string `json:"type"`
-	Password          string `json:"password,omitempty"`
-	UUID              string `json:"uuid,omitempty"`
-	Cipher            string `json:"cipher,omitempty"`
-	SNI               string `json:"sni,omitempty"`
-	ServerName        string `json:"servername,omitempty"`
-	TLS               *bool  `json:"tls,omitempty"`
-	SkipCertVerify    *bool  `json:"skip-cert-verify,omitempty"`
-	Network           string `json:"network,omitempty"`
-	Up                string `json:"up,omitempty"`
-	Down              string `json:"down,omitempty"`
-	Obfs              string `json:"obfs,omitempty"`
-	ObfsPassword      string `json:"obfs-password,omitempty"`
-	WsPath            string `json:"ws-opts.path,omitempty"`
-	WSHeaders         any    `json:"ws-headers,omitempty"`
-	ClientFingerprint string `json:"client-fingerprint,omitempty"`
-	Flow              string `json:"flow,omitempty"`
-	RealityPublicKey  string `json:"reality-opts.public-key,omitempty"`
-	RealityShortID    string `json:"reality-opts.short-id,omitempty"`
-	PrivateKey        string `json:"private-key,omitempty"`   // wireguard 客户端私钥
-	PublicKey         string `json:"public-key,omitempty"`    // wireguard 对端公钥
-	AuthStr           string `json:"auth-str,omitempty"`      // hysteria v1 认证串
-	Group             string `json:"group,omitempty"`
+	Name              string            `json:"name"`
+	Server            string            `json:"server"`
+	Port              uint16            `json:"port"`
+	NodeType          string            `json:"type"`
+	Password          string            `json:"password,omitempty"`
+	UUID              string            `json:"uuid,omitempty"`
+	Cipher            string            `json:"cipher,omitempty"`
+	SNI               string            `json:"sni,omitempty"`
+	ServerName        string            `json:"servername,omitempty"`
+	TLS               *bool             `json:"tls,omitempty"`
+	SkipCertVerify    *bool             `json:"skip-cert-verify,omitempty"`
+	Network           string            `json:"network,omitempty"`
+	Up                string            `json:"up,omitempty"`
+	Down              string            `json:"down,omitempty"`
+	Obfs              string            `json:"obfs,omitempty"`
+	ObfsPassword      string            `json:"obfs-password,omitempty"`
+	WsPath            string            `json:"ws-opts.path,omitempty"`
+	WSHeaders         map[string]string `json:"ws-headers,omitempty"`
+	ClientFingerprint string            `json:"client-fingerprint,omitempty"`
+	Flow              string            `json:"flow,omitempty"`
+	RealityPublicKey  string            `json:"reality-opts.public-key,omitempty"`
+	RealityShortID    string            `json:"reality-opts.short-id,omitempty"`
+	PrivateKey        string            `json:"private-key,omitempty"` // wireguard 客户端私钥
+	PublicKey         string            `json:"public-key,omitempty"`  // wireguard 对端公钥
+	AuthStr           string            `json:"auth-str,omitempty"`    // hysteria v1 认证串
+	Group             string            `json:"group,omitempty"`
 }
 
 // SeamFuncs 汇聚 P4-3/4 才填充的可插拔能力（实例/探针/网关在启动时调用）。
