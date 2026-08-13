@@ -6,6 +6,8 @@ import (
 	"encoding/json"
 	"os"
 	"sync"
+	"sync/atomic"
+	"time"
 )
 
 type ModelStats struct {
@@ -75,6 +77,53 @@ func saveNodeStats() {
 	os.WriteFile(nodeStatsPath, data, 0644)
 }
 
+// ======================== 统计落盘合并（防磁盘 IO 风暴） ========================
+// 历史实现每个计费请求都 `go saveTokenStats()` + `go saveNodeStats()`，
+// 各自做一次整文件 JSON marshal + 落盘：高并发下 goroutine 与磁盘写堆积。
+// 现改为：内存统计即时更新（行为不变），落盘由单个后台协程按 2s 窗口合并执行。
+
+var (
+	tokenStatsDirty atomic.Bool
+	nodeStatsDirty  atomic.Bool
+	statsFlushCh    = make(chan struct{}, 1)
+	statsFlusherOn  sync.Once
+)
+
+func markTokenStatsDirty() {
+	tokenStatsDirty.Store(true)
+	signalStatsFlush()
+}
+
+func markNodeStatsDirty() {
+	nodeStatsDirty.Store(true)
+	signalStatsFlush()
+}
+
+func signalStatsFlush() {
+	select {
+	case statsFlushCh <- struct{}{}:
+	default:
+	}
+}
+
+// startStatsFlusher 启动（惰性，首次记账时初始化）后台落盘协程：
+// 收到信号后等待 2s 合并窗口，再一次性写 token/node 两份统计。
+func startStatsFlusher() {
+	statsFlusherOn.Do(func() {
+		go func() {
+			for range statsFlushCh {
+				time.Sleep(2 * time.Second)
+				if tokenStatsDirty.Swap(false) {
+					saveTokenStats()
+				}
+				if nodeStatsDirty.Swap(false) {
+					saveNodeStats()
+				}
+			}
+		}()
+	})
+}
+
 func recordNodeUsage(addr string, promptTokens, completionTokens, totalTokens int64) {
 	// 节点级统计只对统一网关进程（代理池路由）有意义；
 	// 直连实例走自身 sing-box，其记录无人读取，跳过以避免垃圾文件。
@@ -93,7 +142,9 @@ func recordNodeUsage(addr string, promptTokens, completionTokens, totalTokens in
 	ns.CompletionTokens += completionTokens
 	ns.TotalTokens += totalTokens
 	nodeStatsMu.Unlock()
-	go saveNodeStats()
+	// 落盘改为后台合并（见 startStatsFlusher）。
+	markNodeStatsDirty()
+	startStatsFlusher()
 }
 
 // ======================== 数据模型 ========================
