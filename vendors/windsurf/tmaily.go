@@ -19,6 +19,9 @@ import (
 
 var tmailyBase = "https://tmaily.com"
 
+// maxGenerateRecursion session_not_found 递归重试上限（防无限递归 + 外部请求风暴）。
+const maxGenerateRecursion = 3
+
 var tmailyUA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/150.0.0.0 Safari/537.36"
 
 var tmailyFallbackDomains = []string{
@@ -106,6 +109,12 @@ func (t *tmailyMailbox) Create(ctx context.Context) (string, error) {
 }
 
 func (t *tmailyMailbox) generate(ctx context.Context, force bool, domain, prefix string) (string, error) {
+	return t.generateDepth(ctx, force, domain, prefix, 0)
+}
+
+// generateDepth 为 generate 的实现；depth 限制 session_not_found 递归重试次数，
+// 防止服务端持续返回该错误时无限递归 + 重复外部请求。
+func (t *tmailyMailbox) generateDepth(ctx context.Context, force bool, domain, prefix string, depth int) (string, error) {
 	q := url.Values{}
 	if force {
 		q.Set("force", "true")
@@ -146,7 +155,11 @@ func (t *tmailyMailbox) generate(ctx context.Context, force bool, domain, prefix
 		return "", errors.New("tmaily: turnstile_required and retry failed")
 	}
 	if v.Error == "session_not_found" {
-		return t.generate(ctx, true, domain, prefix)
+		// 递归重试加深度上限，防止无限递归 + 重复外部请求。
+		if depth >= maxGenerateRecursion {
+			return "", fmt.Errorf("tmaily: session_not_found after %d retries", maxGenerateRecursion)
+		}
+		return t.generateDepth(ctx, true, domain, prefix, depth+1)
 	}
 	return "", fmt.Errorf("tmaily generate rejected: %s", truncateBody(raw))
 }
