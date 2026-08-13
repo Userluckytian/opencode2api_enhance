@@ -139,11 +139,7 @@ func chatCompletionsHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	outBody := respBody
-	convertedResp, err := convertResponse(respBody, keepReasoning)
-	if err == nil {
-		outBody = convertedResp
-	}
-	// Record token usage
+	// 非流式：解析一次，同时完成 usage 提取与响应转换（避免双重 JSON 解析）。
 	var usageResp map[string]any
 	if json.Unmarshal(respBody, &usageResp) == nil {
 		if u, ok := usageResp["usage"].(map[string]any); ok {
@@ -155,6 +151,9 @@ func chatCompletionsHandler(w http.ResponseWriter, r *http.Request) {
 			}
 			callRec.PromptTok = int64(pt)
 			callRec.CompletionTok = int64(ct)
+		}
+		if conv, err := convertResponseFromObj(usageResp, keepReasoning); err == nil {
+			outBody = conv
 		}
 	}
 	callRec.DurationMS = time.Since(startTime).Milliseconds()
