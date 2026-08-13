@@ -139,34 +139,59 @@ func (m *Manager) ImportSubscriptionNow(url string) (int, string, error) {
 	}
 }
 
-// RunAllSubscriptionLoop 后台自动拉取循环：遍历所有订阅源，按各自间隔拉取。
-// 每轮完成后休眠至最近的下一次到期；订阅源变更（增删/改间隔）无需重启。
+// RunAllSubscriptionLoop 后台自动拉取循环：每个订阅源按各自间隔独立调度。
+// 历史实现每轮拉取全部 interval>0 的源、再按最短间隔休眠，导致长间隔源被超频拉取
+// （如 24h 源与 1min 源并存时 24h 源每轮都被重拉）。现改为逐源记录上次拉取时间，
+// 到点才拉，休眠至最近一次到期；订阅源变更（增删/改间隔）无需重启。
 func (m *Manager) RunAllSubscriptionLoop() {
 	go func() {
+		lastPull := map[string]time.Time{}
 		for {
 			list := m.loadSubscriptions()
-			next := time.Hour // 最近到期时间（兜底 1h，避免空列表忙转）
 			now := time.Now()
-			// 简单实现：每轮遍历所有 interval>0 的订阅源拉取一次，
-			// 然后休眠 min(各源间隔, 60s) —— 用最短间隔驱动"到点即拉"。
-			shortest := 0
+			next := now.Add(time.Hour) // 兜底：无到期源时 1h 后复查（避免空列表忙转）
 			for _, s := range list {
-				if s.IntervalMin > 0 {
-					if shortest == 0 || s.IntervalMin < shortest {
-						shortest = s.IntervalMin
-					}
+				if s.IntervalMin <= 0 {
+					continue
+				}
+				interval := time.Duration(s.IntervalMin) * time.Minute
+				last, ok := lastPull[s.URL]
+				if !ok || now.Sub(last) >= interval {
 					if n, err := m.importSubscriptionForSource(s); err != nil {
 						slog.Warn("订阅自动拉取失败", "url", s.URL, "error", err)
 					} else {
+						lastPull[s.URL] = time.Now()
 						slog.Info("订阅自动拉取完成", "url", s.URL, "imported", n)
 					}
 				}
+				// 该源下次到期时间（首次未拉成功也按现在+间隔计，避免失败后 30s 忙转）
+				due := last.Add(interval)
+				if !ok {
+					due = now.Add(interval)
+				}
+				if due.Before(next) {
+					next = due
+				}
 			}
-			_ = next
-			_ = now
-			wait := time.Duration(shortest) * time.Minute
+			// 清理已删除订阅的记录
+			for u := range lastPull {
+				found := false
+				for _, s := range list {
+					if s.URL == u {
+						found = true
+						break
+					}
+				}
+				if !found {
+					delete(lastPull, u)
+				}
+			}
+			wait := time.Until(next)
 			if wait < 30*time.Second {
 				wait = 30 * time.Second
+			}
+			if wait > time.Hour {
+				wait = time.Hour
 			}
 			<-time.After(wait)
 		}
