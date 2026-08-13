@@ -105,6 +105,10 @@ func loginHandler(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		sessionsMu.Lock()
+		// 会话容量上限：防止无界增长（管理面板会话；超限整体重置，重新登录即可）
+		if len(sessions) >= maxSessions {
+			sessions = map[string]struct{}{}
+		}
 		sessions[token] = struct{}{}
 		sessionsMu.Unlock()
 		http.SetCookie(w, &http.Cookie{Name: "session", Value: token, Path: "/", HttpOnly: true})
