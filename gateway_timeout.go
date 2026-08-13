@@ -105,14 +105,20 @@ func CallStatusText(rec CallRecord) string {
 }
 
 type EventLog struct {
-	mu         sync.Mutex
-	maxRecords int
-	records    []CallRecord
-	path       string // 非空时同步落盘 JSONL
+	mu           sync.Mutex
+	maxRecords   int
+	records      []CallRecord
+	path         string // 非空时同步落盘 JSONL
+	bytesWritten int64  // 当前落盘文件累计写入字节（触发轮转用）
+	maxBytes     int64  // 落盘文件轮转阈值（默认 callLogMaxBytes）
 }
 
+const (
+	callLogMaxBytes = 64 << 20 // 落盘文件 64MB 轮转一次（保留一份 .1 历史）
+)
+
 func NewEventLog(maxRecords int) *EventLog {
-	return &EventLog{maxRecords: maxRecords}
+	return &EventLog{maxRecords: maxRecords, maxBytes: callLogMaxBytes}
 }
 
 // SetPath 启用 JSONL 落盘（路径的父目录需存在）
@@ -136,13 +142,21 @@ func (l *EventLog) Append(rec CallRecord) error {
 		if err != nil {
 			return err
 		}
+		// 轮转：落盘文件超过上限时把当前文件改名为 .1（覆盖旧 .1），重新写新文件。
+		if l.bytesWritten > l.maxBytes {
+			if err := os.Rename(l.path, l.path+".1"); err == nil {
+				l.bytesWritten = 0
+			}
+		}
 		f, err := os.OpenFile(l.path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
 		if err != nil {
 			return err
 		}
-		defer f.Close()
-		if _, err := f.Write(append(b, '\n')); err != nil {
-			return err
+		n, werr := f.Write(append(b, '\n'))
+		f.Close()
+		l.bytesWritten += int64(n)
+		if werr != nil {
+			return werr
 		}
 	}
 	return nil
@@ -316,9 +330,9 @@ func setTimeoutConfigFromApp(cfg AppConfig) {
 
 // resumeStreamResult 描述一次流式转发的最终结果
 type resumeStreamResult struct {
-	OK         bool   // 是否成功完成（读到 [DONE] 或 EOF）
-	Switched   bool   // 是否发生过节点切换
-	PromptTok  int64  // 最终 usage
+	OK         bool  // 是否成功完成（读到 [DONE] 或 EOF）
+	Switched   bool  // 是否发生过节点切换
+	PromptTok  int64 // 最终 usage
 	Completion int64
 	ErrMsg     string
 	DoneAt     time.Time
@@ -468,9 +482,12 @@ func streamWithResume(w http.ResponseWriter, r *http.Request, upstreamBody []byt
 					continue
 				}
 				dataStr := line[6:]
-				// 累积内容（续写用）——从原始 JSON 提取
+				// 累积内容（续写用）+ 转发转换共用一次解析（避免每 chunk 双重 JSON 解析）
 				var obj map[string]any
-				if json.Unmarshal([]byte(dataStr), &obj) == nil {
+				if json.Unmarshal([]byte(dataStr), &obj) != nil {
+					obj = nil
+				}
+				if obj != nil {
 					if u, ok := obj["usage"].(map[string]any); ok {
 						lastUsage = u
 					}
@@ -492,10 +509,26 @@ func streamWithResume(w http.ResponseWriter, r *http.Request, upstreamBody []byt
 					gotFirst = true
 				}
 				// 转发：复用现有转换（清洗 delta/usage/cost 字段），保持协议兼容
-				out, chunkUsage := convertStreamChunkWithUsage(line, keepReasoning)
-				if chunkUsage != nil {
-					if tt, _ := chunkUsage["total_tokens"].(float64); tt > 0 {
-						lastUsage = chunkUsage
+				var out string
+				if obj != nil {
+					conv, chunkUsage := convertStreamChunkFromObj(obj, keepReasoning)
+					if conv != "" {
+						out = "data: " + conv
+					}
+					if chunkUsage != nil {
+						if tt, _ := chunkUsage["total_tokens"].(float64); tt > 0 {
+							lastUsage = chunkUsage
+						}
+					}
+				}
+				if out == "" {
+					// 解析失败回退原始转换（保持与历史一致的转发行为）
+					fallback, chunkUsage := convertStreamChunkWithUsage(line, keepReasoning)
+					out = fallback
+					if chunkUsage != nil {
+						if tt, _ := chunkUsage["total_tokens"].(float64); tt > 0 {
+							lastUsage = chunkUsage
+						}
 					}
 				}
 				sseDebugf("[%s] FWD>> %q", reqID, out)
