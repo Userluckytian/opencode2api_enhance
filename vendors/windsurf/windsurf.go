@@ -387,11 +387,25 @@ func (v *Vendor) SetPoolUsage(email string, daily, weekly float64) {
 	v.pool.updateUsage(email, daily, weekly)
 }
 
+// preUsageThrottle 用量刷新节流：同一账号 60s 内最多刷新一次，
+// 避免每个成功请求都打一次外部 GetUserStatus（后台 goroutine + 外部请求去重）。
+var preUsageThrottle = struct {
+	sync.Mutex
+	last map[string]time.Time
+}{last: map[string]time.Time{}}
+
 func (v *Vendor) preUsageRefresh(email string) {
 	token := v.pool.tokenOf(email)
 	if token == "" {
 		return
 	}
+	preUsageThrottle.Lock()
+	if t, ok := preUsageThrottle.last[email]; ok && time.Since(t) < 60*time.Second {
+		preUsageThrottle.Unlock()
+		return
+	}
+	preUsageThrottle.last[email] = time.Now()
+	preUsageThrottle.Unlock()
 	go func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
