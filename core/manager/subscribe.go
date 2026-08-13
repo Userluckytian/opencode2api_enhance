@@ -27,26 +27,27 @@ import (
 // SubscribeNode 订阅节点（轻量结构，可落为实例；raw 保留原始链接）。
 // JSON 字段与 Rust SubscribeNode（serde snake_case）一致。
 type SubscribeNode struct {
-	Name              string `json:"name"`
-	Server            string `json:"server"`
-	Port              uint16 `json:"port"`
-	NodeType          string `json:"node_type"`
-	Password          string `json:"password,omitempty"`
-	UUID              string `json:"uuid,omitempty"`
-	Cipher            string `json:"cipher,omitempty"`
-	SNI               string `json:"sni,omitempty"`
-	Network           string `json:"network,omitempty"`
-	WsPath            string `json:"ws_path,omitempty"`
-	Flow              string `json:"flow,omitempty"`
-	TLS               bool   `json:"tls"`
-	RealityPbk        string `json:"reality_pbk,omitempty"`  // VLESS REALITY 公钥（pbk）
-	RealitySid        string `json:"reality_sid,omitempty"`  // VLESS REALITY short-id（sid）
-	ClientFingerprint string `json:"client_fingerprint,omitempty"` // TLS 指纹（fp，缺省 chrome）
-	Obfs              string `json:"obfs,omitempty"`         // hysteria2 Salamander 混淆类型
-	ObfsPassword      string `json:"obfs_password,omitempty"`
-	SkipCertVerify    bool   `json:"skip_cert_verify,omitempty"`
-	Group             string `json:"group,omitempty"`        // 订阅来源分组名
-	Raw               string `json:"raw"`
+	Name              string            `json:"name"`
+	Server            string            `json:"server"`
+	Port              uint16            `json:"port"`
+	NodeType          string            `json:"node_type"`
+	Password          string            `json:"password,omitempty"`
+	UUID              string            `json:"uuid,omitempty"`
+	Cipher            string            `json:"cipher,omitempty"`
+	SNI               string            `json:"sni,omitempty"`
+	Network           string            `json:"network,omitempty"`
+	WsPath            string            `json:"ws_path,omitempty"`
+	WsHeaders         map[string]string `json:"ws_headers,omitempty"`
+	Flow              string            `json:"flow,omitempty"`
+	TLS               bool              `json:"tls"`
+	RealityPbk        string            `json:"reality_pbk,omitempty"`        // VLESS REALITY 公钥（pbk）
+	RealitySid        string            `json:"reality_sid,omitempty"`        // VLESS REALITY short-id（sid）
+	ClientFingerprint string            `json:"client_fingerprint,omitempty"` // TLS 指纹（fp，缺省 chrome）
+	Obfs              string            `json:"obfs,omitempty"`               // hysteria2 Salamander 混淆类型
+	ObfsPassword      string            `json:"obfs_password,omitempty"`
+	SkipCertVerify    bool              `json:"skip_cert_verify,omitempty"`
+	Group             string            `json:"group,omitempty"` // 订阅来源分组名
+	Raw               string            `json:"raw"`
 }
 
 // SubscriptionMeta 订阅元信息（来自 HTTP 响应头，clash-verge-rev 同款解析）。
@@ -126,7 +127,7 @@ func parseSubscriptionHeaders(h http.Header) SubscriptionMeta {
 	return meta
 }
 
-// parseContentDispositionName 解析 Content-Disposition 文件名：`filename*=UTF-8''%E5%AD%90...` 优先，
+// parseContentDispositionName 解析 Content-Disposition 文件名：`filename*=UTF-8”%E5%AD%90...` 优先，
 // 退化到 `filename=`。
 func parseContentDispositionName(raw string) string {
 	for _, part := range strings.Split(raw, ";") {
@@ -266,6 +267,7 @@ func subscribeFromClash(n ClashNode) SubscribeNode {
 		SNI:               sni,
 		Network:           n.Network,
 		WsPath:            n.WsPath,
+		WsHeaders:         n.WSHeaders,
 		Flow:              n.Flow,
 		TLS:               tls,
 		RealityPbk:        n.RealityPublicKey,
@@ -592,10 +594,10 @@ func parseVless(rest string) (SubscribeNode, error) {
 	}
 	security := params["security"]
 	path := params["path"]
-	if path == "" {
-		if h := params["host"]; h != "" && !strings.HasPrefix(h, ".") {
-			path = h
-		}
+	// host 参数是 ws/http Host 头（CDN 前置节点必须带上，否则 Cloudflare 403），不是 path。
+	var hdrs map[string]string
+	if h := params["host"]; h != "" && !strings.HasPrefix(h, ".") {
+		hdrs = map[string]string{"Host": h}
 	}
 	nname := name
 	if nname == "" {
@@ -614,6 +616,7 @@ func parseVless(rest string) (SubscribeNode, error) {
 		SNI:               params["sni"],
 		Network:           network,
 		WsPath:            path,
+		WsHeaders:         hdrs,
 		Flow:              params["flow"],
 		TLS:               security == "tls" || security == "reality",
 		RealityPbk:        params["pbk"], // REALITY 公钥（缺失会导致 TLS 握手失败）
@@ -822,7 +825,7 @@ func parseWireguard(rest string) (SubscribeNode, error) {
 		Server:   server,
 		Port:     port,
 		NodeType: "wireguard",
-		Password: params["private_key"], // 客户端私钥
+		Password: params["private_key"],               // 客户端私钥
 		Cipher:   strings.SplitN(userinfo, "?", 2)[0], // 对端公钥（userinfo 部分）
 		TLS:      true,
 		Raw:      "wg://" + rest,
@@ -1070,6 +1073,7 @@ func toClashNode(n SubscribeNode) ClashNode {
 		SkipCertVerify:    &skip,
 		Network:           n.Network,
 		WsPath:            n.WsPath,
+		WSHeaders:         n.WsHeaders,
 		Flow:              n.Flow,
 		RealityPublicKey:  n.RealityPbk,
 		RealityShortID:    n.RealitySid,
