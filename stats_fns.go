@@ -48,7 +48,9 @@ func recordTokenUsage(model string, promptTokens, completionTokens, totalTokens 
 	ms.TotalTokens += totalTokens
 	tokenStatsMu.Unlock()
 	recordNodeUsage(proxyAddr, promptTokens, completionTokens, totalTokens)
-	go saveTokenStats()
+	// 落盘改为后台合并（见 stats.go startStatsFlusher），不再每请求 spawn goroutine。
+	markTokenStatsDirty()
+	startStatsFlusher()
 }
 
 // ======================== Thinking/Reasoning 判断 ========================
