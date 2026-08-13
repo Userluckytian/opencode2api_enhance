@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"log/slog"
+	"net/http"
 	"os"
 	"sync/atomic"
 	"time"
@@ -86,6 +87,10 @@ func applyConfig(cfg AppConfig) {
 		socks5HealthMu.Lock()
 		socks5Health = map[string]socks5HealthState{}
 		socks5HealthMu.Unlock()
+		// 代理列表变化 → 清空按地址缓存的客户端（连接池随旧配置作废）
+		proxyClientMu.Lock()
+		proxyClients = map[string]*http.Client{}
+		proxyClientMu.Unlock()
 	}
 
 }
@@ -108,12 +113,10 @@ func getSocks5ProxyCount() int {
 	return len(socks5Proxies)
 }
 
-// maxRouteRetries 返回同模型路由重试上限：多代理时按代理数扩展，否则沿用上游重试上限。
+// maxRouteRetries 返回同模型路由重试上限。
+// 历史实现会随代理池规模线性放大（proxyCount>3 时返回 proxyCount），
+// 上游故障时单请求可串行打上游数十次，形成重试风暴；现收敛为固定上限。
 func maxRouteRetries() int {
-	proxyCount := getSocks5ProxyCount()
-	if proxyCount > maxUpstreamRetries {
-		return proxyCount
-	}
 	return maxUpstreamRetries
 }
 
@@ -121,7 +124,8 @@ func maxRouteRetries() int {
 // process, because restarting a live HTTP server drops active SSE streams.
 func startConfigWatcher(path string) {
 	go func() {
-		ticker := time.NewTicker(1 * time.Second)
+		// 1s→3s：配置热加载属低频运维动作，3s 内生效足够；降低每进程每秒一次的文件读。
+		ticker := time.NewTicker(3 * time.Second)
 		defer ticker.Stop()
 		lastData, _ := os.ReadFile(path)
 		for range ticker.C {
