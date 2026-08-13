@@ -246,7 +246,8 @@ func cleanStreamDelta(delta map[string]any, keepReasoning bool) {
 	}
 }
 
-// convertStreamChunkWithUsage 转换流式 chunk 并同时提取 usage，避免二次解析
+// convertStreamChunkWithUsage 转换流式 chunk 并同时提取 usage。
+// 由 map 版实现承载，保持历史签名（测试/其它调用方不变）。
 func convertStreamChunkWithUsage(line string, keepReasoning bool) (string, map[string]any) {
 	trimmed := strings.TrimSpace(line)
 	if trimmed == "data: [DONE]" || trimmed == "[DONE]" {
@@ -260,7 +261,16 @@ func convertStreamChunkWithUsage(line string, keepReasoning bool) (string, map[s
 	if err := json.Unmarshal([]byte(data), &raw); err != nil {
 		return line, nil
 	}
+	out, usage := convertStreamChunkFromObj(raw, keepReasoning)
+	if out == "" {
+		return line, usage
+	}
+	return "data: " + out, usage
+}
 
+// convertStreamChunkFromObj 从已解析的 chunk map 转换并提取 usage（避免重复 JSON 解析）。
+// 返回空字符串表示调用方应回退原始行。
+func convertStreamChunkFromObj(raw map[string]any, keepReasoning bool) (string, map[string]any) {
 	// 提取 usage
 	var usage map[string]any
 	if u, ok := raw["usage"].(map[string]any); ok {
@@ -274,9 +284,9 @@ func convertStreamChunkWithUsage(line string, keepReasoning bool) (string, map[s
 		delete(raw, "cost")
 		converted, err := json.Marshal(raw)
 		if err != nil {
-			return line, usage
+			return "", usage
 		}
-		return "data: " + string(converted), usage
+		return string(converted), usage
 	}
 	for i, c := range choices {
 		choice, ok := c.(map[string]any)
@@ -312,9 +322,9 @@ func convertStreamChunkWithUsage(line string, keepReasoning bool) (string, map[s
 	delete(raw, "cost")
 	converted, err := json.Marshal(raw)
 	if err != nil {
-		return line, usage
+		return "", usage
 	}
-	return "data: " + string(converted), usage
+	return string(converted), usage
 }
 
 func convertResponse(data []byte, keepReasoning bool) ([]byte, error) {
@@ -323,6 +333,12 @@ func convertResponse(data []byte, keepReasoning bool) ([]byte, error) {
 		slog.Warn("convertResponse unmarshal failed", "error", err)
 		return data, nil
 	}
+	return convertResponseFromObj(raw, keepReasoning)
+}
+
+// convertResponseFromObj 从已解析的响应 map 转换（与 convertResponse 等价，
+// 供调用方在已解析一次的场景复用，避免重复 JSON 解析）。
+func convertResponseFromObj(raw map[string]any, keepReasoning bool) ([]byte, error) {
 	if choices, ok := raw["choices"].([]any); ok {
 		for i, c := range choices {
 			if choice, ok := c.(map[string]any); ok {
