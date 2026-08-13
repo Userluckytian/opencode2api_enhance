@@ -68,6 +68,34 @@ func modeName(mode AuthRouteMode) string {
 	}
 }
 
+// 目录同步指纹：modelsCache/goModelsCache 只在 syncModelsFromAggregator 整体替换时变化。
+// 缓存上一次已同步的指纹，目录未变化时跳过重建（本函数每个 chat 请求都会调用）。
+var (
+	vendorSyncMu   sync.Mutex
+	vendorSyncFp   uint64
+	vendorSyncInit bool
+)
+
+func catalogFingerprint(zen, goM []ModelInfo) uint64 {
+	// 轻量指纹：数量 + 首尾模型 ID 哈希（目录约几十条，足够判定"是否变化"）。
+	h := uint64(5381)
+	mix := func(s string) {
+		for i := 0; i < len(s); i++ {
+			h = h*33 + uint64(s[i])
+		}
+	}
+	h = h*33 + uint64(len(zen)) + uint64(len(goM))<<8
+	if len(zen) > 0 {
+		mix(zen[0].ID)
+		mix(zen[len(zen)-1].ID)
+	}
+	if len(goM) > 0 {
+		mix(goM[0].ID)
+		mix(goM[len(goM)-1].ID)
+	}
+	return h
+}
+
 // syncVendorState 把 main 侧的模型目录缓存推给 opencode 厂商（SetCatalog），
 // 保证 /v1/models 展示与路由的 go 端点判定一致。
 // 会话由厂商自身持有（vendors/opencode 内 lazy 初始化 / 测试经 SetSession 注入），
@@ -76,6 +104,15 @@ func syncVendorState(v *opencode.Vendor) {
 	modelMu.RLock()
 	zen, goM := modelsCache, goModelsCache
 	modelMu.RUnlock()
+	fp := catalogFingerprint(zen, goM)
+	vendorSyncMu.Lock()
+	if vendorSyncInit && fp == vendorSyncFp {
+		vendorSyncMu.Unlock()
+		return // 目录未变化，跳过重建与拷贝
+	}
+	vendorSyncFp = fp
+	vendorSyncInit = true
+	vendorSyncMu.Unlock()
 	all := make([]contract.Model, 0, len(zen)+len(goM))
 	for _, m := range zen {
 		all = append(all, contract.Model{ID: m.ID, Provider: "opencode", Free: isFreeModel(m.ID), Meta: map[string]string{"surface": "zen"}})
