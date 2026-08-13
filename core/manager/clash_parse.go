@@ -82,12 +82,34 @@ func nodeFromYAML(n *yamlNode) ClashNode {
 	c.Port = uint16(n.intVal("port"))
 	if ws := n.mapOf("ws-opts"); ws != nil {
 		c.WsPath = ws.string("path")
+		c.WSHeaders = nodeHeaders(ws.mapOf("headers"))
 	}
 	if ro := n.mapOf("reality-opts"); ro != nil {
 		c.RealityPublicKey = ro.string("public-key")
 		c.RealityShortID = ro.string("short-id")
 	}
+	// 兼容扁平写法 ws-headers: {Host: ...}（老式 clash 配置）。
+	if c.WSHeaders == nil {
+		c.WSHeaders = nodeHeaders(n.mapOf("ws-headers"))
+	}
 	return c
+}
+
+// nodeHeaders 把 YAML headers map 转成 map[string]string；非 map/空则返回 nil。
+func nodeHeaders(h *yamlNode) map[string]string {
+	if h == nil || h.kind != kindMap {
+		return nil
+	}
+	hm := make(map[string]string, len(h.vs))
+	for k, v := range h.vs {
+		if v.kind == kindScalar {
+			hm[k] = v.scalar
+		}
+	}
+	if len(hm) == 0 {
+		return nil
+	}
+	return hm
 }
 
 // clashProfileDir 找到 Clash Verge 的 profiles 目录（Windows only；其它平台返回空）。
@@ -281,6 +303,21 @@ func nodeFromJSONMap(mp map[string]any) (ClashNode, bool) {
 	}
 	if p, ok := mp["port"].(float64); ok {
 		n.Port = uint16(p)
+	}
+	// 外部 API（mihomo /configs）同样把 ws-opts 作为嵌套对象返回，需要解析 path 与 Host 头。
+	if ws, ok := mp["ws-opts"].(map[string]any); ok {
+		n.WsPath, _ = ws["path"].(string)
+		if hdrs, ok := ws["headers"].(map[string]any); ok {
+			hm := map[string]string{}
+			for k, v := range hdrs {
+				if s, ok := v.(string); ok {
+					hm[k] = s
+				}
+			}
+			if len(hm) > 0 {
+				n.WSHeaders = hm
+			}
+		}
 	}
 	if n.Name == "" || n.Server == "" || n.Port == 0 || n.NodeType == "" {
 		return n, false
