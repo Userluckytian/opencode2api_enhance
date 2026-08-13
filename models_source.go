@@ -4,6 +4,7 @@ import (
 	"context"
 	"log/slog"
 	"net/http"
+	"sync"
 	"time"
 
 	"github.com/6Kmfi6HP/opencode2api/core/aggregator"
@@ -190,11 +191,35 @@ func appendOtherFreeModels(base []ModelInfo, agg *aggregator.Aggregator) []Model
 	return out
 }
 
+// 目录刷新防惊群：上游故障时 /v1/models、admin reload、定时 ticker 会同时触发拉取，
+// 每个调用都打外部请求会放大成请求风暴。用一个 in-flight 互斥 + 最小间隔收敛：
+// 同一时刻只允许一个刷新在途，刷新完成后 10s 内的并发调用直接跳过（读取已有缓存）。
+var (
+	catalogRefreshMu   sync.Mutex
+	catalogRefreshing  bool
+	catalogLastRefresh time.Time
+)
+
 // refreshModelCatalog 拉取各厂商目录并写入既有缓存（同步，启动与定时共用）。
 func refreshModelCatalog() {
 	if globalAgg == nil {
 		return
 	}
+	catalogRefreshMu.Lock()
+	if catalogRefreshing || time.Since(catalogLastRefresh) < 10*time.Second {
+		catalogRefreshMu.Unlock()
+		return
+	}
+	catalogRefreshing = true
+	catalogRefreshMu.Unlock()
+
+	defer func() {
+		catalogRefreshMu.Lock()
+		catalogRefreshing = false
+		catalogLastRefresh = time.Now()
+		catalogRefreshMu.Unlock()
+	}()
+
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 	if err := globalAgg.Refresh(ctx); err != nil {
