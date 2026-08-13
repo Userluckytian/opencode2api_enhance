@@ -14,6 +14,9 @@ import (
 	"github.com/6Kmfi6HP/opencode2api/core/protocol"
 )
 
+// maxStoredResponses storedResponses 容量上限（条）；超出后整体重置，防止无界增长。
+const maxStoredResponses = 2000
+
 func responsesInputToMessages(input any, instructions string) []Message {
 	var messages []Message
 	if instructions != "" {
@@ -432,6 +435,10 @@ func storeResponseState(response map[string]any, req ResponsesAPIRequest) {
 	}
 	output, _ := response["output"].([]any)
 	storedResponsesMu.Lock()
+	// 容量上限：每条含完整 output/tools 深拷贝，无上限会随请求量无限增长。
+	if len(storedResponses) >= maxStoredResponses {
+		storedResponses = map[string]StoredResponseState{}
+	}
 	storedResponses[responseID] = StoredResponseState{
 		Model:        req.Model,
 		Instructions: req.Instructions,
