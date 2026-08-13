@@ -111,4 +111,6 @@ var (
 	adminPassword string
 	sessions      = map[string]struct{}{}
 	sessionsMu    sync.Mutex
+	// maxSessions 管理面板会话容量上限；超限整体重置，防止无界增长。
+	maxSessions = 10000
 )
