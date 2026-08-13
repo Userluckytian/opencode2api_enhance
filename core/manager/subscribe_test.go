@@ -19,13 +19,13 @@ func TestIsInfoPseudoNode(t *testing.T) {
 		{"官网：https://t.me/example", true},
 		{"更新时间：2026-08-01", true},
 		{"剩余流量：100GB", true},
-		{"[anytls]官网：xuelian.pro", true},            // 剥离协议标签后仍命中
+		{"[anytls]官网：xuelian.pro", true}, // 剥离协议标签后仍命中
 		{"电报频道：@abc_news", true},
 		{"节点数：12", true},
-		{"HK-01", false},                              // 常规节点不误伤
-		{"余量：100GB", false},                         // 前缀不在列表
-		{"官网 xuelian.pro", false},                   // 无全角冒号
-		{"[anytls]US-Best", false},                    // 剥离标签后是正常名
+		{"HK-01", false},           // 常规节点不误伤
+		{"余量：100GB", false},        // 前缀不在列表
+		{"官网 xuelian.pro", false},  // 无全角冒号
+		{"[anytls]US-Best", false}, // 剥离标签后是正常名
 	}
 	for _, c := range cases {
 		if got := isInfoPseudoNode(c.name); got != c.want {
@@ -324,5 +324,23 @@ func TestSubscribeHandlersHTTP(t *testing.T) {
 	}
 	if !found {
 		t.Errorf("subscription node not in ListNodesWithGroup: %+v", nodes)
+	}
+}
+
+func TestParseVlessHostHeader(t *testing.T) {
+	n, err := parseVless("uuid-123@cdn.example.com:443?security=tls&sni=cdn.example.com&type=ws&path=%2F&host=cdn.example.com#CDN")
+	if err != nil {
+		t.Fatalf("parseVless: %v", err)
+	}
+	if n.WsHeaders == nil || n.WsHeaders["Host"] != "cdn.example.com" {
+		t.Fatalf("WsHeaders = %+v, want Host=cdn.example.com", n.WsHeaders)
+	}
+	// host 参数不应再被当作 path 兜底
+	if n.WsPath == "cdn.example.com" {
+		t.Fatalf("host 被错误当作 path: %q", n.WsPath)
+	}
+	cn := toClashNode(n)
+	if cn.WSHeaders == nil || cn.WSHeaders["Host"] != "cdn.example.com" {
+		t.Fatalf("toClashNode WSHeaders = %+v", cn.WSHeaders)
 	}
 }
