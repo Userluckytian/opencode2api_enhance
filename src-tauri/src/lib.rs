@@ -85,6 +85,17 @@ fn pick_free_port(start: u16, budget: u16) -> u16 {
 }
 
 pub fn run() {
+    // --headless：无桌面（GTK/WinUI）模式，仅释放内嵌组件并拉起 core 管理器，
+    // 供 SSH/服务器场景使用（管理界面走浏览器 http://127.0.0.1:<port>/）。
+    // --headless 之后的参数原样透传给 core（如 -port/-listen，Go flag 后者覆盖前者）。
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    let headless = args.iter().any(|a| a == "--headless");
+    let core_extra: Vec<String> = args
+        .iter()
+        .filter(|a| a.as_str() != "--headless")
+        .cloned()
+        .collect();
+
     // 调试构建默认隔离数据目录：与正式版（%APPDATA%\opencode2api-manager）
     // 分开，避免实例池/配置/runtime 互相干扰。可用 OPCODE2API_DATA_DIR 显式覆盖。
     // 注意：环境变量存在但为空串时视为未设置（否则会静默回落共享生产目录）。
@@ -166,13 +177,22 @@ pub fn run() {
     }
     // 管理器端口：按环境槽位（40000+ 段），槽内避让扫描兜底。
     let mgr_port = manager_port(env_kind);
-    let (core_child, core_job) = match spawn_core_manager(&data_dir, mgr_port, env_kind) {
+    // 透传参数里的 -port 会覆盖默认槽位端口（Go flag 后者覆盖前者），
+    // core 实际监听值 = 覆盖值（若有）否则 mgr_port——健康检查与地址打印都须与之对齐。
+    let effective_port = override_port(&core_extra).unwrap_or(mgr_port);
+    let (core_child, core_job) = match spawn_core_manager(&data_dir, effective_port, env_kind, &core_extra) {
         Ok((child, job)) => (Some(child), job),
         Err(e) => {
             eprintln!("启动 core 管理器失败: {e}");
             (None, None)
         }
     };
+
+    // headless：不构建 Tauri 窗口，直接阻塞等待 core（退出时清理网关/实例）
+    if headless {
+        run_headless(effective_port, core_child, core_job, manager, gateway_manager);
+        return;
+    }
 
     tauri::Builder::default()
         .manage(AppState {
@@ -191,6 +211,18 @@ pub fn run() {
         ])
 .setup(move |app| {
             use tauri::Manager;
+
+            // Linux/安装版：资源 dist 位于只读资源目录（deb: /usr/lib/opencode2api/bin/dist），
+            // binary_dir 回退到配置目录时把 dist 复制过去，保证浏览器访问 core WebUI 可用。
+            let (_, binary_dir, _) = commands::manager_paths();
+            if let Ok(res) = app.path().resource_dir() {
+                let src = res.join("bin").join("dist");
+                let dst = binary_dir.join("dist");
+                if src.join("index.html").exists() && !dst.join("index.html").exists() {
+                    let _ = std::fs::create_dir_all(&dst);
+                    let _ = copy_tree(&src, &dst);
+                }
+            }
 
             // 托盘菜单：右键显示「显示主窗口 / 退出」
             let show_i =
@@ -254,7 +286,7 @@ button: tauri::tray::MouseButton::Left,
 
             // 窗口承载 core 管理器 SPA（core 已就绪；端口 = 启动时选定的 mgr_port）
             if let Some(w) = app.get_webview_window("main") {
-                let url = format!("http://127.0.0.1:{mgr_port}/");
+                let url = format!("http://127.0.0.1:{effective_port}/");
                 let _ = w.navigate(tauri::Url::parse(&url).expect("core manager url"));
             }
             Ok(())
@@ -288,24 +320,143 @@ button: tauri::tray::MouseButton::Left,
         });
 }
 
-/// 拉起 Go core 管理器（bin/opencode2api.exe -port <port> ...），等待 /health 就绪。
+/// 从透传参数中解析用户显式指定的 -port（Go flag 后者覆盖前者，core 实际监听此值）。
+/// 支持 `-port 28080` 与 `-port=28080`（及 --port 变体）；未指定/非法时返回 None（回落槽位端口）。
+fn override_port(extra_args: &[String]) -> Option<u16> {
+    let mut it = extra_args.iter().peekable();
+    while let Some(a) = it.next() {
+        if let Some(v) = a.strip_prefix("-port=").or_else(|| a.strip_prefix("--port=")) {
+            if let Ok(p) = v.trim().parse::<u16>() {
+                return Some(p);
+            }
+            continue;
+        }
+        if a == "-port" || a == "--port" {
+            if let Some(v) = it.peek() {
+                if let Ok(p) = v.trim().parse::<u16>() {
+                    let _ = it.next();
+                    return Some(p);
+                }
+            }
+        }
+    }
+    None
+}
+
+/// 递归复制目录树（用于把只读资源目录的 dist 复制到可写 binary_dir）。
+fn copy_tree(src: &std::path::Path, dst: &std::path::Path) -> std::io::Result<()> {
+    for entry in std::fs::read_dir(src)? {
+        let entry = entry?;
+        let from = entry.path();
+        let to = dst.join(entry.file_name());
+        if from.is_dir() {
+            std::fs::create_dir_all(&to)?;
+            copy_tree(&from, &to)?;
+        } else {
+            std::fs::copy(&from, &to)?;
+        }
+    }
+    Ok(())
+}
+
+/// headless 模式主循环：无 GUI（SSH/服务器场景），释放组件 → 拉起 core →
+/// 复制前端资源（如需）→ 打印管理地址 → 阻塞等待 core 退出 → 清理网关/实例。
+fn run_headless(
+    mgr_port: u16,
+    core_child: Option<std::process::Child>,
+    core_job: Option<job::JobObject>,
+    manager: Arc<Mutex<instance::InstanceManager>>,
+    gateway: Arc<Mutex<gateway::GatewayManager>>,
+) {
+    // Linux/安装版：资源 dist 位于只读资源目录（deb: /usr/lib/opencode2api/bin/dist），
+    // binary_dir 回退到配置目录时把 dist 复制过去，保证浏览器访问 core WebUI 可用。
+    let (_, binary_dir, _) = commands::manager_paths();
+    let dist_dst = binary_dir.join("dist");
+    if !dist_dst.join("index.html").exists() {
+        if let Ok(exe) = std::env::current_exe() {
+            let exe_dir = exe.parent().unwrap_or(std::path::Path::new("/"));
+            // 候选源：exe 旁 bin/dist（便携/开发）或 ../lib/opencode2api/bin/dist（deb）
+            let candidates = [
+                exe_dir.join("bin").join("dist"),
+                exe_dir
+                    .parent()
+                    .unwrap_or(std::path::Path::new("/"))
+                    .join("lib")
+                    .join("opencode2api")
+                    .join("bin")
+                    .join("dist"),
+            ];
+            for src in candidates {
+                if src.join("index.html").exists() {
+                    let _ = std::fs::create_dir_all(&dist_dst);
+                    if copy_tree(&src, &dist_dst).is_ok() {
+                        println!("[headless] 已复制前端资源到 {}", dist_dst.display());
+                    }
+                    break;
+                }
+            }
+        }
+    }
+
+    println!("[headless] 管理界面: http://127.0.0.1:{}/", mgr_port);
+    println!("[headless] 按 Ctrl+C 退出（core 随本进程退出而终止）");
+
+    let mut child = match core_child {
+        Some(c) => c,
+        None => {
+            eprintln!("[headless] core 管理器未能启动，退出");
+            return;
+        }
+    };
+    // 阻塞等待 core 退出。Windows 上 JobObject 保证壳退出时 core 及其子进程被终止；
+    // Linux 上壳退出后 core 继续运行（SSH 场景视为特性：服务不随终端断开而停止）。
+    let _ = child.wait();
+    drop(core_job);
+
+    // 清理：网关 + 运行中实例（对齐 GUI 退出行为，端口全部释放）
+    if let Ok(mut g) = gateway.lock() {
+        g.stop();
+    }
+    if let Ok(mut mgr) = manager.lock() {
+        let _ = mgr.load();
+        let names: Vec<String> = mgr
+            .list_instances()
+            .iter()
+            .filter(|i| {
+                i.pid.is_some()
+                    || i.singbox_pid.is_some()
+                    || i.status == instance::InstanceStatus::Running
+                    || i.status == instance::InstanceStatus::Starting
+            })
+            .map(|i| i.name.clone())
+            .collect();
+        for n in names {
+            let _ = mgr.stop_instance(&n);
+        }
+    }
+    println!("[headless] core 已退出，清理完成");
+}
+
+/// 拉起 Go core 管理器（bin/opencode2api -port <port> ...），等待 /health 就绪。
 /// 数据目录经 OPCODE2API_DATA_DIR 注入（setup 已设置）。
 /// 网关/实例/探针端口按环境槽位注入 env（用户显式 OPCODE2API_*_PORT 优先）。
+/// extra_args：追加到 core 命令行末尾（--headless 透传；Go flag 重复参数后者覆盖）。
 fn spawn_core_manager(
     data_dir: &std::path::Path,
     port: u16,
     env_kind: EnvKind,
+    extra_args: &[String],
 ) -> std::io::Result<(std::process::Child, Option<job::JobObject>)> {
     use std::io::{Read, Write};
     use std::process::Command;
     use std::time::Duration;
 
     let (_, binary_dir, _) = commands::manager_paths();
-    let exe = binary_dir.join("opencode2api.exe");
+    let exe = instance::resolve_platform_bin(&binary_dir, "opencode2api");
     if !exe.exists() {
         return Err(std::io::Error::new(
             std::io::ErrorKind::NotFound,
-            "bin/opencode2api.exe 不存在（未释放内嵌组件）",
+            "bin/opencode2api 不存在（未释放内嵌组件）",
         ));
     }
     let cfg_path = data_dir.join("config.json");
@@ -344,6 +495,9 @@ fn spawn_core_manager(
     .arg(&cfg_path)
     .arg("-log-level")
     .arg("warn");
+    if !extra_args.is_empty() {
+        cmd.args(extra_args);
+    }
     // 隐藏 core 子进程的控制台窗口（与 instance.rs no_window 一致）
     #[cfg(windows)]
     {

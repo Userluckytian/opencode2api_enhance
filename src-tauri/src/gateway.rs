@@ -129,16 +129,10 @@ impl GatewayManager {
         fs::create_dir_all(self.gateway_dir()).context("创建统一网关目录失败")?;
         let stdout = fs::File::create(self.gateway_dir().join("opencode2api.out.log"))?;
         let stderr = fs::File::create(self.gateway_dir().join("opencode2api.err.log"))?;
-        let exe = self.binary_dir.join("opencode2api.exe");
-        let exe = if exe.exists() {
-            exe
-        } else {
-            let fallback = self.binary_dir.join("opencode2api");
-            if !fallback.exists() {
-                anyhow::bail!("未找到统一网关代理程序: {}", self.binary_dir.display());
-            }
-            fallback
-        };
+let exe = crate::instance::resolve_platform_bin(&self.binary_dir, "opencode2api");
+        if !exe.exists() {
+            anyhow::bail!("未找到统一网关主进程: {}", self.binary_dir.display());
+        }
 
         // A 化（关键）：只传 A 的 main.go 支持的 flag。
         // B 版本传 -force-free/-free-usage-file 会导致 A 的 go 进程 os.Exit(2) 秒退。

@@ -52,7 +52,9 @@ UI 参照 Windsurf Account Manager 的浅色官网风格：无边框窗口 + 自
 
 ## Linux / Headless 部署
 
-- **Headless（无图形界面 / 服务器）**：同一 Go core 二进制以管理器方式运行即完整 Web 服务（`./opencode2api -port 40000 -password "change-me" -config config.json`），默认监听 `:<port>` 全接口、托管前端 `dist/`，纯浏览器完成全部管理；仅本机访问可加 `-listen 127.0.0.1`（管理 API 含启停实例等高权限操作，公网部署务必配合反向代理限制来源），见 [部署文档](docs/DEPLOYMENT.md)。
+- **无头模式（Headless）**：同一 Go core 二进制以管理器方式运行即完整 Web 服务（默认监听 `:<port>` 全接口、托管前端 `dist/`、纯浏览器管理），两种启动途径：
+  - **裸 core**：直接运行 `./opencode2api -port 40000 -password "change-me" -config config.json`（服务器 / Docker 场景；管理 API 含启停实例等高权限操作，仅本机访问加 `-listen 127.0.0.1`，公网部署务必配合反向代理限制来源），见 [部署文档](docs/DEPLOYMENT.md)。
+  - **桌面壳**：安装桌面版后 `opencode2api --headless [-port 40000] [-listen 127.0.0.1]`——壳释放内嵌组件并拉起 core，无窗口运行，适合 SSH / 无图形会话；退出自动清理网关与实例，见 [Linux 开发与构建指南](docx/LINUX-DEVELOPMENT.md)。
 - **桌面（Linux）**：安装 .deb / AppImage 即可；桌面模式内置本地 HTTP 服务，前端经它取数，行为与 Windows 版一致。
 - **Docker（服务器）**：仓库根目录 `docker compose up -d --build` 即起完整管理器（含七页前端与 sing-box 出口），管理面板 `http://127.0.0.1:40000`，见 [部署文档](docs/DEPLOYMENT.md)。
 - 数据目录与配置：`OPCODE2API_DATA_DIR` 隔离数据；`OPCODE2API_MANAGER_PORT` 覆盖管理端口；`config.json` 支持网关端口/密钥、订阅、日志过滤等配置项。
@@ -87,6 +89,15 @@ powershell -ExecutionPolicy Bypass -File scripts/prepare-portable.ps1
 ```
 
 自动完成：编译最新 Go core → Rust 壳（内嵌 core + sing-box）→ 组装 `portable-out/`（exe + WebView2Loader.dll + portable.txt + 前端 dist）→ 校验。生成的 portable 包走**独立端口槽位与数据目录**，与正式版零冲突，适合日常测试（详见 [测试指南](docs/TESTING.md)）。
+
+### Linux 构建（本地 / WSL）
+
+Linux 桌面产物（.deb）需在 Linux 环境构建（Windows 可用 WSL），核心两步：
+
+1. 交叉编译 Go core 与下载 sing-box（无扩展名，见下文「内嵌二进制」）：`GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -trimpath -ldflags "-s -w -X main.version=v1.5.1" -o bin/opencode2api .`，`./scripts/fetch-singbox.sh linux-amd64`
+2. WSL 内 `npx tauri build --bundles deb` 产出 `linux-out/opencode2api_<version>_amd64.deb`；Debian/Ubuntu 用 `sudo dpkg -i` 安装，`opencode2api --headless` 可无桌面运行
+
+细节（平台二进制解析 / 可写目录回退 / 前端资源复制 / 组件内嵌选择 / 构建与验证 / 常见问题）见 [docx/LINUX-DEVELOPMENT.md](docx/LINUX-DEVELOPMENT.md)。
 
 ### 正式产物（GitHub Actions）
 
@@ -172,4 +183,5 @@ vendors/                  # 厂商层（一厂商 = 一文件夹，新增供应�
   custom/                 # 自定义模型源（四协议 + 多 Key 池 + 目录缓存）
 bin/                      # 内嵌子程序源（opencode2api.exe / sing-box.exe）
 docs/                     # 部署/自定义模型/性能模式/TESTING/FAQ 等文档
+docx/                     # 平台开发专题文档（Linux 开发与构建指南等）
 ```

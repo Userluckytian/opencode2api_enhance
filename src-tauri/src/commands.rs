@@ -19,13 +19,34 @@ use std::thread;
 pub fn manager_paths() -> (PathBuf, PathBuf, PathBuf) {
     let config_dir = Config::config_dir();
     let instances_path = config_dir.join("instances.json");
-    let binary_dir = std::env::current_exe()
+    let exe_bin = std::env::current_exe()
         .ok()
         .and_then(|p| p.parent().map(|d| d.to_path_buf()))
         .unwrap_or_else(|| PathBuf::from("."))
         .join("bin");
+    // 安装版（deb /usr/bin、NSIS perMachine、macOS dmg）exe 所在目录只读：
+    // exe 旁 bin/ 不可写时回退到配置目录下的 bin/，保证内嵌组件（core/sing-box）
+    // 能正常释放（否则普通用户下释放失败，管理器/网关/实例全部不可用）。
+    let binary_dir = if writable_dir(&exe_bin) {
+        exe_bin
+    } else {
+        config_dir.join("bin")
+    };
     let runtime_dir = config_dir.join("runtime");
     (instances_path, binary_dir, runtime_dir)
+}
+
+/// 目录可写性探测：能创建目录、且能写入并删除探针文件视为可写。
+fn writable_dir(dir: &std::path::Path) -> bool {
+    if std::fs::create_dir_all(dir).is_err() {
+        return false;
+    }
+    let probe = dir.join(".write_probe");
+    if std::fs::write(&probe, b"").is_err() {
+        return false;
+    }
+    let _ = std::fs::remove_file(&probe);
+    true
 }
 
 pub fn create_manager() -> InstanceManager {
