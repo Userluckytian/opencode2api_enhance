@@ -1,7 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import clsx from 'clsx'
-import { invoke } from '@tauri-apps/api/core'
-import { Server, Layers, Radar, Settings, BarChart3, ScrollText, LogOut, Loader2, Plug } from 'lucide-react'
+import { Server, Layers, Radar, Settings, BarChart3, ScrollText, Plug } from 'lucide-react'
 import { api } from './lib/api'
 import { TitleBar } from './components/TitleBar'
 import TaskPanel from './components/TaskPanel'
@@ -53,9 +52,6 @@ export default function App() {
   const [toast, setToast] = useState<{ msg: string; ok: boolean } | null>(null)
   // V2: 全局任务悬浮栈（跨页面常驻，多任务并存堆叠）
   const [tasks, setTasks] = useState<TaskItem[]>([])
-  // D1：退出二次确认（退出并释放 / 退出不释放 / 取消）
-  const [exitOpen, setExitOpen] = useState(false)
-  const [exiting, setExiting] = useState(false)
 
   // 任务镜像 ref：供超时兜底 interval 离线判断（避免在 setTasks 更新器里做副作用）
   const tasksRef = useRef<TaskItem[]>([])
@@ -206,49 +202,7 @@ export default function App() {
     [removeTask, upsertTask],
   )
 
-  // 退出（不释放实例）：直接调用壳退出（实例留在后台继续运行）。
-  const doExitKeep = async () => {
-    setExitOpen(false)
-    try {
-      await invoke('quit_app')
-    } catch {
-      showToast('退出需要桌面版环境', false)
-    }
-  }
-
-  // 退出并释放：先按 4 并发释放全部实例（含独享与池成员），进度全局可见，完成后退出。
-  // 杂项: ref 级防重入——setExiting 是异步 state，连点两下会在生效前二次进入（并发释放同一批/重复 quit_app）
-  const exitGuard = useRef(false)
-  const doExitRelease = async () => {
-    if (exitGuard.current) return
-    exitGuard.current = true
-    setExitOpen(false)
-    setExiting(true)
-    try {
-      const ins = await api.listInstances()
-      const names = ins.map((i) => i.name)
-      if (names.length === 0) {
-        await invoke('quit_app')
-        return
-      }
-      upsertTask({ id: 'release', type: 'release', title: '释放实例', done: 0, total: names.length, busy: true })
-      const batchSize = 4
-      let done = 0
-      for (let i = 0; i < names.length; i += batchSize) {
-        const chunk = names.slice(i, i + batchSize)
-        await Promise.allSettled(chunk.map((n) => api.removeInstance(n)))
-        done += chunk.length
-        upsertTask({ id: 'release', type: 'release', title: '释放实例', done, total: names.length, busy: true })
-      }
-      upsertTask({ id: 'release', type: 'release', title: '释放实例', done: names.length, total: names.length, busy: false })
-      await invoke('quit_app')
-    } catch (e) {
-      setExiting(false)
-      showToast(String(e), false)
-    } finally {
-      exitGuard.current = false
-    }
-  }
+  // 退出入口已移除：设置页按钮删除，托盘菜单（Rust 侧）仍可退出
 
   return (
     <div className="h-full flex flex-col">
@@ -283,7 +237,7 @@ export default function App() {
           {tab === 'custom' && <CustomModelsPage toast={showToast} />}
           {tab === 'stats' && <StatsPage toast={showToast} />}
           {tab === 'logs' && <LogsPage toast={showToast} />}
-          {tab === 'settings' && <SettingsPage toast={showToast} onRequestExit={() => setExitOpen(true)} />}
+          {tab === 'settings' && <SettingsPage toast={showToast} />}
         </main>
       </div>
 
@@ -303,50 +257,6 @@ export default function App() {
       {/* V2: 全局任务悬浮栈（跨页面常驻；多任务并存纵向堆叠；✕ 仅隐藏该条，后台继续） */}
       {/* M10: 独立 memo 面板——App 其它状态（toast/tab/退出弹窗）变化不带动面板与页面重渲染 */}
       {tasks.length > 0 && <TaskPanel tasks={tasks} onDismiss={dismissTask} />}
-    {/* D1：退出二次确认弹窗 */}
-      {exitOpen && (
-        <div
-          className="fixed inset-0 z-50 flex items-center justify-center bg-zinc-900/40"
-          onClick={() => !exiting && setExitOpen(false)}
-        >
-          <div className="bg-white rounded-2xl shadow-xl w-[440px] p-6 space-y-4" onClick={(e) => e.stopPropagation()}>
-            <div className="text-[15px] font-semibold text-zinc-900">退出程序</div>
-            <p className="text-[13px] text-zinc-600 leading-relaxed">
-              退出前可以选择是否先释放全部实例（停止并删除，含独享与池成员）。
-              <br />
-              「退出不释放」会直接退出，实例进程留在后台继续运行。
-            </p>
-            <div className="space-y-2">
-              <button
-                type="button"
-                onClick={() => void doExitRelease()}
-                disabled={exiting}
-                className="w-full flex items-center gap-2 px-4 py-2.5 rounded-lg text-[13px] font-medium text-red-700 bg-red-50 hover:bg-red-100 disabled:opacity-50 transition-colors"
-              >
-                {exiting ? <Loader2 size={15} className="animate-spin" /> : <LogOut size={15} />}
-                {exiting ? '正在释放实例并退出…' : '退出并释放全部实例'}
-              </button>
-              <button
-                type="button"
-                onClick={() => void doExitKeep()}
-                disabled={exiting}
-                className="w-full flex items-center gap-2 px-4 py-2.5 rounded-lg text-[13px] font-medium text-zinc-700 bg-zinc-100 hover:bg-zinc-200 disabled:opacity-50 transition-colors"
-              >
-                <LogOut size={15} />
-                退出不释放（实例留在后台）
-              </button>
-            </div>
-            <button
-              type="button"
-              onClick={() => setExitOpen(false)}
-              disabled={exiting}
-              className="w-full px-4 py-2 rounded-lg text-[13px] text-zinc-600 bg-white border border-zinc-200 hover:bg-zinc-50 disabled:opacity-50 transition-colors"
-            >
-              取消
-            </button>
-          </div>
-        </div>
-      )}
     </div>
   )
 }

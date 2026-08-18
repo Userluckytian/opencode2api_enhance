@@ -1,16 +1,14 @@
 import { useEffect, useRef, useState } from 'react'
 import clsx from 'clsx'
-import { Loader2, Search, Trash2, LogOut } from 'lucide-react'
+import { Loader2, Search, Trash2 } from 'lucide-react'
 import { api, type OrphanProcess } from '../lib/api'
 import type { ConfigView, BinariesInfo } from '../lib/api'
 import { isDesktop } from '../lib/env'
 
 export default function SettingsPage({
   toast,
-  onRequestExit,
 }: {
   toast: (msg: string, ok?: boolean) => void
-  onRequestExit?: () => void
 }) {
   const [config, setConfig] = useState<ConfigView | null>(null)
   const [autostart, setAutostart] = useState<boolean>(false)
@@ -19,9 +17,6 @@ export default function SettingsPage({
   // Clash 外部控制表单
   const [clashUrl, setClashUrl] = useState('')
   const [clashToken, setClashToken] = useState('')
-
-  // 代理出口（E1）：上游代理绕过本机裸连 IP 被上游风控
-  const [upstreamProxy, setUpstreamProxy] = useState('')
 
   // 网关超时切换 / 节点前缀 已归位实例池页
   // 订阅自动拉取 已归位节点池页
@@ -32,7 +27,6 @@ export default function SettingsPage({
   const [selected, setSelected] = useState<Set<number>>(new Set())
   // P2 audit: 保存 Clash / 保存代理 / 开机自启开关 / 数据清理 忙态
   const [savingClash, setSavingClash] = useState(false)
-  const [savingProxy, setSavingProxy] = useState(false)
   const [autostartBusy, setAutostartBusy] = useState(false)
   const [cleanLevel, setCleanLevel] = useState<1 | 2 | 3 | null>(null)
 
@@ -59,13 +53,12 @@ export default function SettingsPage({
       }
     }
     loadData()
-    // L10: 首次加载初始化表单值（clashUrl/upstreamProxy）——单独处理、不回写进 loadData，
+    // L10: 首次加载初始化表单值（clashUrl）——单独处理、不回写进 loadData，
     // 后续其它路径重载数据也不会覆盖用户未保存的表单输入
     api
       .configGet()
       .then((cfg) => {
         setClashUrl(cfg.clash_external_url)
-        setUpstreamProxy(cfg.upstream_proxy)
       })
       .catch(() => {})
   }, [])
@@ -87,20 +80,6 @@ export default function SettingsPage({
       toast('保存失败', false)
     } finally {
       setSavingClash(false)
-    }
-  }
-
-  // 代理出口（E1）：保存上游代理配置（留空 = 直连）
-  const handleSaveUpstreamProxy = async () => {
-    setSavingProxy(true)
-    try {
-      await api.configSet('upstream_proxy', upstreamProxy)
-      toast('已保存', true)
-    } catch (e) {
-      console.error('保存失败', e)
-      toast('保存失败', false)
-    } finally {
-      setSavingProxy(false)
     }
   }
 
@@ -248,35 +227,6 @@ export default function SettingsPage({
       </div>
       )}
 
-      {/* 代理出口（E1）：上游代理绕过本机裸连 IP 被上游风控（429/超时） */}
-      <div className="bg-white rounded-2xl border p-5 space-y-4">
-        <h2 className="text-lg font-medium text-zinc-900">代理出口</h2>
-
-        <div className="space-y-2">
-          <label className="block text-sm font-medium text-zinc-700">上游代理</label>
-          <input
-            type="text"
-            placeholder="socks5://127.0.0.1:7897"
-            value={upstreamProxy}
-            onChange={(e) => setUpstreamProxy(e.target.value)}
-            className="w-full px-3 py-2 border rounded-lg"
-          />
-          <p className="text-zinc-500 text-xs">
-            填 Clash 等本地代理的 mixed-port（支持 socks5:// 或 http:// 前缀）。配置后所有实例与扫描的出站流量都走该代理出口，绕过本机裸连 IP 被上游风控（频繁 429/超时）；留空 = 直连（现状）。
-          </p>
-          <p className="text-zinc-500 text-xs">改动后需重启实例/网关生效</p>
-        </div>
-
-        <button
-          onClick={handleSaveUpstreamProxy}
-          disabled={savingProxy}
-          className="flex items-center gap-1.5 bg-zinc-900 text-white rounded-lg px-4 py-2 hover:bg-zinc-700 disabled:cursor-not-allowed disabled:opacity-60"
-        >
-          {savingProxy ? <Loader2 size={14} className="animate-spin" /> : null}
-          {savingProxy ? '保存中…' : '保存'}
-        </button>
-      </div>
-
       {/* 开机自启（仅桌面端：桌面临近登录自启；Web/Docker/Linux 服务器 headless 端隐藏，服务器用 systemd/容器编排管理） */}
       {isDesktop && (
       <div className="bg-white rounded-2xl border p-5 space-y-4">
@@ -419,7 +369,14 @@ export default function SettingsPage({
       {/* 关于 */}
       <div className="bg-white rounded-2xl border p-5 space-y-4">
         <h2 className="text-lg font-medium text-zinc-900">关于</h2>
-        
+
+        <div className="space-y-2">
+          <label className="block text-sm font-medium text-zinc-700">版本</label>
+          <code className="block text-sm bg-zinc-100 px-3 py-2 rounded border font-mono">
+            v{__APP_VERSION__}
+          </code>
+        </div>
+
         <div className="space-y-2">
           <label className="block text-sm font-medium text-zinc-700">二进制目录</label>
           <code className="block text-sm bg-zinc-100 px-3 py-2 rounded border font-mono">
@@ -446,19 +403,6 @@ export default function SettingsPage({
         </div>
 
         <p className="text-zinc-500 text-xs">子程序随主程序内嵌，运行时不满足时自动释放</p>
-
-        {/* D1：退出程序（二次确认由 App 层弹窗负责） */}
-        <div className="pt-3 border-t border-zinc-100">
-          <button
-            type="button"
-            onClick={() => onRequestExit?.()}
-            className="flex items-center gap-1.5 px-4 py-2 rounded-lg text-[13px] font-medium text-red-600 bg-red-50 hover:bg-red-100 transition-colors"
-          >
-            <LogOut size={14} />
-            退出程序
-          </button>
-          <p className="text-zinc-500 text-xs mt-2">退出前可先释放全部实例（停止并删除）；不释放则实例留在后台继续运行</p>
-        </div>
       </div>
     </div>
   )
