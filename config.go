@@ -11,6 +11,8 @@ import (
 	"path/filepath"
 	"sync/atomic"
 	"time"
+
+	"github.com/6Kmfi6HP/opencode2api/core/manager"
 )
 
 func loadConfig(path string) AppConfig {
@@ -26,7 +28,10 @@ func loadConfig(path string) AppConfig {
 }
 
 func saveConfig(path string, cfg AppConfig) error {
-	data, err := json.MarshalIndent(cfg, "", "  ")
+	// config.json 由本 AppConfig 与 core/manager.Config 双结构共用（同一物理文件）。
+	// 整体覆盖会抹掉 manager 结构独有字段（如 gateway_key——用户设的自定义网关
+	// 密码重启后失效的根因）。用读-合并-写保留对方字段。
+	data, err := manager.MergeConfigJSON(path, cfg)
 	if err != nil {
 		return err
 	}

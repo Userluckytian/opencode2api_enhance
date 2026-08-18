@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strconv"
 	"strings"
 )
@@ -126,12 +127,71 @@ func (m *Manager) loadConfig() Config {
 }
 
 // saveConfig 写回应用配置（原子写，防半写损坏）。
+// 注意：config.json 由本 Config 与主程序 AppConfig 两个结构共用（同一物理文件）。
+// 若整体覆盖写，会抹掉对方结构独有的字段（如 AppConfig 的 model_alias /
+// reasoning_effort_map；主程序启动时无条件 saveConfig(AppConfig) 会把
+// gateway_key 等本结构字段抹掉）。因此这里用读-合并-写（MergeConfigJSON）保留
+// 对方字段，仅覆盖本结构声明的键。
 func (m *Manager) saveConfig(cfg Config) error {
-	data, err := json.MarshalIndent(cfg, "", "  ")
+	data, err := MergeConfigJSON(m.configPath(), cfg)
 	if err != nil {
 		return err
 	}
 	return writeFileAtomic(m.configPath(), data)
+}
+
+// MergeConfigJSON 读-合并-写：以现有文件 JSON 为底，把 v 序列化后的字段覆盖
+// 合并上去，保留文件中 v 未声明的其它键（解决 Config 与 AppConfig 双结构共用
+// config.json 互相覆盖丢字段的问题）。对 v 声明了但序列化为空（omitempty）的键，
+// 会从合并结果中删除——保证「清空某字段」语义生效（如 gateway_key 置空重置默认）。
+func MergeConfigJSON(path string, v any) ([]byte, error) {
+	merged := map[string]any{}
+	if raw, err := os.ReadFile(path); err == nil {
+		_ = json.Unmarshal(raw, &merged) // 损坏 JSON 按空底处理，由本次写覆盖
+	}
+	declared := declaredJSONKeys(v)
+	own, err := json.Marshal(v)
+	if err != nil {
+		return nil, err
+	}
+	var ownMap map[string]any
+	if err := json.Unmarshal(own, &ownMap); err != nil {
+		return nil, err
+	}
+	for k := range declared {
+		if val, ok := ownMap[k]; ok {
+			merged[k] = val
+		} else {
+			delete(merged, k)
+		}
+	}
+	return json.MarshalIndent(merged, "", "  ")
+}
+
+// declaredJSONKeys 反射提取结构体全部 json tag 键名（含 omitempty 为空时也会
+// 出现在本集合中，供 MergeConfigJSON 判断「声明但未写」→ 删除旧值）。
+func declaredJSONKeys(v any) map[string]bool {
+	keys := map[string]bool{}
+	t := reflect.TypeOf(v)
+	if t.Kind() == reflect.Ptr {
+		t = t.Elem()
+	}
+	if t.Kind() != reflect.Struct {
+		return keys
+	}
+	for i := 0; i < t.NumField(); i++ {
+		f := t.Field(i)
+		tag := f.Tag.Get("json")
+		if tag == "-" {
+			continue
+		}
+		name := strings.Split(tag, ",")[0]
+		if name == "" {
+			name = f.Name
+		}
+		keys[name] = true
+	}
+	return keys
 }
 
 // SyncCustomProviders 把自定义模型源条目同步进本配置的 providers 透传

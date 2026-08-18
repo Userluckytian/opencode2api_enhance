@@ -283,3 +283,77 @@ func TestInstanceRegistryPersistAndStatus(t *testing.T) {
 		t.Fatalf("persisted list: %s", string(data))
 	}
 }
+
+// TestSaveConfigPreservesUnknownFields：双结构共用 config.json，saveConfig 必须
+// 保留本结构未声明的字段（如主程序 AppConfig 的 model_alias / force_disable_thinking），
+// 否则重启后 gateway_key 等 manager 字段会被 AppConfig 覆盖写抹掉。
+func TestSaveConfigPreservesUnknownFields(t *testing.T) {
+	dir := t.TempDir()
+	m := New(dir)
+	cfgPath := m.configPath()
+
+	// 预置文件：模拟主程序 AppConfig 写入的字段 + manager 自己的 gateway_key
+	pre := map[string]any{
+		"model_alias":             map[string]any{"gpt-5": "gpt-5-free"},
+		"force_disable_thinking":  true,
+		"reasoning_effort_map":    map[string]any{"high": "4"},
+		"gateway_key":             "my-secret-key",
+		"routing":                 map[string]any{"model_provider_map": map[string]any{"a": "b"}},
+	}
+	raw, _ := json.MarshalIndent(pre, "", "  ")
+	if err := os.WriteFile(cfgPath, raw, 0o644); err != nil {
+		t.Fatalf("write pre: %v", err)
+	}
+
+	// 用 manager 保存（只改 gateway_key），AppConfig 字段必须保留
+	cfg := m.loadConfig()
+	cfg.GatewayKey = "new-secret-42"
+	if err := m.saveConfig(cfg); err != nil {
+		t.Fatalf("saveConfig: %v", err)
+	}
+	data, _ := os.ReadFile(cfgPath)
+	var got map[string]any
+	if err := json.Unmarshal(data, &got); err != nil {
+		t.Fatalf("unmarshal saved: %v", err)
+	}
+	if got["gateway_key"] != "new-secret-42" {
+		t.Errorf("gateway_key = %v, want new-secret-42", got["gateway_key"])
+	}
+	if _, ok := got["model_alias"]; !ok {
+		t.Error("model_alias lost after manager saveConfig")
+	}
+	if _, ok := got["force_disable_thinking"]; !ok {
+		t.Error("force_disable_thinking lost after manager saveConfig")
+	}
+	if _, ok := got["reasoning_effort_map"]; !ok {
+		t.Error("reasoning_effort_map lost after manager saveConfig")
+	}
+}
+
+// TestSaveConfigClearFieldDeletes：声明但清空（omitempty）的字段应从合并结果中删除，
+// 保证「重置为默认」语义（如 gateway_key 置空回默认）。
+func TestSaveConfigClearFieldDeletes(t *testing.T) {
+	dir := t.TempDir()
+	m := New(dir)
+	cfgPath := m.configPath()
+
+	pre := map[string]any{"gateway_key": "old-secret", "model_alias": map[string]any{"x": "y"}}
+	raw, _ := json.MarshalIndent(pre, "", "  ")
+	if err := os.WriteFile(cfgPath, raw, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg := m.loadConfig()
+	cfg.GatewayKey = "" // 清空 → 应删除旧值
+	if err := m.saveConfig(cfg); err != nil {
+		t.Fatal(err)
+	}
+	data, _ := os.ReadFile(cfgPath)
+	var got map[string]any
+	_ = json.Unmarshal(data, &got)
+	if _, ok := got["gateway_key"]; ok {
+		t.Errorf("gateway_key=%v should be deleted after clear", got["gateway_key"])
+	}
+	if _, ok := got["model_alias"]; !ok {
+		t.Error("model_alias should survive clear")
+	}
+}
