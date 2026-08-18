@@ -1,0 +1,54 @@
+# opencode2api 管理器 systemd 服务 —— deb 安装版（Linux headless）
+#
+# 适用：Debian 13+ / Ubuntu 22.04+ 通过 .deb 安装的 opencode2api。
+# deb 包将二进制装到 /usr/bin/opencode2api；本文件由 deb 安装到
+# /etc/systemd/system/opencode2api.service（随包自动注册）。
+#
+# 端口/数据目录/网关密钥不写死在本文件，统一从 EnvironmentFile 读取：
+#   /etc/opencode2api/manager.env   （随包提供模板，改后 daemon-reload + restart）
+#
+# 管理 WebUI 鉴权：默认关闭（core 默认空密码，登录页不会拦截页面/接口）。
+# 需要开启时在下方 ExecStart 显式追加 -password <密码>（壳会透传给 core，
+# 同时作为 /v1 API 密钥；页面将 302 到 /login 登录）。
+#
+# 手动安装（未用 deb 自动注册时）：
+#   sudo cp opencode2api.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now opencode2api
+#   sudo systemctl status opencode2api
+#
+# 常用运维：
+#   journalctl -u opencode2api -f            # 实时日志
+#   sudo systemctl restart opencode2api
+#   sudo nano /etc/opencode2api/manager.env  # 改端口/监听地址/网关密钥后：
+#   sudo systemctl daemon-reload && sudo systemctl restart opencode2api
+#
+# 统一网关端口（自定义网关 API 监听端口，非本服务端口）：
+#   优先级：OPCODE2API_GATEWAY_PORT env > config.json 的 gateway_port > 默认 40080
+#   （WebUI「统一网关」卡片可设，保存即生效，建议用 WebUI 设置）。
+#   ⚠️ 若在 manager.env 取消注释设置该 env，env 优先级最高，WebUI 改的端口
+#      会在重启后被压回 env 值。
+# 统一网关密钥：默认 sk-unified-local；OPCODE2API_GATEWAY_KEY env > config.json 的
+#   gateway_key > 默认 sk-unified-local（自定义建议在 WebUI「统一网关」卡片设置）。
+
+[Unit]
+Description=opencode2api Manager (headless Web UI, deb install)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=opencode2api
+Group=opencode2api
+# deb 安装的二进制路径为 /usr/bin/opencode2api
+# -config 无需指定：壳自动使用数据目录下的 config.json（data_dir 见 manager.env）
+EnvironmentFile=-/etc/opencode2api/manager.env
+ExecStart=/usr/bin/opencode2api --headless -port ${MANAGER_PORT} -listen ${MANAGER_LISTEN}
+Restart=on-failure
+RestartSec=5
+# 日志
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

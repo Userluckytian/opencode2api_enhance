@@ -103,6 +103,30 @@ func (g *Gateway) ApplyKey(pwd string, runner Runner) error {
 	return g.startChild(runner)
 }
 
+// ApplyPort 更新网关监听端口并立即生效：更新内存端口，若网关子进程正在运行则热重启
+//（stopChild + startChild 以新端口拉起；不触碰任何实例）。
+func (g *Gateway) ApplyPort(port uint16, runner Runner) error {
+	// 防御：0 = 未设置/非法，不应用（调用方应先经 managerGatewayPort 解析出有效端口）。
+	if port == 0 {
+		return nil
+	}
+	if runner == nil {
+		runner = &realRunner{}
+	}
+	// M1: 换端口整体动作进 startMu，与 Status 自动拉起 / sync / ApplyKey 互斥，避免双启。
+	g.startMu.Lock()
+	defer g.startMu.Unlock()
+	g.mu.Lock()
+	g.port = port
+	running := g.pid > 0 && pidAlive(g.pid)
+	g.mu.Unlock()
+	if !running {
+		return nil // 未运行时，下次 sync/启动自然用新端口
+	}
+	g.stopChild(runner)
+	return g.startChild(runner)
+}
+
 // Port 返回网关端口。
 func (g *Gateway) Port() uint16 { return g.port }
 

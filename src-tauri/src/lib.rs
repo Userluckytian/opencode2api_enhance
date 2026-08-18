@@ -461,11 +461,21 @@ fn spawn_core_manager(
     }
     let cfg_path = data_dir.join("config.json");
     // 网关/实例/探针端口按环境槽位注入（槽位表：base+偏移）；用户显式环境变量优先。
+    // 统一网关端口额外支持 config.gateway_port：config 设置了有效端口时**不注入 env**，
+    // 让 core 直接读 config（两者读同一 config.json）——若把 config 值固化进 env，
+    // 用户之后在 WebUI 重置端口时 core 的 managerGatewayPort 会命中残留 env 旧值，
+    // 恢复不到默认槽位（env > config > 默认）。仅 env 未设且 config 未设置时才注入槽位。
     let base = slot_base(env_kind);
     let slot = |off: u16| (base + off).to_string();
     if std::env::var_os("OPCODE2API_GATEWAY_PORT").is_none() {
-        unsafe {
-            std::env::set_var("OPCODE2API_GATEWAY_PORT", slot(OFF_GATEWAY));
+        let from_config = crate::config::Config::load()
+            .ok()
+            .and_then(|c| c.gateway_port)
+            .filter(|p| *p != 0);
+        if from_config.is_none() {
+            unsafe {
+                std::env::set_var("OPCODE2API_GATEWAY_PORT", slot(OFF_GATEWAY));
+            }
         }
     }
     if std::env::var_os("OPCODE2API_INSTANCE_BASE_PORT").is_none() {

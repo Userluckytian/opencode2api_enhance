@@ -49,6 +49,10 @@ legacy/opencode2api_enhance/进度.md
 # portable test package output
 portable-out/
 
+# linux build artifacts (deb/AppImage/exe) & test pictures
+linux-out/
+test_picture/
+
 # R&D process docs (not part of the released product)
 docs/ARCHITECTURE-V2-PLAN.md
 docs/REVIEW-PD-DIFF.md

@@ -90,6 +90,11 @@ export default memo(function PoolPage({
   const [keyOpen, setKeyOpen] = useState(false)
   const [keyValue, setKeyValue] = useState('')
   const [keyBusy, setKeyBusy] = useState(false)
+  // 统一网关自定义端口（0 = 未设置，用环境槽位/默认 40080）
+  const [gwPortCfg, setGwPortCfg] = useState(0)
+  const [portOpen, setPortOpen] = useState(false)
+  const [portValue, setPortValue] = useState('')
+  const [portBusy, setPortBusy] = useState(false)
   // 页面设置弹窗（性能模式参数 + 网关超时切换 + 界面刷新，收进右上角齿轮）
   const [settingsOpen, setSettingsOpen] = useState(false)
   // 折叠面板：每个配置分组一个 section，默认收起
@@ -194,6 +199,7 @@ export default memo(function PoolPage({
           call_log_max: c.call_log_max,
         })
         setShowNodePrefix(c.show_node_prefix)
+        setGwPortCfg(c.gateway_port ?? 0)
         setUiForm({ ui_poll_interval_sec: c.ui_poll_interval_sec })
         setUiPollSec(c.ui_poll_interval_sec)
       })
@@ -483,6 +489,27 @@ export default memo(function PoolPage({
     }
   }
 
+  // 设置统一网关自定义端口（1-65535；空串 = 恢复默认槽位端口）
+  const doSavePort = async () => {
+    const v = portValue.trim()
+    if (v !== '' && (Number.isNaN(Number(v)) || !Number.isInteger(Number(v)) || Number(v) < 1 || Number(v) > 65535)) {
+      toast('端口必须是 1-65535 的整数，或留空恢复默认', false)
+      return
+    }
+    setPortBusy(true)
+    try {
+      await api.configSet('gateway_port', v === '' ? '0' : v)
+      toast(v === '' ? '网关端口已恢复默认并立即生效' : `网关端口已设为 ${v} 并立即生效`, true)
+      setPortOpen(false)
+      setPortValue('')
+      await load()
+    } catch (e) {
+      toast(String(e), false)
+    } finally {
+      setPortBusy(false)
+    }
+  }
+
   // S3: 释放确认弹窗模式（null=关闭；'all' 完全释放；'running' 仅释放运行中）
   const [releaseMode, setReleaseMode] = useState<'all' | 'running' | null>(null)
   // 批量释放池成员：按所选模式（完全/仅运行中）分块并发删除 + 实时上报进度
@@ -727,13 +754,22 @@ export default memo(function PoolPage({
         <div className="grid grid-cols-2 gap-4">
           {/* 地址 */}
           <div className="rounded-xl border border-zinc-100 bg-zinc-50/60 p-4">
-            <div className="text-[12px] text-zinc-500 mb-1.5">统一 API 地址</div>
+            <div className="flex items-center justify-between mb-1.5">
+              <div className="text-[12px] text-zinc-500">统一 API 地址</div>
+              <button
+                onClick={() => { setPortValue(gwPortCfg > 0 ? String(gwPortCfg) : ''); setPortOpen(true) }}
+                className="flex items-center gap-1 text-[11px] text-teal-700 hover:underline"
+                title="设置自定义端口（立即生效）/ 恢复默认"
+              >
+                <Pencil size={11} /> 自定义端口
+              </button>
+            </div>
             <button
               onClick={() => void copyText(gw?.address ?? '', '统一 API 地址')}
               className="flex items-center gap-1 text-teal-700 hover:underline"
               title="点击复制"
             >
-              <code className="text-[13px]">{gw?.address ?? (import.meta.env.DEV ? 'http://127.0.0.1:44180/v1' : 'http://127.0.0.1:40080/v1')}</code>
+              <code className="text-[13px]">{gw?.address ?? (gwPortCfg > 0 ? `http://127.0.0.1:${gwPortCfg}/v1` : import.meta.env.DEV ? 'http://127.0.0.1:44180/v1' : 'http://127.0.0.1:40080/v1')}</code>
               <Copy size={12} />
             </button>
             <div className="mt-1 text-[11px] text-zinc-400">
@@ -1510,6 +1546,54 @@ export default memo(function PoolPage({
               </button>
               <button
                 onClick={() => setKeyOpen(false)}
+                className="px-4 py-2 rounded-lg text-sm text-zinc-700 bg-white border border-zinc-200 hover:bg-zinc-50"
+              >
+                取消
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {portOpen && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4"
+          onClick={() => { if (!portBusy) setPortOpen(false) }}
+        >
+          <div className="bg-white rounded-2xl shadow-xl w-full max-w-md p-5 space-y-4" onClick={(e) => e.stopPropagation()}>
+            <div className="flex items-center gap-2">
+              <Network size={16} className="text-teal-600" />
+              <h3 className="text-lg font-semibold text-zinc-900">统一网关端口</h3>
+              <span className="flex-1" />
+              <button onClick={() => setPortOpen(false)} className="text-zinc-400 hover:text-zinc-600">
+                <X size={18} />
+              </button>
+            </div>
+
+            <div className="space-y-2">
+              <label className="block text-sm font-medium text-zinc-700">自定义端口</label>
+              <input
+                type="text"
+                inputMode="numeric"
+                placeholder="1-65535；留空 + 保存 = 恢复默认端口"
+                value={portValue}
+                onChange={(e) => setPortValue(e.target.value)}
+                className="w-full px-3 py-2 border rounded-lg"
+              />
+              <p className="text-zinc-500 text-xs">保存后立即生效（网关会自动重启）；运行中的客户端将暂时无法连接</p>
+            </div>
+
+            <div className="flex gap-2">
+              <button
+                onClick={() => void doSavePort()}
+                disabled={portBusy}
+                className="flex items-center justify-center gap-1.5 flex-1 px-4 py-2 rounded-lg text-sm text-white bg-teal-600 hover:bg-teal-700 disabled:cursor-not-allowed disabled:opacity-60"
+              >
+                {portBusy ? <Loader2 size={14} className="animate-spin" /> : <Check size={14} />}
+                {portBusy ? '保存中…' : '保存'}
+              </button>
+              <button
+                onClick={() => setPortOpen(false)}
                 className="px-4 py-2 rounded-lg text-sm text-zinc-700 bg-white border border-zinc-200 hover:bg-zinc-50"
               >
                 取消

@@ -10,6 +10,7 @@ on:
       - feat/desktop-app
     tags:
       - 'v*'
+  workflow_dispatch:
 
 jobs:
   build:

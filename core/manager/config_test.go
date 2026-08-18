@@ -357,3 +357,49 @@ func TestSaveConfigClearFieldDeletes(t *testing.T) {
 		t.Error("model_alias should survive clear")
 	}
 }
+
+// TestEffectiveGatewayKeyEnv：统一网关密钥按 env > config > 默认 三源读取
+//（OPCODE2API_GATEWAY_KEY 供 systemd EnvironmentFile / 自定义部署注入）。
+func TestEffectiveGatewayKeyEnv(t *testing.T) {
+	cfg := Config{GatewayKey: "cfg-secret-42"}
+	// 未设 env + 配置值 → 配置值
+	t.Setenv("OPCODE2API_GATEWAY_KEY", "")
+	if got := effectiveGatewayKey(cfg); got != "cfg-secret-42" {
+		t.Fatalf("config key = %q, want cfg-secret-42", got)
+	}
+	// 未设 env + 配置空 → 默认
+	cfg.GatewayKey = ""
+	if got := effectiveGatewayKey(cfg); got != unifiedGatewayKey {
+		t.Fatalf("default key = %q, want %q", got, unifiedGatewayKey)
+	}
+	// env 设置 → env 优先于配置
+	t.Setenv("OPCODE2API_GATEWAY_KEY", "env-secret-99")
+	cfg.GatewayKey = "cfg-secret-42"
+	if got := effectiveGatewayKey(cfg); got != "env-secret-99" {
+		t.Fatalf("env key = %q, want env-secret-99", got)
+	}
+}
+
+// TestConfigSetGatewayKeyNotOverriddenByEnv：WebUI 改密钥时热应用必须用刚保存的
+// cfg 值（与落盘一致），不能被 OPCODE2API_GATEWAY_KEY env 压过（env 固化教训，
+// 同 gateway_port）；仅重置（空串）回退 env > config > 默认。
+func TestConfigSetGatewayKeyNotOverriddenByEnv(t *testing.T) {
+	t.Setenv("OPCODE2API_GATEWAY_KEY", "env-secret-99")
+	m := New(t.TempDir())
+
+	// 设置新密钥 → 网关内存密码 = 刚保存的 cfg 值（非 env）
+	if err := m.ConfigSet("gateway_key", "webui-secret-42"); err != nil {
+		t.Fatalf("set: %v", err)
+	}
+	if got := m.Gateway().Status(&fakeRunner{}).APIKey; got != "webui-secret-42" {
+		t.Fatalf("api key = %q, want webui-secret-42 (env 不应压过刚保存的值)", got)
+	}
+
+	// 重置（空串）→ 回退 env 值
+	if err := m.ConfigSet("gateway_key", ""); err != nil {
+		t.Fatalf("reset: %v", err)
+	}
+	if got := m.Gateway().Status(&fakeRunner{}).APIKey; got != "env-secret-99" {
+		t.Fatalf("after reset api key = %q, want env-secret-99", got)
+	}
+}

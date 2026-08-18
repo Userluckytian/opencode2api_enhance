@@ -675,9 +675,29 @@ func (m *Manager) ConfigSet(key, value string) error {
 	}
 	// T4: 网关密钥立即生效——更新内存密码并热重启网关进程（若正在运行）；
 	// 不触碰任何实例，也不等待下次网关自然重启。
+	// 显式把刚保存的 cfg.GatewayKey 传给 ApplyKey（与落盘值一致），避免被环境变量
+	// OPCODE2API_GATEWAY_KEY 压过（env 固化教训，同 gateway_port 处理）；
+	// 仅重置（空串 = 回退默认）时经 effectiveGatewayKey 解析 env > config > 默认。
 	if key == "gateway_key" {
-		if err := m.Gateway().ApplyKey(effectiveGatewayKey(cfg), m.Run()); err != nil {
+		eff := cfg.GatewayKey
+		if eff == "" {
+			eff = effectiveGatewayKey(cfg)
+		}
+		if err := m.Gateway().ApplyKey(eff, m.Run()); err != nil {
 			return fmt.Errorf("密钥已保存，但网关热重启失败: %w", err)
+		}
+	}
+	// T5: 网关端口立即生效——更新内存端口并热重启网关进程（若正在运行）。
+	// 端口 = 0（恢复默认/未设置）时按 managerGatewayPort 的 env > config > 默认
+	// 优先级解析生效端口（注意：此处显式把 cfg.GatewayPort 传给 ApplyPort，
+	// 与 ConfigSet 保存后的落盘值一致，避免被已注入的 OPCODE2API_GATEWAY_PORT env 压过）。
+	if key == "gateway_port" {
+		eff := cfg.GatewayPort
+		if eff == 0 {
+			eff = m.managerGatewayPort()
+		}
+		if err := m.Gateway().ApplyPort(eff, m.Run()); err != nil {
+			return fmt.Errorf("端口已保存，但网关热重启失败: %w", err)
 		}
 	}
 	return nil
@@ -728,6 +748,8 @@ type ConfigView struct {
 	PoolProbeConcurrency    int     `json:"pool_probe_concurrency"`
 	HasGatewayKey           bool    `json:"has_gateway_key"`
 	GatewayKey              string  `json:"gateway_key"`
+	// 统一网关监听端口（0 = 未设置，用环境槽位/默认 40080）
+	GatewayPort             uint16  `json:"gateway_port"`
 }
 
 // ConfigViewOf 生成前端视图（密码与 clash token 脱敏为掩码）。
@@ -785,6 +807,7 @@ func (m *Manager) ConfigViewOf() ConfigView {
 		PoolProbeConcurrency:    poolProbeConcurrencyOf(cfg),
 		HasGatewayKey:           cfg.GatewayKey != "",
 		GatewayKey:              maskSecret(cfg.GatewayKey),
+		GatewayPort:             cfg.GatewayPort,
 	}
 }
 
@@ -803,8 +826,13 @@ func uiPollIntervalSecOf(cfg Config) int {
 	return *cfg.UiPollIntervalSec
 }
 
-// effectiveGatewayKey 生效的统一网关密钥：配置未设置/为空时回退默认 "sk-unified-local"。
+// effectiveGatewayKey 生效的统一网关密钥：优先环境变量 OPCODE2API_GATEWAY_KEY
+//（systemd EnvironmentFile / 自定义部署注入，与 OPCODE2API_GATEWAY_PORT 同级），
+// 其次 config.gateway_key，否则回退默认 unifiedGatewayKey（"sk-unified-local"）。
 func effectiveGatewayKey(cfg Config) string {
+	if s := strings.TrimSpace(os.Getenv("OPCODE2API_GATEWAY_KEY")); s != "" {
+		return s
+	}
 	if cfg.GatewayKey != "" {
 		return cfg.GatewayKey
 	}

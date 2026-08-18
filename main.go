@@ -89,7 +89,9 @@ func main() {
 	var showVersion bool
 	flag.StringVar(&port, "port", "8000", "服务端口")
 	flag.StringVar(&configPath, "config", "config.json", "配置文件路径")
-	flag.StringVar(&adminPassword, "password", "123456", "管理面板密码（留空则不启用登录验证）")
+	// 管理鉴权默认关闭（默认空密码）：当前 WebUI 无身份校验步骤，开启会 302 拦截 /api/admin/* 导致数据无法加载。
+	// 需要开启时显式传 -password <密码>（同时作为 /v1 API 密钥）。
+	flag.StringVar(&adminPassword, "password", "", "管理面板密码（默认空 = 不启用登录验证；设置后需经 /login 登录）")
 	flag.BoolVar(&debugMode, "debug", false, "启用调试日志")
 	flag.BoolVar(&gatewayMode, "gateway", false, "统一网关模式（记录节点级统计）")
 	flag.BoolVar(&callLogFlag, "call-log", false, "启用调用日志写盘（实例子进程注入；-gateway 自动启用）")

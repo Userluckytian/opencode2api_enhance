@@ -206,6 +206,8 @@ export type ConfigView = {
   health_restart_threshold: number
   has_gateway_key: boolean
   gateway_key: string
+  /** 统一网关监听端口（0 = 未设置，用环境槽位/默认 40080） */
+  gateway_port: number
   /** 实例池链路探活（P1） */
   pool_probe_interval_sec: number
   pool_probe_timeout_sec: number

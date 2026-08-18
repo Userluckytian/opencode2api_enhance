@@ -24,10 +24,10 @@ sudo chown -R opencode2api:opencode2api /var/lib/opencode2api
 3. 安装 systemd 服务：
 
 ```bash
-sudo install -m 0644 docs/systemd/opencode2api-manager.service /etc/systemd/system/
+sudo install -m 0644 docs/systemd/opencode2api.service /etc/systemd/system/
 sudo systemctl daemon-reload
-sudo systemctl enable --now opencode2api-manager
-sudo systemctl status opencode2api-manager
+sudo systemctl enable --now opencode2api
+sudo systemctl status opencode2api
 ```
 
 4. 浏览器访问管理端口（headless 模式托管打包好的前端 `dist/`，纯浏览器完成全部管理）。
@@ -77,10 +77,10 @@ sudo systemctl status opencode2api-manager
 ### 5. systemd 运维
 
 ```bash
-sudo systemctl enable opencode2api-manager   # 开机自启
-sudo systemctl start opencode2api-manager
-sudo systemctl status opencode2api-manager
-journalctl -u opencode2api-manager -f        # 查看日志
+sudo systemctl enable opencode2api   # 开机自启
+sudo systemctl start opencode2api
+sudo systemctl status opencode2api
+journalctl -u opencode2api -f        # 查看日志
 ```
 
 ---
@@ -93,8 +93,8 @@ journalctl -u opencode2api-manager -f        # 查看日志
 docker compose up -d --build   # 或 docker build -t opencode2api-manager:latest .
 ```
 
-- 管理面板：浏览器访问 `http://127.0.0.1:40000`（默认密码 `123456`，生产务必改——
-  在 `docker-compose.yml` 取消 `command` 注释换成你自己的密钥）
+- 管理面板：浏览器访问 `http://127.0.0.1:40000`（默认**无鉴权**——compose 显式 `-password ""`；
+  如需开启管理鉴权，在 `docker-compose.yml` 取消 `command` 注释换成你自己的密钥）
 - 统一网关：`http://127.0.0.1:40080/v1`
 - 数据持久化：卷 `manager-data` 挂载到 `/data`（`OPCODE2API_DATA_DIR`），升级容器不丢实例/配置/日志
 - 端口三件套：`OPCODE2API_DATA_DIR` / `OPCODE2API_GATEWAY_PORT` / `OPCODE2API_INSTANCE_BASE_PORT` 均可环境变量覆盖
@@ -138,7 +138,8 @@ Wants=network-online.target
 [Service]
 Type=simple
 WorkingDirectory=/opt/opencode2api
-ExecStart=/opt/opencode2api/opencode2api -port 8000 -config /opt/opencode2api/config.json -password CHANGE_ME
+ExecStart=/opt/opencode2api/opencode2api -port 8000 -config /opt/opencode2api/config.json -password <管理密码>
+# 注：-password 用于开启管理鉴权（可选；不传则默认关闭）。
 Restart=on-failure
 RestartSec=3
 User=nobody
@@ -199,7 +200,7 @@ sudo install -m 0644 config.example.json /opt/opencode2api/config.json
 sudo install -d -m 0755 /var/lib/opencode2api
 ```
 
-创建 `/etc/systemd/system/opencode2api-manager.service`：
+创建 `/etc/systemd/system/opencode2api.service`：
 
 ```ini
 [Unit]
@@ -211,7 +212,8 @@ Wants=network-online.target
 Type=simple
 WorkingDirectory=/opt/opencode2api
 # headless 默认全接口监听；内网/公网部署显式 -listen 0.0.0.0 并配合防火墙/反代
-ExecStart=/opt/opencode2api/opencode2api -port 40000 -password CHANGE_ME -config /opt/opencode2api/config.json -listen 127.0.0.1
+ExecStart=/opt/opencode2api/opencode2api -port 40000 -password <管理密码> -config /opt/opencode2api/config.json -listen 127.0.0.1
+# 注：-password 用于开启管理鉴权（可选；不传则默认关闭）。
 Environment=OPCODE2API_DATA_DIR=/var/lib/opencode2api
 Restart=on-failure
 RestartSec=5
@@ -224,6 +226,41 @@ WantedBy=multi-user.target
 
 ```bash
 sudo systemctl daemon-reload
-sudo systemctl enable --now opencode2api-manager
-sudo systemctl status opencode2api-manager
+sudo systemctl enable --now opencode2api
+sudo systemctl status opencode2api
 ```
+
+#### deb 安装版模板（Debian 13+）
+
+用 `.deb` 包安装时二进制位于 `/usr/bin/opencode2api`。
+
+**自 v1.5.3 起 deb 包自动注册 systemd 服务**（不再需要手动复制模板）：
+安装 deb 后服务 `opencode2api` 已启用并尝试启动：
+
+```bash
+sudo systemctl status opencode2api
+```
+
+**首次配置**：修改环境变量文件 `/etc/opencode2api/manager.env`（端口/监听地址/数据目录；统一网关密钥默认 `sk-unified-local` 无需修改，需要自定义时在 WebUI「统一网关」卡片设置），然后：
+
+```bash
+sudo nano /etc/opencode2api/manager.env     # 端口/监听地址/数据目录（密钥默认无需修改）
+sudo systemctl daemon-reload && sudo systemctl restart opencode2api
+```
+
+> 管理 WebUI 鉴权**默认关闭**（core 默认空密码，登录页不会拦截页面/接口，避免
+> 「设了密码但没有登录步骤导致数据无法加载」）。如需开启，在服务 `ExecStart`
+> 显式追加 `-password <密码>`（壳会透传给 core，同时作为 `/v1` API 密钥）。
+
+**外壳备用**：若 deb 未自动注册（如旧版 deb 手动升级），可手动安装 `scripts/` 下的模板：
+
+```bash
+sudo cp scripts/opencode2api.service /etc/systemd/system/
+sudo cp scripts/manager.env /etc/opencode2api/manager.env
+sudo systemctl daemon-reload
+sudo systemctl enable --now opencode2api
+```
+
+**统一网关端口自定义**：按优先级 `config.json` 的 `gateway_port` > 默认 `40080`。在 WebUI「统一网关」卡片设置即可，保存即生效并持久化。`manager.env` 中 `OPCODE2API_GATEWAY_PORT` 默认注释——**不要**取消注释（env 优先级最高，一旦设置会压过 WebUI 的修改，出现「WebUI 改了端口，重启后又变回去」）。重启后运行中的客户端会短暂断连，需用新端口重新配置。
+
+**统一网关密钥自定义**：默认 `sk-unified-local`，无需修改。如需自定义：在 WebUI「统一网关」卡片设置（写入 `config.json`，保存即生效）即可。`manager.env` 中 `OPCODE2API_GATEWAY_KEY` 默认注释——如需用 env 固定密钥可取消注释，但注意 env 优先级高于 WebUI 修改（`OPCODE2API_GATEWAY_KEY` env > `config.json` 的 `gateway_key` > 默认 `sk-unified-local`）。客户端调用统一网关 API 时以该密钥作为 Bearer 鉴权。

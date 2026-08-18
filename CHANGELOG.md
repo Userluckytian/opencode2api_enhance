@@ -10,6 +10,7 @@
 
 - **节点扫描 sing-box 启动即崩**：hysteria2 带宽字段（up/down）改为数值 Mbps——字符串会被 sing-box 直接拒绝；vless reality 的 `utls` 移入 `tls` 子对象——原先放 outbound 顶层导致 unknown field 报错
 - **探测提示文档化**：FAQ 新增「models 接口连通（无免费模型可测试）」的含义说明与改进方向
+- **Linux `--headless -port` 未生效修复**：壳的健康检查/地址打印/窗口导航未对齐透传的 `-port`（core 实际监听指定端口，壳仍探测默认 40000）——现由 `override_port` 解析透传端口并贯穿三处调用点，Debian/Ubuntu 等 Linux 无头模式按实际端口就绪、打印与导航
 
 ### 🙏 致谢
 

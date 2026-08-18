@@ -1,0 +1,7 @@
+# 行尾统一：以下文件强制 LF（无论 core.autocrlf 设置）。
+# 背景：Windows 检出 core.autocrlf=true 会把 LF 转 CRLF，打包进 deb 后
+# 维护脚本 shebang 变成 `#!/bin/sh\r`，dpkg 报「无法执行 pre-installation 脚本: 没有那个文件或目录」。
+# 这些文件必须始终保持 LF。
+*.sh text eol=lf
+scripts/*.service text eol=lf
+scripts/*.env text eol=lf

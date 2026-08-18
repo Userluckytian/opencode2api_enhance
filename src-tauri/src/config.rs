@@ -20,6 +20,9 @@ pub struct Config {
     pub call_log_max: Option<i64>,
     /// 对话流是否展示「🤖 节点 · 模型」前缀（默认关闭）
     pub show_node_prefix: Option<bool>,
+    /// 统一网关监听端口（0/None = 未设置，用环境槽位/默认 40080）
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gateway_port: Option<u16>,
 }
 
 impl Config {
@@ -98,6 +101,7 @@ impl Config {
             "failover_probe_max" => Some(self.failover_probe_max.unwrap_or(0).to_string()),
             "call_log_max" => Some(self.call_log_max.unwrap_or(0).to_string()),
             "show_node_prefix" => Some(self.show_node_prefix.unwrap_or(false).to_string()),
+            "gateway_port" => Some(self.gateway_port.unwrap_or(0).to_string()),
             _ => None,
         }
     }
@@ -130,6 +134,20 @@ impl Config {
                 let b = value.parse::<bool>()
                     .with_context(|| format!("invalid boolean for show_node_prefix: {value}"))?;
                 self.show_node_prefix = Some(b);
+            }
+            "gateway_port" => {
+                // 空串/"0" = 未设置（回落环境槽位/默认）；合法 1-65535
+                let v = value.trim();
+                if v.is_empty() || v == "0" {
+                    self.gateway_port = None;
+                } else {
+                    let p = v.parse::<u16>()
+                        .with_context(|| format!("invalid port for gateway_port: {value}"))?;
+                    if p == 0 {
+                        anyhow::bail!("invalid port for gateway_port: {value}");
+                    }
+                    self.gateway_port = Some(p);
+                }
             }
             _ => {
                 anyhow::bail!("Unknown config key: {}", key);
