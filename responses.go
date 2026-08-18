@@ -5,7 +5,6 @@ package main
 import (
 	"bufio"
 	"encoding/json"
-	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -871,7 +870,13 @@ func responsesHandler(w http.ResponseWriter, r *http.Request) {
 		callRec.Nodes = append(callRec.Nodes, proxyAddr)
 		if err != nil || status < 200 || status >= 300 {
 			callRec.Status = "fail"
-			callRec.ErrMsg = fmt.Sprintf("upstream status %d: %v", status, err)
+			// 非 2xx 时上游错误体随流返回：读出来入日志（截断）并透传客户端。
+			var errBody []byte
+			if upResp != nil {
+				errBody, _ = io.ReadAll(upResp)
+				upResp.Close()
+			}
+			callRec.ErrMsg = upstreamErrMsg(status, err, errBody)
 			callRec.DurationMS = time.Since(startTime).Milliseconds()
 			callRec.Events = append(callRec.Events, CallEvent{Type: "upstream_error", Node: proxyAddr, Detail: callRec.ErrMsg, At: time.Now()})
 			if autoDec == nil {
@@ -880,17 +885,12 @@ func responsesHandler(w http.ResponseWriter, r *http.Request) {
 			recordCall(callRec)
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(httpStatusOr(status))
-			if upResp != nil {
-				// 错误路径同样要释放上游连接（callOpenCodeAPIStream 非 2xx 时返回非 nil body）。
-				defer upResp.Close()
-				errBody, _ := io.ReadAll(upResp)
-				if len(errBody) > 0 {
-					if autoDec != nil && isContextLimitError(errBody) {
-						learnContextFailure(displayModelName(autoDec.FinalModel), autoDec.EstTokens)
-					}
-					w.Write(errBody)
-					return
+			if len(errBody) > 0 {
+				if autoDec != nil && isContextLimitError(errBody) {
+					learnContextFailure(displayModelName(autoDec.FinalModel), autoDec.EstTokens)
 				}
+				w.Write(errBody)
+				return
 			}
 			json.NewEncoder(w).Encode(map[string]any{"error": map[string]any{"message": "upstream error"}})
 			return
@@ -917,7 +917,7 @@ func responsesHandler(w http.ResponseWriter, r *http.Request) {
 	callRec.Nodes = append(callRec.Nodes, proxyAddr)
 	if err != nil || status < 200 || status >= 300 {
 		callRec.Status = "fail"
-		callRec.ErrMsg = fmt.Sprintf("upstream status %d: %v", status, err)
+		callRec.ErrMsg = upstreamErrMsg(status, err, respBody)
 		callRec.DurationMS = time.Since(startTime).Milliseconds()
 		callRec.Events = append(callRec.Events, CallEvent{Type: "upstream_error", Node: proxyAddr, Detail: callRec.ErrMsg, At: time.Now()})
 		if autoDec != nil && len(respBody) > 0 && isContextLimitError(respBody) {

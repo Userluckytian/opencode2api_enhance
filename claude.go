@@ -107,7 +107,13 @@ func claudeMessagesHandler(w http.ResponseWriter, r *http.Request) {
 		callRec.Nodes = append(callRec.Nodes, proxyAddr)
 		if err != nil || status < 200 || status >= 300 {
 			callRec.Status = "fail"
-			callRec.ErrMsg = fmt.Sprintf("upstream status %d: %v", status, err)
+			// 非 2xx 时上游错误体随流返回：读出来入日志（截断），供日志页显示完整原因。
+			var errBody []byte
+			if upResp != nil {
+				errBody, _ = io.ReadAll(upResp)
+				upResp.Close()
+			}
+			callRec.ErrMsg = upstreamErrMsg(status, err, errBody)
 			callRec.DurationMS = time.Since(startTime).Milliseconds()
 			callRec.Events = append(callRec.Events, CallEvent{Type: "upstream_error", Node: proxyAddr, Detail: callRec.ErrMsg, At: time.Now()})
 			if autoDec == nil {
@@ -117,10 +123,6 @@ func claudeMessagesHandler(w http.ResponseWriter, r *http.Request) {
 			errResp := map[string]any{
 				"type":  "error",
 				"error": map[string]string{"type": "api_error", "message": "upstream error"},
-			}
-			// 错误路径同样要释放上游连接（callOpenCodeAPIStream 非 2xx 时返回非 nil body）。
-			if upResp != nil {
-				upResp.Close()
 			}
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(httpStatusOr(status))
@@ -143,7 +145,7 @@ func claudeMessagesHandler(w http.ResponseWriter, r *http.Request) {
 	callRec.Nodes = append(callRec.Nodes, proxyAddr)
 	if err != nil || status < 200 || status >= 300 {
 		callRec.Status = "fail"
-		callRec.ErrMsg = fmt.Sprintf("upstream status %d: %v", status, err)
+		callRec.ErrMsg = upstreamErrMsg(status, err, respBody)
 		callRec.DurationMS = time.Since(startTime).Milliseconds()
 		callRec.Events = append(callRec.Events, CallEvent{Type: "upstream_error", Node: proxyAddr, Detail: callRec.ErrMsg, At: time.Now()})
 		if autoDec != nil && len(respBody) > 0 && isContextLimitError(respBody) {

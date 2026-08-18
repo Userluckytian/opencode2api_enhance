@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -264,6 +265,26 @@ func shouldSwitchVendor(v contract.Vendor, status int, _ error) bool {
 
 // callOpenCodeAPI 非流式上游调用（适配层；路由 + 厂商级 failover + auto 模型降级链）。
 // auto：ctx 挂有降级链时，失败（非 2xx）沿链换模型重试（有界，见 maxAutoSwitches）。
+// upstreamErrBodyMax 上游失败响应体入日志的最大字节数（防错误体刷屏）。
+const upstreamErrBodyMax = 512
+
+// upstreamErrMsg 组装上游失败信息：状态码 + 错误 + 响应体摘要（截断防刷屏）。
+// body 为上游返回的错误体（非 2xx 时由厂商透传）；空则退化为原「状态码 + err」格式。
+func upstreamErrMsg(status int, err error, body []byte) string {
+	msg := fmt.Sprintf("upstream status %d: %v", status, err)
+	if len(body) > 0 {
+		s := strings.TrimSpace(string(body))
+		if s == "" {
+			return msg
+		}
+		if len(s) > upstreamErrBodyMax {
+			s = s[:upstreamErrBodyMax] + "…"
+		}
+		msg += " body=" + s
+	}
+	return msg
+}
+
 func callOpenCodeAPI(ctx context.Context, upstreamBody []byte, modelID string, auth UpstreamAuth) ([]byte, int, http.Header, string, error) {
 	dec, _ := ctx.Value(autoCtxKey{}).(*autoDecision)
 	for switched := 0; ; switched++ {
