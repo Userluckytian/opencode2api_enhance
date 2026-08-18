@@ -9,6 +9,7 @@ import {
   Inbox,
   Loader2,
   RefreshCw,
+  ScrollText,
   Trash2,
 } from 'lucide-react'
 import { api, type CallLogRecord } from '../lib/api'
@@ -349,9 +350,12 @@ export default function LogsPage({
   const issueCount = visible.filter(hasIssue).length
 
   return (
-    <div className="p-6 max-w-4xl mx-auto">
+    <div className="p-6">
       <div className="flex items-center justify-between mb-5">
-        <h1 className="text-2xl font-semibold text-zinc-900">调用日志</h1>
+        <h1 className="text-[16px] font-semibold text-zinc-900 flex items-center gap-2.5">
+          <ScrollText size={18} className="text-teal-700" />
+          调用日志
+        </h1>
         <div className="flex items-center gap-2">
           <button
             onClick={() => void doClearLogs()}
@@ -574,7 +578,7 @@ function HourAnalysisView({ logs }: { logs: CallLogRecord[] }) {
   const maxReq = Math.max(1, ...hours.map((h) => h.requests))
 
   return (
-    <div className="bg-white rounded-2xl border border-zinc-200 shadow-sm p-5">
+    <div className="bg-white rounded-2xl border border-zinc-200 p-5">
       <div className="text-[14px] font-semibold text-zinc-900 mb-1">时段分析</div>
       <div className="text-[12px] text-zinc-400 mb-4">
         按小时统计请求分布与耗时，帮助定位一天中相对卡顿的时段（数据来自保留期内的调用日志）
@@ -654,7 +658,7 @@ function NodeAnalysisView({ logs }: { logs: CallLogRecord[] }) {
   }, [logs])
 
   return (
-    <div className="bg-white rounded-2xl border border-zinc-200 shadow-sm p-5">
+    <div className="bg-white rounded-2xl border border-zinc-200 p-5">
       <div className="text-[14px] font-semibold text-zinc-900 mb-1">节点分析</div>
       <div className="text-[12px] text-zinc-400 mb-4">
         按最终出口节点聚合，评估各节点请求量、成功率与稳定性（数据来自保留期内的调用日志）

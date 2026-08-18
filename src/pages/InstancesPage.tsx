@@ -414,7 +414,8 @@ if (kind === 'delete' && !confirm(`确定释放选中的 ${names.length} 个实�
       {/* 工具条：标题 + 数量小字，右侧仅刷新 */}
       <div className="flex items-center justify-between">
         <div className="flex items-center gap-3">
-          <h2 className="text-lg font-semibold text-zinc-900">独享管理</h2>
+          <Server size={18} className="text-teal-700" />
+          <h1 className="text-[16px] font-semibold text-zinc-900">独享管理</h1>
           <span className="text-[12px] text-zinc-400">{soloInstances.length} 个</span>
         </div>
         <div className="flex items-center gap-2">

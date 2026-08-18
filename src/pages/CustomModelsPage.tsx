@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import clsx from 'clsx'
-import { Loader2, Pencil, Plus, PlugZap, Activity, Trash2, X } from 'lucide-react'
+import { Loader2, Pencil, Plus, PlugZap, Activity, Trash2, X, Plug } from 'lucide-react'
 import { api, type CustomKeyStrategy, type CustomProviderInput, type CustomProviderTestResult, type CustomProviderView, type CustomProtocol } from '../lib/api'
 
 // 自定义模型源表单（新增/编辑共用）。编辑时 key 留空 = 保留原 key。
@@ -264,10 +264,13 @@ export default function CustomModelsPage({ toast }: { toast: (msg: string, ok?: 
   }
 
   return (
-    <div className="p-6 space-y-6 max-w-3xl mx-auto">
+    <div className="p-6 space-y-6">
       <div className="flex items-center justify-between gap-4">
         <div>
-          <h1 className="text-2xl font-semibold text-zinc-900">自定义模型</h1>
+          <h1 className="text-[16px] font-semibold text-zinc-900 flex items-center gap-2.5">
+            <Plug size={18} className="text-teal-700" />
+            自定义模型
+          </h1>
           <p className="text-zinc-500 text-xs mt-1">
             接入自带 API Key 的第三方模型供应商（OpenAI / Anthropic / Gemini 三种协议），可同时接入多个。
             保存后模型进入 /v1/models（模型名带 <code className="bg-zinc-100 px-1 rounded">源ID/</code> 前缀），调用、日志、统计与节点池全部复用统一网关。

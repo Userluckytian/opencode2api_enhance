@@ -505,7 +505,8 @@ export default function NodesPage({
       {/* 工具条 */}
       <div className="flex items-center justify-between">
         <div className="flex items-center gap-3">
-<h2 className="text-lg font-semibold text-zinc-900">节点池</h2>
+          <Radar size={18} className="text-teal-700" />
+          <h1 className="text-[16px] font-semibold text-zinc-900">节点池</h1>
           <span className="px-2 py-0.5 rounded-full bg-zinc-100 text-zinc-500 text-xs font-medium">
             {nodes.length} 个
           </span>

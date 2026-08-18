@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import clsx from 'clsx'
-import { Loader2, Search, Trash2 } from 'lucide-react'
+import { Loader2, Search, Settings, Trash2 } from 'lucide-react'
 import { api, type OrphanProcess } from '../lib/api'
 import type { ConfigView, BinariesInfo } from '../lib/api'
 import { isDesktop } from '../lib/env'
@@ -181,13 +181,16 @@ export default function SettingsPage({
   }
 
   return (
-    <div className="p-6 space-y-6 max-w-2xl mx-auto">
-      <h1 className="text-2xl font-semibold text-zinc-900">设置</h1>
+    <div className="p-6 space-y-6">
+      <h1 className="text-[16px] font-semibold text-zinc-900 flex items-center gap-2.5">
+        <Settings size={18} className="text-teal-700" />
+        设置
+      </h1>
 
       {/* Clash 外部控制（仅桌面端：本机有 Clash 客户端才有意义；Web/Docker/Linux 服务器 headless 端隐藏，走订阅导入） */}
       {isDesktop && (
       <div className="bg-white rounded-2xl border p-5 space-y-4">
-        <h2 className="text-lg font-medium text-zinc-900">Clash 外部控制</h2>
+        <h2 className="text-lg font-semibold text-zinc-900">Clash 外部控制</h2>
         
         <div className="space-y-2">
           <label className="block text-sm font-medium text-zinc-700">URL</label>
@@ -230,7 +233,7 @@ export default function SettingsPage({
       {/* 开机自启（仅桌面端：桌面临近登录自启；Web/Docker/Linux 服务器 headless 端隐藏，服务器用 systemd/容器编排管理） */}
       {isDesktop && (
       <div className="bg-white rounded-2xl border p-5 space-y-4">
-        <h2 className="text-lg font-medium text-zinc-900">开机自启</h2>
+        <h2 className="text-lg font-semibold text-zinc-900">开机自启</h2>
         
         <div className="flex items-center space-x-3">
           <label className="relative inline-flex items-center cursor-pointer">
@@ -253,7 +256,7 @@ export default function SettingsPage({
       <div className="bg-white rounded-2xl border p-5 space-y-4">
         <div className="flex items-center justify-between gap-4">
           <div>
-            <h2 className="text-lg font-medium text-zinc-900">残留进程清理</h2>
+            <h2 className="text-lg font-semibold text-zinc-900">残留进程清理</h2>
             <p className="text-zinc-500 text-xs">
               探测「占着进程但未使用」的节点/实例/探针残留（扫描残留、已停止实例的孤儿进程），勾选后一键清除；运行中的实例与网关自动跳过。
             </p>
@@ -333,7 +336,7 @@ export default function SettingsPage({
 
       {/* 清除数据 */}
       <div className="bg-white rounded-2xl border p-5 space-y-4 border-red-200">
-        <h2 className="text-lg font-medium text-red-700">清除数据</h2>
+        <h2 className="text-lg font-semibold text-red-700">清除数据</h2>
         <p className="text-zinc-500 text-xs">
           遇到环境异常（实例/端口残留、配置损坏）时可清理本地数据。执行前会自动停止所有实例与网关。
         </p>
@@ -368,7 +371,7 @@ export default function SettingsPage({
 
       {/* 关于 */}
       <div className="bg-white rounded-2xl border p-5 space-y-4">
-        <h2 className="text-lg font-medium text-zinc-900">关于</h2>
+        <h2 className="text-lg font-semibold text-zinc-900">关于</h2>
 
         <div className="space-y-2">
           <label className="block text-sm font-medium text-zinc-700">版本</label>

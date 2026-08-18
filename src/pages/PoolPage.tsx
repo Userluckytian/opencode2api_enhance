@@ -1,6 +1,6 @@
 import { memo, useCallback, useEffect, useRef, useState } from 'react'
 import clsx from 'clsx'
-import { Copy, Loader2, Power, RefreshCw, ShieldCheck, Network, Search, Play, Square, TestTube2, Trash2, KeyRound, Pencil, Check, X, Activity, Settings2, ChevronDown } from 'lucide-react'
+import { Copy, Loader2, Power, RefreshCw, ShieldCheck, Network, Search, Play, Square, TestTube2, Trash2, KeyRound, Pencil, Check, X, Activity, Settings2, ChevronDown, Layers } from 'lucide-react'
 import { api, type GatewayStatus, type Instance, type TestResult, type PoolQualitySummary, type PoolQualityRecord, type PoolQualityLevel, type AutoModelConfig } from '../lib/api'
 
 function statusBadge(st: Instance['status']): [string, string] {
@@ -692,7 +692,8 @@ export default memo(function PoolPage({
       {/* 工具条 */}
       <div className="flex items-center justify-between">
         <div className="flex items-center gap-3">
-          <h2 className="text-lg font-semibold text-zinc-900">实例池</h2>
+          <Layers size={18} className="text-teal-700" />
+          <h1 className="text-[16px] font-semibold text-zinc-900">实例池</h1>
           <span
             className={clsx(
               'flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium',
