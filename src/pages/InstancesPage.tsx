@@ -643,10 +643,7 @@ if (kind === 'delete' && !confirm(`确定释放选中的 ${names.length} 个实�
 
       {/* 页面设置弹窗（右上角齿轮）：折叠面板，每个配置分组一个 section（默认收起） */}
       {settingsOpen && (
-        <div
-          className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4"
-          onClick={() => setSettingsOpen(false)}
-        >
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4">
           <div className="bg-white rounded-2xl shadow-xl w-full max-w-md max-h-[86vh] overflow-y-auto p-6 space-y-4" onClick={(e) => e.stopPropagation()}>
             <div className="flex items-center justify-between">
               <h2 className="text-lg font-semibold text-zinc-900">独享管理设置</h2>
