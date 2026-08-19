@@ -32,7 +32,7 @@ func TestE2EAdminHTTP(t *testing.T) {
 	t.Cleanup(func() { adminPassword = oldPwd })
 
 	mux := http.NewServeMux()
-	registerHTTPRoutes(mux, m)
+	registerHTTPRoutes(mux, m, nil) // 插件路由由 pluginprovider 包自身单测覆盖，此处不装配
 	srv := httptest.NewServer(mux)
 	defer srv.Close()
 

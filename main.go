@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/6Kmfi6HP/opencode2api/core/manager"
+	"github.com/6Kmfi6HP/opencode2api/core/manager/pluginprovider"
 )
 
 // frontendDistDir 返回前端构建产物目录（存在 dist/index.html 时）。
@@ -178,7 +179,14 @@ func main() {
 	})
 
 	mux := http.NewServeMux()
-	registerHTTPRoutes(mux, managerInst)
+	// R1 插件式供应商：providers/ 目录扫描 + 子进程生命周期 + 管理 API。
+	// 主进程正常退出时经 Close 统一 kill 全部插件子进程（设计文档 §4.3）；
+	// 强杀路径（taskkill /F / SIGKILL）无法触发，Linux 由 systemd cgroup 兜底，
+	// Windows 桌面壳按进程树回收，属既有进程管理边界（详见 PLUGIN-PROVIDERS.md §9）。
+	pluginMgr := pluginprovider.New(pluginprovider.Config{})
+	pluginMgr.Start()
+	defer pluginMgr.Close()
+	registerHTTPRoutes(mux, managerInst, pluginMgr)
 	addr := ":" + port
 	if listenAddr != "" {
 		addr = listenAddr + ":" + port
@@ -212,7 +220,8 @@ func withRecover(next http.Handler) http.Handler {
 }
 
 // registerHTTPRoutes 注册全部 HTTP 路由（/v1、/api、/api/admin、/health、静态 SPA）。
-func registerHTTPRoutes(mux *http.ServeMux, managerInst *manager.Manager) {
+// pluginMgr 为 R1 插件式供应商管理器（nil = 不注册插件路由，测试用）。
+func registerHTTPRoutes(mux *http.ServeMux, managerInst *manager.Manager, pluginMgr *pluginprovider.Manager) {
 	mux.HandleFunc("/v1/chat/completions", loggingMiddleware(apiKeyAuthMiddleware(chatCompletionsHandler)))
 	mux.HandleFunc("/v1/responses", loggingMiddleware(apiKeyAuthMiddleware(responsesHandler)))
 	mux.HandleFunc("/v1/messages", loggingMiddleware(apiKeyAuthMiddleware(claudeMessagesHandler)))
@@ -275,6 +284,14 @@ func registerHTTPRoutes(mux *http.ServeMux, managerInst *manager.Manager) {
 	mux.HandleFunc("/api/admin/custom-providers/test", loggingMiddleware(requireAuth(customProvidersTestHandler())))
 	mux.HandleFunc("/api/admin/custom-providers/probe", loggingMiddleware(requireAuth(customProvidersProbeHandler())))
 	mux.HandleFunc("/api/admin/custom-providers/clear", loggingMiddleware(requireAuth(customProvidersClearHandler(managerInst))))
+	// R1 插件式供应商（第七页「自定义模型」插件 tab）：列表 / 配置保存 / 启停 / 删除 / 手动重扫。
+	if pluginMgr != nil {
+		mux.HandleFunc("/api/admin/plugins", loggingMiddleware(requireAuth(pluginMgr.ListHandler())))
+		mux.HandleFunc("/api/admin/plugins/rescan", loggingMiddleware(requireAuth(pluginMgr.RescanHandler())))
+		mux.HandleFunc("/api/admin/plugins/{id}/config", loggingMiddleware(requireAuth(pluginMgr.ConfigSaveHandler())))
+		mux.HandleFunc("/api/admin/plugins/{id}/toggle", loggingMiddleware(requireAuth(pluginMgr.ToggleHandler())))
+		mux.HandleFunc("/api/admin/plugins/{id}", loggingMiddleware(requireAuth(pluginMgr.DeleteHandler())))
+	}
 	// T3: 订阅源列表管理（新增/删除/立即拉取）+ 列表查看。
 	mux.HandleFunc("/api/admin/subscriptions", loggingMiddleware(requireAuth(managerInst.SubscriptionsListHandler())))
 	mux.HandleFunc("/api/admin/subscriptions/count", loggingMiddleware(requireAuth(managerInst.SubscriptionsCountHandler())))
