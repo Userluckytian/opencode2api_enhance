@@ -17,13 +17,18 @@ func isFreeModelID(id string) bool {
 	}
 	switch low {
 	case "deepseek-v4-flash", "mimo-v2.5", "ling-3.0-flash",
-		"nemotron-3-ultra", "north-mini-code", "laguna-s-2.1":
+		"nemotron-3-ultra", "north-mini-code", "laguna-s-2.1",
+		"hy3", "nemotron-3.5-lightning":
 		return true
 	}
 	return false
 }
 
 // pickFreeModel 从 /v1/models data[] 挑选免费模型（-free/big-pickle 立即命中）。
+// 兜底：本系统实例/探测进程的 /v1/models 已按 isFreeModel 只返回免费模型
+// （空目录返回 503，见 listModelsHandler），因此 data 非空时任意非 auto 模型
+// 都值得实测——避免上游新增免费模型（如 hy3、nemotron-3.5-lightning）后，
+// 硬编码名单过期导致误报「无免费模型可测试」。
 func pickFreeModel(data []map[string]any) string {
 	var firstFree string
 	for _, mp := range data {
@@ -37,6 +42,15 @@ func pickFreeModel(data []map[string]any) string {
 		}
 		if firstFree == "" && isFreeModelID(id) {
 			firstFree = id
+		}
+	}
+	if firstFree == "" {
+		// 兜底：跳过 auto 虚拟模型，取第一个可测模型
+		for _, mp := range data {
+			id, _ := mp["id"].(string)
+			if id != "" && !strings.EqualFold(strings.TrimSpace(id), "auto") {
+				return id
+			}
 		}
 	}
 	return firstFree

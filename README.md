@@ -53,11 +53,12 @@ UI 参照 Windsurf Account Manager 的浅色官网风格：无边框窗口 + 自
 ## Linux / Headless 部署
 
 - **无头模式（Headless）**：同一 Go core 二进制以管理器方式运行即完整 Web 服务（默认监听 `:<port>` 全接口、托管前端 `dist/`、纯浏览器管理），两种启动途径：
-  - **裸 core**：直接运行 `./opencode2api -port 40000 -password "change-me" -config config.json`（服务器 / Docker 场景；管理 API 含启停实例等高权限操作，仅本机访问加 `-listen 127.0.0.1`，公网部署务必配合反向代理限制来源），见 [部署文档](docs/DEPLOYMENT.md)。
+  - **裸 core**：直接运行 `./opencode2api -port 40000 -config config.json`（服务器 / Docker 场景；管理鉴权默认关闭——需要开启时加 `-password <密码>`，管理 API 含启停实例等高权限操作，仅本机访问加 `-listen 127.0.0.1`，公网部署务必配合反向代理限制来源），见 [部署文档](docs/DEPLOYMENT.md)。
   - **桌面壳**：安装桌面版后 `opencode2api --headless [-port 40000] [-listen 127.0.0.1]`——壳释放内嵌组件并拉起 core，无窗口运行，适合 SSH / 无图形会话；退出自动清理网关与实例，见 [Linux 开发与构建指南](docx/LINUX-DEVELOPMENT.md)。
 - **桌面（Linux）**：安装 .deb / AppImage 即可；桌面模式内置本地 HTTP 服务，前端经它取数，行为与 Windows 版一致。
+- **deb 自动注册 systemd 服务**：`.deb` 安装后自动注册并启用 `opencode2api` 服务（`systemctl status opencode2api` 查看）。配置文件为 `/etc/opencode2api/manager.env`（WebUI 端口默认 `60000`、监听 `127.0.0.1`、数据目录 `/var/lib/opencode2api`、统一网关密钥默认 `sk-unified-local`）。**修改该文件后必须执行 `sudo systemctl daemon-reload && sudo systemctl restart opencode2api` 才生效**（安装 deb 时终端会输出此提示）；端口/网关密钥也可以在 WebUI「统一网关」卡片修改（写入 `config.json`，保存即生效，无需重启）。
 - **Docker（服务器）**：仓库根目录 `docker compose up -d --build` 即起完整管理器（含七页前端与 sing-box 出口），管理面板 `http://127.0.0.1:40000`，见 [部署文档](docs/DEPLOYMENT.md)。
-- 数据目录与配置：`OPCODE2API_DATA_DIR` 隔离数据；`OPCODE2API_MANAGER_PORT` 覆盖管理端口；`config.json` 支持网关端口/密钥、订阅、日志过滤等配置项。
+- 数据目录与配置：`OPCODE2API_DATA_DIR` 隔离数据；`OPCODE2API_MANAGER_PORT` 覆盖管理端口；`config.json` 支持网关端口/密钥（统一网关密钥默认 `sk-unified-local`，也可用 `OPCODE2API_GATEWAY_KEY` 环境变量覆盖）、订阅、日志过滤等配置项。
 
 ## macOS 部署
 
@@ -94,8 +95,8 @@ powershell -ExecutionPolicy Bypass -File scripts/prepare-portable.ps1
 
 Linux 桌面产物（.deb）需在 Linux 环境构建（Windows 可用 WSL），核心两步：
 
-1. 交叉编译 Go core 与下载 sing-box（无扩展名，见下文「内嵌二进制」）：`GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -trimpath -ldflags "-s -w -X main.version=v1.5.1" -o bin/opencode2api .`，`./scripts/fetch-singbox.sh linux-amd64`
-2. WSL 内 `npx tauri build --bundles deb` 产出 `linux-out/opencode2api_<version>_amd64.deb`；Debian/Ubuntu 用 `sudo dpkg -i` 安装，`opencode2api --headless` 可无桌面运行
+1. 交叉编译 Go core 与下载 sing-box（无扩展名，见下文「内嵌二进制」）：`GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -trimpath -ldflags "-s -w -X main.version=v1.5.3" -o bin/opencode2api .`，`./scripts/fetch-singbox.sh linux-amd64`
+2. WSL 内 `npx tauri build --bundles deb` 产出 `linux-out/opencode2api_<version>_amd64.deb`；Debian/Ubuntu 用 `sudo apt install ./opencode2api_<version>_amd64.deb` 安装（deb 自动注册 systemd 服务 `opencode2api` 并启用），`opencode2api --headless` 可无桌面运行
 
 细节（平台二进制解析 / 可写目录回退 / 前端资源复制 / 组件内嵌选择 / 构建与验证 / 常见问题）见 [docx/LINUX-DEVELOPMENT.md](docx/LINUX-DEVELOPMENT.md)。
 
@@ -128,7 +129,7 @@ npm run tauri:dev
 
 | 路径               | 说明                                  |
 | ---------------- | ----------------------------------- |
-| `config.json`    | 应用配置（Clash 外部控制、默认密码）               |
+| `config.json`    | 应用配置（Clash 外部控制、统一网关端口/密钥）           |
 | `instances.json` | 实例清单                                |
 | `runtime\`       | 各实例的运行目录与日志                         |
 | （exe 旁）`bin\`    | 释放的 opencode2api.exe / sing-box.exe |

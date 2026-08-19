@@ -177,6 +177,23 @@ func TestPickFreeModel(t *testing.T) {
 	if !isFreeModelID("big-pickle") || !isFreeModelID("X-free") {
 		t.Fatal("free detection failed")
 	}
+	// 上游新增免费模型（hy3 / nemotron-3.5-lightning，剥 -free 后无后缀）
+	if !isFreeModelID("hy3") || !isFreeModelID("nemotron-3.5-lightning") {
+		t.Fatal("new free models should be detected")
+	}
+	// 兜底：本系统 /v1/models 只返回免费模型，data 非空即取首个非 auto 模型
+	got = pickFreeModel([]map[string]any{{"id": "auto"}, {"id": "hy3"}})
+	if got != "hy3" {
+		t.Fatalf("fallback should skip auto and pick hy3, got %q", got)
+	}
+	got = pickFreeModel([]map[string]any{{"id": "auto"}})
+	if got != "" {
+		t.Fatalf("only auto should yield empty, got %q", got)
+	}
+	got = pickFreeModel([]map[string]any{})
+	if got != "" {
+		t.Fatalf("empty data should yield empty, got %q", got)
+	}
 }
 
 func TestProbeHelpers(t *testing.T) {

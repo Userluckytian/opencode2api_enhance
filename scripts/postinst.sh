@@ -23,7 +23,20 @@ case "$1" in
       systemctl daemon-reload
       systemctl enable opencode2api >/dev/null 2>&1 || true
       systemctl start opencode2api >/dev/null 2>&1 || true
-      echo "opencode2api: 服务已注册并尝试启动（systemctl status opencode2api 查看状态）"
+      echo ""
+      echo "============================================================"
+      echo "  opencode2api 安装完成，服务已注册并尝试启动！"
+      echo ""
+      echo "  1) 如需修改端口/监听地址/数据目录/网关密钥，请编辑："
+      echo "       sudo nano /etc/opencode2api/manager.env"
+      echo "  2) 修改 manager.env 后必须重启服务才生效："
+      echo "       sudo systemctl daemon-reload && sudo systemctl restart opencode2api"
+      echo "  3) 查看服务状态与实时日志："
+      echo "       systemctl status opencode2api"
+      echo "       journalctl -u opencode2api -f"
+      echo ""
+      echo "  管理 WebUI：http://127.0.0.1:${MANAGER_PORT:-60000}/"
+      echo "============================================================"
     fi
 
     # 4) 首次安装提示（统一网关密钥默认 sk-unified-local；管理 WebUI 鉴权默认关闭
@@ -36,6 +49,12 @@ case "$1" in
         echo "opencode2api: 统一网关密钥默认 sk-unified-local；如需自定义请在 WebUI「统一网关」卡片设置"
       fi
     fi
+
+    # 5) 修改 manager.env 后生效提示：systemd EnvironmentFile 在服务启动时读取，
+    #    改了端口/监听地址/网关密钥等必须 daemon-reload + restart 才生效。
+    echo "opencode2api: 提示：修改 /etc/opencode2api/manager.env 后必须执行以下命令才生效："
+    echo "opencode2api:   sudo systemctl daemon-reload && sudo systemctl restart opencode2api"
+    echo "opencode2api: 当前服务状态：systemctl status opencode2api"
     ;;
 esac
 
