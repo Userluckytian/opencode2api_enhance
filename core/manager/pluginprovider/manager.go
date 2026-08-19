@@ -201,6 +201,12 @@ type plugin struct {
 	stopped     bool
 	retryCh     chan struct{} // 唤醒监督协程立即行动（启用/配置保存/清单修复）
 	exitCh      chan struct{} // 子进程退出通知（缓冲 1，防泄漏）
+	// stdoutCh 子进程 stdout 行流（当前 spawn 周期有效）：spawnAndReadReady 就该通道
+	// 解析就绪行；收到首个 need_config 后把它移交稳定态（supervise 的 select 分支），
+	// 从而持续捕获子进程后续补打的 ready/fatal 行（设计文档 §4.1：宿主必须持续
+	// 消费 stdout 行流，否则漏掉 need_config → ready 转换，插件永不注册）。由
+	// scanStdout 写入、spawnAndReadReady 之后 supervise 继续读，通道不跨周期重建。
+	stdoutCh chan string
 }
 
 func newPlugin(m *Manager, id string) *plugin {
@@ -214,6 +220,7 @@ func newPlugin(m *Manager, id string) *plugin {
 		stopCh:       make(chan struct{}),
 		retryCh:      make(chan struct{}, 1),
 		exitCh:       make(chan struct{}, 1),
+		stdoutCh:     make(chan string, 16),
 	}
 }
 
@@ -404,6 +411,8 @@ func (m *Manager) supervise(p *plugin) {
 		case <-p.retryCh:
 		default:
 		}
+		// 稳定态：持续消费子进程 stdout 行流（need_config 后子进程补打 ready/fatal 行），
+		// 同时监听退出/重试/停用。设计文档 §4.1：宿主必须持续消费 stdout 行流。
 		select {
 		case <-p.exitCh:
 			m.setStatus(p, StatusError, "子进程意外退出")
@@ -414,8 +423,58 @@ func (m *Manager) supervise(p *plugin) {
 		case <-p.stopCh:
 			m.killCurrent(p)
 			return
+		case ln, ok := <-p.stdoutCh:
+			if !ok {
+				continue // stdout 关闭由 exitCh 分支处理（子进程退出时触发）
+			}
+			if m.handleStdoutLine(p, ln) {
+				continue // 已重启（fatal）或就绪（ready），回循环顶部统一处理
+			}
 		}
 	}
+}
+
+// handleStdoutLine 处理稳定态收到的子进程 stdout 行（need_config 后的后续状态行）。
+// 返回 true = 状态已变化需要回循环顶部（就绪 running / fatal 重启），
+// false = 忽略（非就绪行、重复 need_config、重复 ready）。
+func (m *Manager) handleStdoutLine(p *plugin, ln string) bool {
+	msg, isReady := parseReadyLine(ln)
+	if !isReady {
+		return false
+	}
+	switch msg.State {
+	case "ready":
+		m.mu.Lock()
+		if m.closed || !p.enabled || p.status == StatusRunning {
+			m.mu.Unlock()
+			return false // 已就绪：重复行，忽略
+		}
+		token := p.auth
+		m.mu.Unlock()
+		// 一次性令牌/port 校验（与 spawnAndReadReady 首次就绪同款）。
+		if msg.Auth != token || msg.Port < 1 || msg.Port > 65535 {
+			return false
+		}
+		if msg.ID != "" && msg.ID != p.id {
+			return false
+		}
+		m.mu.Lock()
+		p.url = fmt.Sprintf("http://127.0.0.1:%d", msg.Port)
+		p.status = StatusRunning
+		p.lastError = ""
+		p.startedAt = time.Now()
+		m.mu.Unlock()
+		m.queryModelCount(p) // 尽力而为（模型数展示；失败保持 0）
+		m.notifyChange()
+		return true
+	case "need_config":
+		return false // 状态已记录（spawn 时），重复行忽略
+	case "fatal":
+		m.killCurrent(p)
+		m.setStatus(p, StatusError, "子进程运行中报告致命错误: "+msg.Error)
+		return true
+	}
+	return false
 }
 
 // revalidateManifest 重新读盘校验清单（清单错误修复后重试）。
@@ -498,11 +557,15 @@ func (m *Manager) spawnAndReadReady(p *plugin) bool {
 	ctx, cancel := context.WithTimeout(spawnCtx, m.cfg.StartupTimeout)
 	defer cancel()
 
-	// 每个 spawn 周期重建 exitCh：旧子进程（被 kill/退出）的退出通知留在旧通道上，
-	// 防止陈旧通知在稳定态 select 中触发误判「子进程意外退出」重启。
+	// 每个 spawn 周期重建 exitCh 与 stdoutCh：旧子进程（被 kill/退出）的退出通知与
+	// stdout 行留在旧通道上，防止陈旧消息在稳定态 select 中触发误判
+	// （「子进程意外退出」重启 / 旧周期行干扰）。scanStdout 结束时 close 的是本周期
+	// 局部引用，不影响下一周期的重建通道。
 	m.mu.Lock()
 	p.exitCh = make(chan struct{}, 1)
 	exitCh := p.exitCh
+	stdoutCh := make(chan string, 16)
+	p.stdoutCh = stdoutCh
 	m.mu.Unlock()
 
 	cmd := exec.Command(entryPath, "--provider-serve", "--port", "0")
@@ -531,8 +594,7 @@ func (m *Manager) spawnAndReadReady(p *plugin) bool {
 	p.startedAt = time.Time{}
 	m.mu.Unlock()
 
-	lines := make(chan string, 16)
-	go scanStdout(stdout, lines)
+	go scanStdout(stdout, stdoutCh)
 	cleanup := func() {
 		m.mu.Lock()
 		if p.pid == cmd.Process.Pid {
@@ -550,7 +612,7 @@ func (m *Manager) spawnAndReadReady(p *plugin) bool {
 			cleanup()
 			m.fail(p, fmt.Sprintf("启动超时：%s 内未收到就绪行", m.cfg.StartupTimeout))
 			return false
-		case ln, ok := <-lines:
+		case ln, ok := <-stdoutCh:
 			if !ok {
 				// stdout 关闭 = 子进程已退出（未报告状态）。
 				cleanup()
