@@ -151,6 +151,47 @@ export type CustomProbeResult = {
   last_success?: string
 }
 
+// 插件式供应商（R1 后端 core/manager/pluginprovider.View，设计文档 docs/PLUGIN-PROVIDERS.md 七）
+export type PluginStatus = 'running' | 'need_config' | 'disabled' | 'starting' | 'error'
+
+export type PluginProviderView = {
+  id: string
+  name: string
+  version: string
+  status: PluginStatus
+  /** 就绪后拉取的模型数（失败=0） */
+  models: number
+  /** providers/<id> 绝对路径（展示用） */
+  path: string
+  /** provider.json 全文（编辑回填） */
+  provider_json: string
+  pid?: number
+  url?: string
+  last_error?: string
+  /** 最近就绪时间（RFC3339） */
+  started_at?: string
+  restart_count: number
+}
+
+export type PluginListResponse = {
+  plugins: PluginProviderView[]
+}
+
+export type PluginSaveResponse = {
+  status: string
+  plugin: PluginProviderView
+}
+
+export type PluginToggleResponse = {
+  status: string
+  plugin: PluginProviderView
+}
+
+export type PluginDeleteResponse = {
+  status: string
+  deleted: string
+}
+
 export type ScanStatus = 'idle' | 'running' | 'stopping' | 'done' | 'error'
 
 export type ProbeResult = {
@@ -596,6 +637,15 @@ export const api = {
   /** 清空全部自定义源（含目录磁盘缓存）；内建源与其它数据不受影响 */
   customProvidersClear: () =>
     req<{ status: string; cleared: boolean; providers: CustomProviderView[] }>('POST', '/custom-providers/clear'),
+
+  // 插件式供应商（第七页「自定义模型」插件 tab）：providers/ 目录发现 / 重扫 / 配置保存 / 启停 / 删除
+  pluginsList: () => req<PluginListResponse>('GET', '/plugins'),
+  pluginsRescan: () => req<PluginListResponse>('POST', '/plugins/rescan'),
+  pluginSaveConfig: (id: string, providerJSON: string) =>
+    req<PluginSaveResponse>('POST', `/plugins/${encodeURIComponent(id)}/config`, { provider_json: providerJSON }),
+  pluginToggle: (id: string, enabled: boolean) =>
+    req<PluginToggleResponse>('POST', `/plugins/${encodeURIComponent(id)}/toggle`, { enabled }),
+  pluginDelete: (id: string) => req<PluginDeleteResponse>('DELETE', `/plugins/${encodeURIComponent(id)}`),
 
   // 订阅（main 功能 M1）：preview 拉取解析、import 建实例、import-pool 仅入缓存
   subscribePreview: (url: string) => req<SubscribeResult>('POST', '/subscribe/preview', { url }),

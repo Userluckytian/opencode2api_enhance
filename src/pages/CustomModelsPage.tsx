@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import clsx from 'clsx'
-import { Loader2, Pencil, Plus, PlugZap, Activity, Trash2, X, Plug } from 'lucide-react'
-import { api, type CustomKeyStrategy, type CustomProviderInput, type CustomProviderTestResult, type CustomProviderView, type CustomProtocol } from '../lib/api'
+import { Loader2, Pencil, Plus, PlugZap, Activity, Trash2, X, Plug, RefreshCw } from 'lucide-react'
+import { api, type CustomKeyStrategy, type CustomProviderInput, type CustomProviderTestResult, type CustomProviderView, type CustomProtocol, type PluginProviderView, type PluginStatus } from '../lib/api'
 
 // 自定义模型源表单（新增/编辑共用）。编辑时 key 留空 = 保留原 key。
 type FormState = {
@@ -49,6 +49,56 @@ const PROTOCOLS: { value: CustomProtocol; label: string; hint: string }[] = [
 /** id 规则与后端一致：字母数字开头，可含 - _，≤32 字符 */
 const validId = (id: string) => /^[a-zA-Z0-9][a-zA-Z0-9_-]{0,31}$/.test(id)
 
+// 插件式供应商：状态徽标（设计文档 docs/PLUGIN-PROVIDERS.md §六）
+const STATUS_META: Record<PluginStatus, { label: string; cls: string }> = {
+  running: { label: '运行中', cls: 'bg-emerald-50 text-emerald-700' },
+  need_config: { label: '待配置', cls: 'bg-amber-50 text-amber-700' },
+  disabled: { label: '已停用', cls: 'bg-zinc-200 text-zinc-500' },
+  starting: { label: '启动中', cls: 'bg-sky-50 text-sky-700' },
+  error: { label: '异常', cls: 'bg-red-50 text-red-600' },
+}
+
+// 插件式供应商：状态筛选下拉选项
+const PLUGIN_FILTERS: { value: PluginStatus | 'all'; label: string }[] = [
+  { value: 'all', label: '全部' },
+  { value: 'running', label: '运行中' },
+  { value: 'need_config', label: '待配置' },
+  { value: 'disabled', label: '已停用' },
+  { value: 'error', label: '异常' },
+]
+
+// 插件编辑弹层状态：id/路径只读；provider.json 全文编辑，保存前前端校验 JSON 合法性
+type PluginEditState = {
+  id: string
+  name: string
+  path: string
+  /** provider.json 当前编辑内容 */
+  content: string
+  /** 打开弹层时的磁盘内容（「重置为磁盘内容」用） */
+  disk: string
+}
+
+// 顶层 name 编辑 → 同步写回 JSON 的 name 字段（id/entry 由后端保护，前端不动）
+const applyJsonName = (json: string, name: string): string => {
+  try {
+    const obj = JSON.parse(json) as Record<string, unknown>
+    obj.name = name
+    return JSON.stringify(obj, null, 2)
+  } catch {
+    return json // 当前内容非法 JSON：仅记录 name 输入，保存时统一拒绝
+  }
+}
+
+// 从 provider.json 读顶层 name（打开弹层/重置时回填显示名）
+const jsonName = (json: string): string => {
+  try {
+    const obj = JSON.parse(json) as { name?: unknown }
+    return typeof obj.name === 'string' ? obj.name : ''
+  } catch {
+    return ''
+  }
+}
+
 export default function CustomModelsPage({ toast }: { toast: (msg: string, ok?: boolean) => void }) {
   const [list, setList] = useState<CustomProviderView[] | null>(null)
   const [form, setForm] = useState<FormState | null>(null)
@@ -58,6 +108,16 @@ export default function CustomModelsPage({ toast }: { toast: (msg: string, ok?: 
   const [confirmDelete, setConfirmDelete] = useState<string | null>(null)
   const [confirmClear, setConfirmClear] = useState(false)
   const [clearing, setClearing] = useState(false)
+
+  // 插件式供应商（R4 双标签）：状态齐全前默认展示插件 tab（设计文档 §六）
+  const [tab, setTab] = useState<'plugins' | 'custom'>('plugins')
+  const [plugins, setPlugins] = useState<PluginProviderView[] | null>(null)
+  const [pluginFilter, setPluginFilter] = useState<PluginStatus | 'all'>('all')
+  const [pluginEditing, setPluginEditing] = useState<PluginEditState | null>(null)
+  const [pluginConfirmDelete, setPluginConfirmDelete] = useState<string | null>(null)
+  const [pluginBusy, setPluginBusy] = useState(false)
+  // 启停/保存后子进程状态异步推进（starting→running/need_config），延迟刷新让状态落定
+  const pluginRefreshTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
 
   // toast 用 ref 封装（App 的 showToast 每次渲染重建），effect 只跑一次
   const toastRef = useRef(toast)
@@ -75,6 +135,13 @@ export default function CustomModelsPage({ toast }: { toast: (msg: string, ok?: 
 
   useEffect(() => {
     void reload()
+    void loadPlugins()
+  }, [])
+
+  useEffect(() => {
+    return () => {
+      if (pluginRefreshTimer.current) clearTimeout(pluginRefreshTimer.current)
+    }
   }, [])
 
   const openAdd = () => {
@@ -263,6 +330,113 @@ export default function CustomModelsPage({ toast }: { toast: (msg: string, ok?: 
     )
   }
 
+  // ── 插件式供应商（R4）：列表 / 重扫 / 启停 / 编辑保存 / 删除 ──
+
+  const loadPlugins = async () => {
+    try {
+      const r = await api.pluginsList()
+      setPlugins(r.plugins ?? [])
+    } catch (e) {
+      console.error('加载插件式供应商失败', e)
+      toastRef.current('加载插件式供应商失败', false)
+    }
+  }
+
+  // 切到插件 tab 时刷新一次（子进程状态后端异步变化，不进列表时保持落后）
+  const switchTab = (t: 'plugins' | 'custom') => {
+    setTab(t)
+    if (t === 'plugins') void loadPlugins()
+  }
+
+  const schedulePluginRefresh = (ms = 2500) => {
+    if (pluginRefreshTimer.current) clearTimeout(pluginRefreshTimer.current)
+    pluginRefreshTimer.current = setTimeout(() => {
+      void loadPlugins()
+    }, ms)
+  }
+
+  const rescanPlugins = async () => {
+    setPluginBusy(true)
+    try {
+      const r = await api.pluginsRescan()
+      setPlugins(r.plugins ?? [])
+      toast('已重新扫描 providers/ 目录', true)
+    } catch (e) {
+      toast(`重新扫描失败：${String(e)}`, false)
+    } finally {
+      setPluginBusy(false)
+    }
+  }
+
+  // 启停：enabled=true 拉起子进程+注册厂商；false 停进程+注销（模型移出 /v1/models，不删文件）
+  const doPluginToggle = async (p: PluginProviderView) => {
+    const turningOn = p.status === 'disabled'
+    setPluginBusy(true)
+    try {
+      const r = await api.pluginToggle(p.id, turningOn)
+      setPlugins((prev) => prev?.map((x) => (x.id === p.id ? r.plugin : x)) ?? null)
+      toast(
+        turningOn ? `已启用 ${p.id}：子进程已拉起` : `已停用 ${p.id}（模型不再出现在 /v1/models）`,
+        true,
+      )
+      if (turningOn) schedulePluginRefresh()
+    } catch (e) {
+      toast(`${turningOn ? '启用' : '停用'}失败：${String(e)}`, false)
+    } finally {
+      setPluginBusy(false)
+    }
+  }
+
+  const openPluginEdit = (p: PluginProviderView) => {
+    setPluginEditing({
+      id: p.id,
+      name: jsonName(p.provider_json) || p.id,
+      path: p.path,
+      content: p.provider_json,
+      disk: p.provider_json,
+    })
+  }
+
+  // 保存编辑：前端先校验 JSON 合法性；id/entry 及 provider_private_configs 内部由后端/供应商校验
+  const savePlugin = async () => {
+    if (!pluginEditing) return
+    try {
+      JSON.parse(pluginEditing.content)
+    } catch {
+      toast('provider.json 不是合法 JSON，已拒绝保存', false)
+      return
+    }
+    setPluginBusy(true)
+    try {
+      const r = await api.pluginSaveConfig(pluginEditing.id, pluginEditing.content)
+      setPlugins((prev) => prev?.map((x) => (x.id === pluginEditing.id ? r.plugin : x)) ?? null)
+      setPluginEditing(null)
+      toast(`已保存 ${pluginEditing.id} 的 provider.json`, true)
+      schedulePluginRefresh()
+    } catch (e) {
+      toast(`保存失败：${String(e)}`, false)
+    } finally {
+      setPluginBusy(false)
+    }
+  }
+
+  // 删除：停进程 + 整目录删除（providers/<id>/ 下 provider.json、exe、data/ 全部移除，不可恢复）
+  const doPluginDelete = async (id: string) => {
+    setPluginConfirmDelete(null)
+    setPluginBusy(true)
+    try {
+      await api.pluginDelete(id)
+      setPlugins((prev) => prev?.filter((x) => x.id !== id) ?? null)
+      toast(`已删除 ${id}（providers/${id}/ 已移除）`, true)
+    } catch (e) {
+      toast(`删除失败：${String(e)}`, false)
+    } finally {
+      setPluginBusy(false)
+    }
+  }
+
+  const visiblePlugins = (plugins ?? []).filter((p) => pluginFilter === 'all' || p.status === pluginFilter)
+
   return (
     <div className="p-6 space-y-6">
       <div className="flex items-center justify-between gap-4">
@@ -277,26 +451,66 @@ export default function CustomModelsPage({ toast }: { toast: (msg: string, ok?: 
           </p>
         </div>
         <div className="flex items-center gap-2">
-          {(list?.length ?? 0) > 0 && (
+          {tab === 'plugins' ? (
             <button
-              onClick={() => setConfirmClear(true)}
-              className="flex items-center gap-1.5 border border-red-200 text-red-600 rounded-lg px-3 py-1.5 text-[13px] hover:bg-red-50 whitespace-nowrap"
+              onClick={() => void rescanPlugins()}
+              disabled={pluginBusy}
+              className="flex items-center gap-1.5 border border-zinc-200 text-zinc-600 rounded-lg px-3 py-1.5 text-[13px] hover:bg-zinc-50 whitespace-nowrap disabled:opacity-50"
+              title="重新扫描 providers/ 目录"
             >
-              <Trash2 size={14} />
-              清空全部
+              <RefreshCw size={14} className={pluginBusy ? 'animate-spin' : ''} />
+              重新扫描
             </button>
+          ) : (
+            <>
+              {(list?.length ?? 0) > 0 && (
+                <button
+                  onClick={() => setConfirmClear(true)}
+                  className="flex items-center gap-1.5 border border-red-200 text-red-600 rounded-lg px-3 py-1.5 text-[13px] hover:bg-red-50 whitespace-nowrap"
+                >
+                  <Trash2 size={14} />
+                  清空全部
+                </button>
+              )}
+              <button
+                onClick={openAdd}
+                className="flex items-center gap-1.5 bg-zinc-900 text-white rounded-lg px-3 py-1.5 text-[13px] hover:bg-zinc-700 whitespace-nowrap"
+              >
+                <Plus size={14} />
+                添加模型源
+              </button>
+            </>
           )}
-          <button
-            onClick={openAdd}
-            className="flex items-center gap-1.5 bg-zinc-900 text-white rounded-lg px-3 py-1.5 text-[13px] hover:bg-zinc-700 whitespace-nowrap"
-          >
-            <Plus size={14} />
-            添加模型源
-          </button>
         </div>
       </div>
 
-      {/* 清空全部二次确认 */}
+      {/* 双标签（设计文档 §六）：插件式供应商 / 用户自定义供应商 */}
+      <div className="flex items-center gap-4 border-b border-zinc-200">
+        <button
+          type="button"
+          onClick={() => switchTab('plugins')}
+          className={clsx(
+            'pb-2 -mb-px text-[13px] font-medium border-b-2 transition-colors',
+            tab === 'plugins' ? 'border-zinc-900 text-zinc-900' : 'border-transparent text-zinc-500 hover:text-zinc-700',
+          )}
+        >
+          插件式供应商
+        </button>
+        <button
+          type="button"
+          onClick={() => switchTab('custom')}
+          className={clsx(
+            'pb-2 -mb-px text-[13px] font-medium border-b-2 transition-colors',
+            tab === 'custom' ? 'border-zinc-900 text-zinc-900' : 'border-transparent text-zinc-500 hover:text-zinc-700',
+          )}
+        >
+          用户自定义供应商
+        </button>
+      </div>
+
+      {tab === 'custom' ? (
+        <>
+          {/* 清空全部二次确认 */}
       {confirmClear && (
         <div className="bg-red-50 border border-red-200 rounded-2xl p-4 flex items-center gap-3 text-sm">
           <span className="flex-1 text-red-700">
@@ -639,6 +853,211 @@ export default function CustomModelsPage({ toast }: { toast: (msg: string, ok?: 
               >
                 {saving ? <Loader2 size={14} className="animate-spin" /> : null}
                 {saving ? '保存中…' : '保存'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+        </>
+      ) : (
+        <div className="space-y-3">
+          {/* 顶部帮助文案 + 状态筛选下拉（设计文档 §六） */}
+          <div className="flex items-center justify-between gap-3">
+            <p className="text-xs text-zinc-500 flex-1 min-w-0">
+              将供应商文件夹放入安装目录 <code className="bg-zinc-100 px-1 rounded">providers/</code> 下（含 exe + provider.json），点「重新扫描」即可接入。
+            </p>
+            <select
+              value={pluginFilter}
+              onChange={(e) => setPluginFilter(e.target.value as PluginStatus | 'all')}
+              className="px-2.5 py-1.5 rounded-lg border border-zinc-200 bg-white text-[12px] text-zinc-600 outline-none shrink-0"
+              title="按状态筛选"
+            >
+              {PLUGIN_FILTERS.map((f) => (
+                <option key={f.value} value={f.value}>
+                  {f.label}
+                </option>
+              ))}
+            </select>
+          </div>
+
+          {/* 插件列表 */}
+          {plugins === null ? (
+            <div className="text-zinc-500">加载中...</div>
+          ) : plugins.length === 0 ? (
+            <div className="bg-white rounded-2xl border p-8 text-center text-zinc-500 text-sm">
+              还没有插件式供应商。将供应商文件夹（含可执行文件 + provider.json）放入安装目录 providers/ 下，点右上角「重新扫描」即可接入。
+            </div>
+          ) : visiblePlugins.length === 0 ? (
+            <div className="bg-white rounded-2xl border p-8 text-center text-zinc-500 text-sm">
+              没有匹配「{PLUGIN_FILTERS.find((f) => f.value === pluginFilter)?.label ?? ''}」状态的插件。
+            </div>
+          ) : (
+            <div className="space-y-3">
+              {visiblePlugins.map((p) => (
+                <div key={p.id} className={clsx('bg-white rounded-2xl border p-4', p.status === 'disabled' && 'opacity-60')}>
+                  <div className="flex items-start justify-between gap-4">
+                    <div className="min-w-0 space-y-1">
+                      <div className="flex items-center gap-2 flex-wrap">
+                        <span className="text-[15px] font-medium text-zinc-900">{p.name || p.id}</span>
+                        <span className="text-[11px] px-1.5 py-0.5 rounded bg-zinc-100 text-zinc-600 font-mono">{p.id}</span>
+                        <span className={clsx('text-[11px] px-1.5 py-0.5 rounded', STATUS_META[p.status]?.cls ?? 'bg-zinc-100 text-zinc-600')}>
+                          {STATUS_META[p.status]?.label ?? p.status}
+                        </span>
+                        <span className="text-[11px] px-1.5 py-0.5 rounded bg-zinc-100 text-zinc-600">v{p.version}</span>
+                      </div>
+                      <div className="text-xs text-zinc-500 font-mono truncate" title={p.path}>
+                        {p.path}
+                      </div>
+                      <div className="text-xs text-zinc-500">
+                        {p.models} 个模型
+                        {p.started_at ? ` · 启动 ${fmtTime(p.started_at)}` : ''}
+                        {p.restart_count > 0 ? ` · 已重启 ${p.restart_count} 次` : ''}
+                        {p.last_error ? <span className="text-red-500"> · {p.last_error}</span> : null}
+                      </div>
+                    </div>
+                    <div className="flex items-center gap-1.5 shrink-0">
+                      {/* 启停（与自定义源同款 switch；disabled 状态 = 已停用） */}
+                      <button
+                        type="button"
+                        onClick={() => void doPluginToggle(p)}
+                        disabled={pluginBusy}
+                        className={clsx(
+                          'relative inline-flex h-6 w-11 items-center rounded-full transition-colors disabled:opacity-50',
+                          p.status !== 'disabled' ? 'bg-zinc-900' : 'bg-zinc-200',
+                        )}
+                        aria-label={p.status === 'disabled' ? '启用' : '停用'}
+                      >
+                        <span
+                          className={clsx(
+                            'inline-block h-5 w-5 transform rounded-full bg-white border border-zinc-300 transition-transform',
+                            p.status !== 'disabled' ? 'translate-x-[22px]' : 'translate-x-[2px]',
+                          )}
+                        />
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => openPluginEdit(p)}
+                        className="p-2 rounded-lg text-zinc-500 hover:bg-zinc-100"
+                        aria-label="编辑"
+                      >
+                        <Pencil size={15} />
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setPluginConfirmDelete(p.id)}
+                        className="p-2 rounded-lg text-red-500 hover:bg-red-50"
+                        aria-label="删除"
+                      >
+                        <Trash2 size={15} />
+                      </button>
+                    </div>
+                  </div>
+
+                  {/* 删除二次确认（明确告知停进程 + 整目录删除不可恢复） */}
+                  {pluginConfirmDelete === p.id && (
+                    <div className="mt-3 flex items-center gap-2 text-xs bg-red-50 rounded-lg p-2.5">
+                      <span className="flex-1 text-red-700">
+                        删除插件 {p.id}？将停止其进程，并删除整个 <code className="bg-red-100 px-1 rounded">providers/{p.id}/</code> 目录（provider.json、exe 及 data/ 下数据），此操作不可恢复。
+                      </span>
+                      <button
+                        type="button"
+                        onClick={() => void doPluginDelete(p.id)}
+                        disabled={pluginBusy}
+                        className="px-2.5 py-1 rounded bg-red-600 text-white hover:bg-red-700 disabled:opacity-50"
+                      >
+                        删除
+                      </button>
+                      <button type="button" onClick={() => setPluginConfirmDelete(null)} className="px-2.5 py-1 rounded bg-white border border-zinc-200 text-zinc-600">
+                        取消
+                      </button>
+                    </div>
+                  )}
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* 插件式供应商编辑弹层（provider.json 全文 JSON 编辑；id/路径只读） */}
+      {pluginEditing && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-zinc-900/40 p-4">
+          <div className="bg-white rounded-2xl shadow-xl w-full max-w-[722px] max-h-[90vh] overflow-y-auto p-6 space-y-4" onClick={(e) => e.stopPropagation()}>
+            <div className="flex items-center justify-between">
+              <div className="text-[15px] font-semibold text-zinc-900">编辑插件 · {pluginEditing.id}</div>
+              <button type="button" onClick={() => setPluginEditing(null)} className="p-1.5 rounded-lg text-zinc-400 hover:bg-zinc-100">
+                <X size={16} />
+              </button>
+            </div>
+
+            <div className="space-y-2">
+              <label className="block text-sm font-medium text-zinc-700">显示名称</label>
+              <input
+                type="text"
+                value={pluginEditing.name}
+                onChange={(e) =>
+                  setPluginEditing((prev) =>
+                    prev ? { ...prev, name: e.target.value, content: applyJsonName(prev.content, e.target.value) } : prev,
+                  )
+                }
+                className="w-full px-3 py-2 border rounded-lg"
+              />
+              <p className="text-zinc-500 text-xs">写入 provider.json 顶层 name 字段</p>
+            </div>
+
+            <div className="space-y-2">
+              <label className="block text-sm font-medium text-zinc-700">插件 ID（只读）</label>
+              <input
+                type="text"
+                value={pluginEditing.id}
+                disabled
+                readOnly
+                className="w-full px-3 py-2 border rounded-lg font-mono disabled:bg-zinc-50 disabled:text-zinc-400"
+              />
+              <p className="text-zinc-500 text-xs">由目录名决定；模型以 <code className="bg-zinc-100 px-1 rounded">{pluginEditing.id}/模型名</code> 形式出现在 /v1/models</p>
+            </div>
+
+            <div className="space-y-2">
+              <label className="block text-sm font-medium text-zinc-700">路径（只读）</label>
+              <div className="w-full px-3 py-2 border rounded-lg font-mono text-[12px] text-zinc-500 bg-zinc-50 truncate" title={pluginEditing.path}>
+                {pluginEditing.path}
+              </div>
+            </div>
+
+            <div className="space-y-2">
+              <label className="block text-sm font-medium text-zinc-700">provider.json（全文 JSON 编辑）</label>
+              <textarea
+                rows={14}
+                value={pluginEditing.content}
+                onChange={(e) => setPluginEditing((prev) => (prev ? { ...prev, content: e.target.value } : prev))}
+                spellCheck={false}
+                className="w-full px-3 py-2 border rounded-lg font-mono text-[12px] resize-y leading-relaxed"
+              />
+              <p className="text-zinc-500 text-xs">
+                顶层 <code className="bg-zinc-100 px-1 rounded">id</code> / <code className="bg-zinc-100 px-1 rounded">entry</code> 由系统管理，请勿修改；provider_private_configs 内部结构由供应商自行校验。
+              </p>
+            </div>
+
+            <div className="flex items-center gap-2 pt-1">
+              <button
+                type="button"
+                onClick={() =>
+                  setPluginEditing((prev) => (prev ? { ...prev, content: prev.disk, name: jsonName(prev.disk) } : prev))
+                }
+                className="px-4 py-2 rounded-lg border border-zinc-300 text-[13px] text-zinc-700 hover:bg-zinc-50"
+                title="丢弃本次编辑，重新加载磁盘上的 provider.json"
+              >
+                重置为磁盘内容
+              </button>
+              <div className="flex-1" />
+              <button
+                type="button"
+                onClick={() => void savePlugin()}
+                disabled={pluginBusy}
+                className="flex items-center gap-1.5 bg-zinc-900 text-white rounded-lg px-4 py-2 text-[13px] hover:bg-zinc-700 disabled:opacity-60 disabled:cursor-not-allowed"
+              >
+                {pluginBusy ? <Loader2 size={14} className="animate-spin" /> : null}
+                {pluginBusy ? '保存中…' : '保存'}
               </button>
             </div>
           </div>
