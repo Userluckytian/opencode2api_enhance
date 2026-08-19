@@ -1551,10 +1551,7 @@ export default memo(function PoolPage({
       )}
 
       {portOpen && (
-        <div
-          className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4"
-          onClick={() => { if (!portBusy) setPortOpen(false) }}
-        >
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4">
           <div className="bg-white rounded-2xl shadow-xl w-full max-w-md p-5 space-y-4" onClick={(e) => e.stopPropagation()}>
             <div className="flex items-center gap-2">
               <Network size={16} className="text-teal-600" />
