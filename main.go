@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"runtime"
 	"runtime/debug"
 	"strings"
 	"time"
@@ -19,6 +20,7 @@ import (
 //   - dev/本机构建产物（cargo target 树内的 core）：优先仓库根 dist
 //     （src-tauri/target/debug/bin → 仓库根 4 级上溯），exe 旁 dist（陈旧副本）仅兜底；
 //   - 便携包/发布（core 不在 target 树内）：dist 固定 exe 旁 bin\dist；
+//   - Tauri deb/AppImage：resources 装在 /usr/lib/<app>/bin/dist（exe 在 /usr/bin）；
 //   - cwd 兜底（web-dev/headless：cwd=仓库根 → dist；Docker：cwd=/app → /app/dist）。
 func frontendDistDir() string {
 	var cands []string
@@ -37,6 +39,13 @@ func frontendDistDir() string {
 		} else {
 			// 便携包/发布：dist 固定 exe 旁 bin\dist。
 			cands = append(cands, filepath.Join(exeDir, "dist"))
+			// Tauri Linux deb/AppImage：resources 装在 /usr/lib/<app>/bin/dist（exe 在 /usr/bin）。
+			// 仅 Linux 生效；Windows/macOS 的安装布局不同，不参与查找，避免误命中。
+			if runtime.GOOS == "linux" {
+				cands = append(cands,
+					filepath.Join(exeDir, "..", "lib", filepath.Base(exe), "bin", "dist"),
+				)
+			}
 		}
 	}
 	if wd, err := os.Getwd(); err == nil {
