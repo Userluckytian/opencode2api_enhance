@@ -1,6 +1,39 @@
 # Changelog
 
-## v1.5.3（2026-08-18）
+## v1.5.4（2026-08-19）
+
+### 🚀 新功能
+
+- **统一网关端口自定义**：实例池页「统一网关」卡片新增「自定义端口」入口，保存即热生效（`ApplyPort` 热重启，镜像密钥行为）；端口配置走 `env > config > 默认` 三源优先级，重启后不再被 env 固化旧值
+- **deb 包自动注册 systemd 服务**：`.deb` 安装后自动注册并启用 `opencode2api` 服务（`systemctl status opencode2api` 查看），默认端口 60000、密钥 `sk-unified-local`，支持 `OPCODE2API_GATEWAY_KEY` env 注入；修改 `/etc/opencode2api/manager.env` 后需 `systemctl daemon-reload && systemctl restart` 才生效
+- **Linux/Headless 增强**：`--headless` 无头模式支持（释放内嵌组件 → 拉起 core → 打印管理地址 → 退出自动清理）；Linux 平台二进制解析与可写目录回退（deb/NSIS 安装场景自动复制前端 dist）
+- **管理鉴权默认关闭**：裸 core 不再要求 `-password`（默认空 = 不启用登录验证），需要时显式 `-password <密码>`
+- **deb 安装完成输出醒目提示**：`postinst` 打印经理.env 路径、重启命令、状态/日志查询命令与管理 WebUI 地址
+
+### 🔧 修复
+
+- **实例池测试误报「无免费模型可测试」**：免费模型名单扩充 `hy3`、`nemotron-3.5-lightning`（上游新增）；`pickFreeModel` 加兜底——本系统 `/v1/models` 已只返回免费模型，data 非空时跳过 auto 虚拟模型取首个可测模型，硬编码名单再过期也不误报
+- **网关自定义密码重启失效**：双 config 结构（`AppConfig` / `core/manager.Config`）共用 `config.json` 相互覆盖，改读-合并-写（`MergeConfigJSON`）保留对方字段
+- **上游失败响应体透传入调用日志**：日志错误信息完整显示 `upstream status <码>: <原因> body=<上游响应体>`，不再只有 `upstream status 400: <nil>`
+- **deb 维护脚本 CRLF 修复**：`.gitattributes` 强制 sh/service/env 文件 LF，修复 dpkg 无法执行 `preinst`（shebang 带 `\r`）的问题
+
+### 🎨 UI/UX
+
+- **七页标题/图标/布局统一**：统一 h1 字号与 teal 图标、去除页面宽度限制（全宽一致）
+- **七页按钮尺寸统一至独享页基准**：工具条 `px-3 py-1.5 text-[13px]` / 行内 `px-2.5 py-1 text-[12px]` / 弹窗 `px-4 py-2 text-[13px]`
+- **弹窗遮罩防误关**：含表单弹窗点击遮罩不再关闭（含统一网关端口弹窗），防填写中误触丢失输入
+- **设置页精简**：移除代理出口区块与退出程序按钮，新增版本标识
+
+### 📦 打包与文档
+
+- CI 增加 `workflow_dispatch` 手动触发；`gitignore` 忽略 linux-out 构建产物与测试图片
+- README 同步：deb systemd 服务说明、`apt install ./xxx.deb`、`manager.env` 修改后重启提示、config.json 统一网关端口/密钥说明
+
+### 🙏 致谢
+
+- 感谢 **FYHC1** 贡献 Linux/Headless 支持、deb systemd 部署、统一网关端口/密钥持久化与本版全部 PR（#12–#15），已完成代码审查并合入
+- 感谢 **Sujinxin123** / **6Kmfi6HP** 的开源基础与历史贡献（统一网关、免费额度实测健康检查、Go 代理核心）
+- 感谢所有反馈与测试的使用者
 
 ### 🚀 新功能
 

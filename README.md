@@ -95,7 +95,7 @@ powershell -ExecutionPolicy Bypass -File scripts/prepare-portable.ps1
 
 Linux 桌面产物（.deb）需在 Linux 环境构建（Windows 可用 WSL），核心两步：
 
-1. 交叉编译 Go core 与下载 sing-box（无扩展名，见下文「内嵌二进制」）：`GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -trimpath -ldflags "-s -w -X main.version=v1.5.3" -o bin/opencode2api .`，`./scripts/fetch-singbox.sh linux-amd64`
+1. 交叉编译 Go core 与下载 sing-box（无扩展名，见下文「内嵌二进制」）：`GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -trimpath -ldflags "-s -w -X main.version=v1.5.4" -o bin/opencode2api .`，`./scripts/fetch-singbox.sh linux-amd64`
 2. WSL 内 `npx tauri build --bundles deb` 产出 `linux-out/opencode2api_<version>_amd64.deb`；Debian/Ubuntu 用 `sudo apt install ./opencode2api_<version>_amd64.deb` 安装（deb 自动注册 systemd 服务 `opencode2api` 并启用），`opencode2api --headless` 可无桌面运行
 
 细节（平台二进制解析 / 可写目录回退 / 前端资源复制 / 组件内嵌选择 / 构建与验证 / 常见问题）见 [docx/LINUX-DEVELOPMENT.md](docx/LINUX-DEVELOPMENT.md)。
