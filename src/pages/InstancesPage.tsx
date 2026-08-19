@@ -612,11 +612,11 @@ if (kind === 'delete' && !confirm(`确定释放选中的 ${names.length} 个实�
                             {pending[i.name] === 'start' ? '启动中…' : '启动'}
                           </button>
                         )}
-                        <button onClick={() => void doTest(i.name)} disabled={!!rowTestBusy[i.name]} className="flex items-center gap-1 px-2.5 py-1 rounded-lg text-[12px] text-teal-700 bg-teal-50 hover:bg-teal-100 disabled:cursor-not-allowed disabled:opacity-60">
+                        <button onClick={() => void doTest(i.name)} disabled={!!rowTestBusy[i.name]} className="flex items-center gap-1 px-2.5 py-1 rounded-md text-[12px] text-teal-700 bg-teal-50 hover:bg-teal-100 disabled:cursor-not-allowed disabled:opacity-60">
                           {rowTestBusy[i.name] ? <Loader2 size={12} className="animate-spin" /> : <TestTube2 size={12} />}
                           {rowTestBusy[i.name] ? '测试中…' : '测试'}
                         </button>
-                        <button onClick={() => void doRemove(i.name)} disabled={!!rowRemoveBusy[i.name]} className="flex items-center gap-1 px-2.5 py-1 rounded-lg text-[12px] text-red-600 bg-red-50 hover:bg-red-100 disabled:cursor-not-allowed disabled:opacity-60">
+                        <button onClick={() => void doRemove(i.name)} disabled={!!rowRemoveBusy[i.name]} className="flex items-center gap-1 px-2.5 py-1 rounded-md text-[12px] text-red-600 bg-red-50 hover:bg-red-100 disabled:cursor-not-allowed disabled:opacity-60">
                           {rowRemoveBusy[i.name] ? <Loader2 size={12} className="animate-spin" /> : <Trash2 size={12} />}
                           {rowRemoveBusy[i.name] ? '释放中…' : '释放'}
                         </button>

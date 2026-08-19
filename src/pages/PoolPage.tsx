@@ -1099,13 +1099,13 @@ export default memo(function PoolPage({
               <button
                 onClick={() => void doReleaseAll('running')}
                 disabled={selRunning === 0}
-                className="flex items-center justify-center gap-1.5 px-3 py-2.5 rounded-lg text-[13px] text-amber-700 bg-amber-50 border border-amber-100 hover:bg-amber-100 disabled:cursor-not-allowed disabled:opacity-40"
+                className="flex items-center justify-center gap-1.5 px-4 py-2 rounded-lg text-[13px] text-amber-700 bg-amber-50 border border-amber-100 hover:bg-amber-100 disabled:cursor-not-allowed disabled:opacity-40"
               >
                 <Power size={14} /> 仅释放运行中（{selRunning}）
               </button>
               <button
                 onClick={() => void doReleaseAll('all')}
-                className="flex items-center justify-center gap-1.5 px-3 py-2.5 rounded-lg text-[13px] text-red-600 bg-red-50 border border-red-100 hover:bg-red-100"
+                className="flex items-center justify-center gap-1.5 px-4 py-2 rounded-lg text-[13px] text-red-600 bg-red-50 border border-red-100 hover:bg-red-100"
               >
                 <Trash2 size={14} /> 完全释放（{selTotal}）
               </button>
@@ -1534,14 +1534,14 @@ export default memo(function PoolPage({
               <button
                 onClick={() => void doSaveKey()}
                 disabled={keyBusy}
-                className="flex items-center justify-center gap-1.5 flex-1 px-4 py-2 rounded-lg text-sm text-white bg-teal-600 hover:bg-teal-700 disabled:cursor-not-allowed disabled:opacity-60"
+                className="flex items-center justify-center gap-1.5 flex-1 px-4 py-2 rounded-lg text-[13px] text-white bg-teal-600 hover:bg-teal-700 disabled:cursor-not-allowed disabled:opacity-60"
               >
                 {keyBusy ? <Loader2 size={14} className="animate-spin" /> : <Check size={14} />}
                 {keyBusy ? '保存中…' : '保存'}
               </button>
               <button
                 onClick={() => setKeyOpen(false)}
-                className="px-4 py-2 rounded-lg text-sm text-zinc-700 bg-white border border-zinc-200 hover:bg-zinc-50"
+                className="px-4 py-2 rounded-lg text-[13px] text-zinc-700 bg-white border border-zinc-200 hover:bg-zinc-50"
               >
                 取消
               </button>
@@ -1582,14 +1582,14 @@ export default memo(function PoolPage({
               <button
                 onClick={() => void doSavePort()}
                 disabled={portBusy}
-                className="flex items-center justify-center gap-1.5 flex-1 px-4 py-2 rounded-lg text-sm text-white bg-teal-600 hover:bg-teal-700 disabled:cursor-not-allowed disabled:opacity-60"
+                className="flex items-center justify-center gap-1.5 flex-1 px-4 py-2 rounded-lg text-[13px] text-white bg-teal-600 hover:bg-teal-700 disabled:cursor-not-allowed disabled:opacity-60"
               >
                 {portBusy ? <Loader2 size={14} className="animate-spin" /> : <Check size={14} />}
                 {portBusy ? '保存中…' : '保存'}
               </button>
               <button
                 onClick={() => setPortOpen(false)}
-                className="px-4 py-2 rounded-lg text-sm text-zinc-700 bg-white border border-zinc-200 hover:bg-zinc-50"
+                className="px-4 py-2 rounded-lg text-[13px] text-zinc-700 bg-white border border-zinc-200 hover:bg-zinc-50"
               >
                 取消
               </button>

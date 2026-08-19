@@ -360,7 +360,7 @@ export default function LogsPage({
           <button
             onClick={() => void doClearLogs()}
             disabled={logs.length === 0 || clearing}
-            className="flex items-center gap-2 bg-white border border-zinc-200 text-zinc-600 rounded-lg px-4 py-2 text-sm hover:bg-zinc-50 disabled:opacity-40 disabled:cursor-not-allowed"
+            className="flex items-center gap-1.5 bg-white border border-zinc-200 text-zinc-600 rounded-lg px-3 py-1.5 text-[13px] hover:bg-zinc-50 disabled:opacity-40 disabled:cursor-not-allowed"
           >
             {clearing ? <Loader2 size={14} className="animate-spin" /> : <Trash2 size={14} />}
             {clearing ? '清空中…' : '清空'}
@@ -368,7 +368,7 @@ export default function LogsPage({
           <button
             onClick={doRefresh}
             disabled={refreshing}
-            className="flex items-center gap-2 bg-zinc-900 text-white rounded-lg px-4 py-2 text-sm hover:bg-zinc-700 disabled:opacity-50"
+            className="flex items-center gap-1.5 bg-zinc-900 text-white rounded-lg px-3 py-1.5 text-[13px] hover:bg-zinc-700 disabled:opacity-50"
           >
             <RefreshCw size={14} className={refreshing ? 'animate-spin' : ''} />
             刷新
@@ -484,7 +484,7 @@ export default function LogsPage({
               type="button"
               onClick={() => setPage(Math.max(1, currentPage - 1))}
               disabled={currentPage <= 1}
-              className="flex items-center gap-1 bg-white border border-zinc-200 text-zinc-600 rounded-lg px-3 py-1.5 text-sm hover:bg-zinc-50 disabled:opacity-40 disabled:cursor-not-allowed"
+              className="flex items-center gap-1 bg-white border border-zinc-200 text-zinc-600 rounded-lg px-3 py-1.5 text-[13px] hover:bg-zinc-50 disabled:opacity-40 disabled:cursor-not-allowed"
             >
               <ChevronLeft size={14} />
               上一页
@@ -496,7 +496,7 @@ export default function LogsPage({
               type="button"
               onClick={() => setPage(Math.min(totalPages, currentPage + 1))}
               disabled={currentPage >= totalPages}
-              className="flex items-center gap-1 bg-white border border-zinc-200 text-zinc-600 rounded-lg px-3 py-1.5 text-sm hover:bg-zinc-50 disabled:opacity-40 disabled:cursor-not-allowed"
+              className="flex items-center gap-1 bg-white border border-zinc-200 text-zinc-600 rounded-lg px-3 py-1.5 text-[13px] hover:bg-zinc-50 disabled:opacity-40 disabled:cursor-not-allowed"
             >
               下一页
               <ChevronRight size={14} />

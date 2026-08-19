@@ -222,7 +222,7 @@ export default function SettingsPage({
         <button
           onClick={handleSaveClash}
           disabled={savingClash}
-          className="flex items-center gap-1.5 bg-zinc-900 text-white rounded-lg px-4 py-2 hover:bg-zinc-700 disabled:cursor-not-allowed disabled:opacity-60"
+          className="flex items-center gap-1.5 bg-zinc-900 text-white rounded-lg px-4 py-2 text-[13px] hover:bg-zinc-700 disabled:cursor-not-allowed disabled:opacity-60"
         >
           {savingClash ? <Loader2 size={14} className="animate-spin" /> : null}
           {savingClash ? '保存中…' : '保存'}
@@ -264,7 +264,7 @@ export default function SettingsPage({
           <button
             onClick={() => void doScanOrphans()}
             disabled={orphanBusy}
-            className="flex items-center gap-1.5 bg-zinc-900 text-white rounded-lg px-4 py-2 hover:bg-zinc-700 disabled:opacity-60 disabled:cursor-not-allowed whitespace-nowrap"
+            className="flex items-center gap-1.5 bg-zinc-900 text-white rounded-lg px-4 py-2 text-[13px] hover:bg-zinc-700 disabled:opacity-60 disabled:cursor-not-allowed whitespace-nowrap"
           >
             {orphanBusy ? <Loader2 size={14} className="animate-spin" /> : <Search size={14} />}
             {orphanBusy ? '探测中…' : '探测残留'}
@@ -324,7 +324,7 @@ export default function SettingsPage({
               <button
                 onClick={() => void doKillOrphans()}
                 disabled={killBusy || selected.size === 0}
-                className="flex items-center gap-1.5 bg-red-600 text-white rounded-lg px-4 py-2 text-sm hover:bg-red-700 disabled:opacity-60 disabled:cursor-not-allowed"
+                className="flex items-center gap-1.5 bg-red-600 text-white rounded-lg px-4 py-2 text-[13px] hover:bg-red-700 disabled:opacity-60 disabled:cursor-not-allowed"
               >
                 {killBusy ? <Loader2 size={14} className="animate-spin" /> : <Trash2 size={14} />}
                 {killBusy ? '清除中…' : '一键清除'}
@@ -344,7 +344,7 @@ export default function SettingsPage({
           <button
             onClick={() => handleDataClean(1)}
             disabled={!!cleanLevel}
-            className="flex items-center gap-1.5 px-4 py-2 rounded-lg border border-zinc-300 text-sm hover:bg-zinc-100 disabled:cursor-not-allowed disabled:opacity-50"
+            className="flex items-center gap-1.5 px-4 py-2 rounded-lg border border-zinc-300 text-[13px] hover:bg-zinc-100 disabled:cursor-not-allowed disabled:opacity-50"
           >
             {cleanLevel === 1 ? <Loader2 size={14} className="animate-spin" /> : null}
             清理运行数据
@@ -352,7 +352,7 @@ export default function SettingsPage({
           <button
             onClick={() => handleDataClean(2)}
             disabled={!!cleanLevel}
-            className="flex items-center gap-1.5 px-4 py-2 rounded-lg border border-amber-300 text-sm text-amber-700 hover:bg-amber-50 disabled:cursor-not-allowed disabled:opacity-50"
+            className="flex items-center gap-1.5 px-4 py-2 rounded-lg border border-amber-300 text-[13px] text-amber-700 hover:bg-amber-50 disabled:cursor-not-allowed disabled:opacity-50"
           >
             {cleanLevel === 2 ? <Loader2 size={14} className="animate-spin" /> : null}
             清空实例记录
@@ -360,7 +360,7 @@ export default function SettingsPage({
           <button
             onClick={() => handleDataClean(3)}
             disabled={!!cleanLevel}
-            className="flex items-center gap-1.5 px-4 py-2 rounded-lg bg-red-600 text-white text-sm hover:bg-red-700 disabled:cursor-not-allowed disabled:opacity-50"
+            className="flex items-center gap-1.5 px-4 py-2 rounded-lg bg-red-600 text-white text-[13px] hover:bg-red-700 disabled:cursor-not-allowed disabled:opacity-50"
           >
             {cleanLevel === 3 ? <Loader2 size={14} className="animate-spin" /> : null}
             全部重置

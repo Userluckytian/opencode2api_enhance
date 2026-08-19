@@ -280,7 +280,7 @@ export default function CustomModelsPage({ toast }: { toast: (msg: string, ok?: 
           {(list?.length ?? 0) > 0 && (
             <button
               onClick={() => setConfirmClear(true)}
-              className="flex items-center gap-1.5 border border-red-200 text-red-600 rounded-lg px-3 py-2 hover:bg-red-50 whitespace-nowrap"
+              className="flex items-center gap-1.5 border border-red-200 text-red-600 rounded-lg px-3 py-1.5 text-[13px] hover:bg-red-50 whitespace-nowrap"
             >
               <Trash2 size={14} />
               清空全部
@@ -288,7 +288,7 @@ export default function CustomModelsPage({ toast }: { toast: (msg: string, ok?: 
           )}
           <button
             onClick={openAdd}
-            className="flex items-center gap-1.5 bg-zinc-900 text-white rounded-lg px-4 py-2 hover:bg-zinc-700 whitespace-nowrap"
+            className="flex items-center gap-1.5 bg-zinc-900 text-white rounded-lg px-3 py-1.5 text-[13px] hover:bg-zinc-700 whitespace-nowrap"
           >
             <Plus size={14} />
             添加模型源
@@ -625,7 +625,7 @@ export default function CustomModelsPage({ toast }: { toast: (msg: string, ok?: 
                 type="button"
                 onClick={() => void doTest()}
                 disabled={testing || saving}
-                className="flex items-center gap-1.5 px-4 py-2 rounded-lg border border-zinc-300 text-zinc-700 hover:bg-zinc-50 disabled:opacity-60 disabled:cursor-not-allowed"
+                className="flex items-center gap-1.5 px-4 py-2 rounded-lg border border-zinc-300 text-[13px] text-zinc-700 hover:bg-zinc-50 disabled:opacity-60 disabled:cursor-not-allowed"
               >
                 {testing ? <Loader2 size={14} className="animate-spin" /> : <PlugZap size={14} />}
                 {testing ? '测试中…' : '测试并获取模型'}
@@ -635,7 +635,7 @@ export default function CustomModelsPage({ toast }: { toast: (msg: string, ok?: 
                 type="button"
                 onClick={() => void doSave()}
                 disabled={testing || saving}
-                className="flex items-center gap-1.5 bg-zinc-900 text-white rounded-lg px-4 py-2 hover:bg-zinc-700 disabled:opacity-60 disabled:cursor-not-allowed"
+                className="flex items-center gap-1.5 bg-zinc-900 text-white rounded-lg px-4 py-2 text-[13px] hover:bg-zinc-700 disabled:opacity-60 disabled:cursor-not-allowed"
               >
                 {saving ? <Loader2 size={14} className="animate-spin" /> : null}
                 {saving ? '保存中…' : '保存'}

@@ -836,7 +836,7 @@ export default function NodesPage({
             <button
               type="button"
               onClick={() => setAddOpen(!addOpen)}
-              className="flex items-center gap-1.5 px-3 py-2 rounded-lg text-[13px] text-zinc-700 bg-white border border-zinc-200 hover:bg-zinc-50"
+              className="flex items-center gap-1.5 px-4 py-2 rounded-lg text-[13px] text-zinc-700 bg-white border border-zinc-200 hover:bg-zinc-50"
             >
               <ChevronDown size={14} />
               新增订阅
@@ -937,7 +937,7 @@ export default function NodesPage({
                       <button
                         onClick={() => void handleImportSub(s.url)}
                         disabled={importingUrl === s.url}
-                        className="flex items-center gap-1 px-2.5 py-1.5 rounded-md text-[12px] text-teal-700 bg-teal-50 border border-teal-100 hover:bg-teal-100 disabled:opacity-60"
+                        className="flex items-center gap-1 px-2.5 py-1 rounded-md text-[12px] text-teal-700 bg-teal-50 border border-teal-100 hover:bg-teal-100 disabled:opacity-60"
                       >
                         {importingUrl === s.url ? <Loader2 size={12} className="animate-spin" /> : <Rss size={12} />}
                         {importingUrl === s.url ? '拉取中…' : '拉取'}
@@ -945,7 +945,7 @@ export default function NodesPage({
                       <button
                         onClick={() => void handleDeleteSub(s.url)}
                         disabled={deletingUrl === s.url}
-                        className="flex items-center gap-1 px-2.5 py-1.5 rounded-md text-[12px] text-red-600 bg-red-50 hover:bg-red-100 disabled:opacity-60"
+                        className="flex items-center gap-1 px-2.5 py-1 rounded-md text-[12px] text-red-600 bg-red-50 hover:bg-red-100 disabled:opacity-60"
                       >
                         {deletingUrl === s.url ? <Loader2 size={12} className="animate-spin" /> : <Trash2 size={12} />}
                         {deletingUrl === s.url ? '删除中…' : '删除'}

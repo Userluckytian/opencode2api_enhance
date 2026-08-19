@@ -254,18 +254,18 @@ export default function StatsPage({
             type="button"
             onClick={() => setShowResetConfirm(true)}
             disabled={resetting || !stats}
-            className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-white border border-zinc-200 text-zinc-600 text-[12px] font-medium hover:bg-zinc-50 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+            className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-white border border-zinc-200 text-zinc-600 text-[13px] font-medium hover:bg-zinc-50 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
           >
-            <RotateCcw size={13} className={resetting ? 'animate-spin' : ''} />
+            <RotateCcw size={14} className={resetting ? 'animate-spin' : ''} />
             {resetting ? '重置中…' : '重置统计'}
           </button>
           <button
             type="button"
             onClick={doRefresh}
             disabled={refreshing}
-            className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-zinc-900 text-white text-[12px] font-medium hover:bg-zinc-700 transition-colors disabled:cursor-not-allowed disabled:opacity-50"
+            className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-zinc-900 text-white text-[13px] font-medium hover:bg-zinc-700 transition-colors disabled:cursor-not-allowed disabled:opacity-50"
           >
-            <RefreshCw size={13} className={refreshing ? 'animate-spin' : ''} />
+            <RefreshCw size={14} className={refreshing ? 'animate-spin' : ''} />
             {refreshing ? '刷新中…' : '刷新'}
           </button>
         </div>
