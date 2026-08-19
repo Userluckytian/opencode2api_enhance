@@ -107,6 +107,16 @@ func waitGone(t *testing.T, pm *Manager, id string, timeout time.Duration) {
 	})
 }
 
+// waitStableRunning 轮询等待插件稳定在 running（替代固定 time.Sleep）：
+// 重启/启停后的短暂 starting 窗口在全量测试负载下可能超过固定时长，
+// 改为在窗口内持续轮询直到收敛，超时失败。
+func waitStableRunning(t *testing.T, pm *Manager, id string, timeout time.Duration) {
+	t.Helper()
+	waitFor(t, timeout, fmt.Sprintf("插件 %s 稳定运行（running）", id), func() bool {
+		return pm.View(id).Status == StatusRunning
+	})
+}
+
 func waitDead(t *testing.T, pid int, timeout time.Duration) {
 	t.Helper()
 	if pid <= 0 {
@@ -175,6 +185,28 @@ func TestPluginNeedConfig(t *testing.T) {
 	}
 	if !strings.Contains(v.LastError, "provider_private_configs") {
 		t.Fatalf("need_config 应带 hint，last_error = %q", v.LastError)
+	}
+}
+
+// need_config → 后续补打 ready：宿主必须持续消费 stdout 行流才能捕获该就绪行
+// （设计文档 §4.1；R5 回归——修复前漏掉此转换，配置补齐后插件永不注册）。
+func TestPluginNeedConfigThenReady(t *testing.T) {
+	setHelper(t, "need_then_ready", "cfg2")
+	h := newHarness(t, Config{})
+	h.installPlugin("cfg2", "", "")
+	h.pm.Start()
+
+	v := waitStatus(t, h.pm, "cfg2", StatusNeedCfg, 5*time.Second)
+	if v.PID <= 0 {
+		t.Fatal("need_config 子进程应存活")
+	}
+	// 子进程 800ms 后补打 ready 行：宿主应消费到并转 running。
+	v = waitStatus(t, h.pm, "cfg2", StatusRunning, 5*time.Second)
+	if v.URL == "" {
+		t.Fatalf("转 running 后应有 url，got %+v", v)
+	}
+	if v.Models != 2 { // fake provider /v1/models 返回 2 个模型
+		t.Fatalf("模型数 = %d，期望 2", v.Models)
 	}
 }
 
@@ -281,10 +313,7 @@ func TestPluginToggle(t *testing.T) {
 		t.Fatalf("重新启用后 pid 应变化: %d", v.PID)
 	}
 	// 重新启用后应稳定运行（停用期的退出通知不得触发误判重启）。
-	time.Sleep(500 * time.Millisecond)
-	if v := h.pm.View("tg1"); v.Status != StatusRunning {
-		t.Fatalf("重新启用后应稳定运行: %v", v)
-	}
+	waitStableRunning(t, h.pm, "tg1", 3*time.Second)
 }
 
 // 删除：停进程 + 整目录删除。
@@ -475,10 +504,7 @@ func TestPluginSaveConfig(t *testing.T) {
 		return v.Status == StatusRunning && v.PID != pidBefore
 	})
 	// 重启后应稳定运行（旧子进程的退出通知不得触发误判重启）。
-	time.Sleep(500 * time.Millisecond)
-	if v := h.pm.View("sv1"); v.Status != StatusRunning {
-		t.Fatalf("重启后应稳定运行: %v", v)
-	}
+	waitStableRunning(t, h.pm, "sv1", 3*time.Second)
 }
 
 // 管理 API（httptest 直测 handler，requireAuth 由 main 装配，此处直挂）。

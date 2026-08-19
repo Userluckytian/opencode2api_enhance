@@ -1,9 +1,11 @@
 // 残留进程探测与一键清除（占着进程但未使用的节点/实例/探针）。
 //
-// 枚举系统中本应用（opencode2api.exe / sing-box.exe）的全部进程，按命令行分类：
+// 枚举系统中本应用（opencode2api.exe / sing-box.exe / 插件子进程）的全部进程，
+// 按命令行分类：
 //   - probe：探针扫描残留（runtime/_probe/worker-*）
 //   - orphan：已停止实例的残留进程（runtime/<实例目录>，进程仍在但实例未运行）
-//   - 运行中实例的进程、管理器本身、统一网关 → 不列出（使用中/保留）
+//   - orphan：插件子进程残留（命令行含 --provider-serve，宿主 opencode2api 已退出）
+//   - 运行中实例的进程、管理器本身、统一网关、宿主存活的插件子进程 → 不列出（使用中/保留）
 //
 // 用户在前端勾选后按 PID 一键清除；后端仅允许杀扫描结果内的进程（防误杀）。
 package manager
@@ -20,7 +22,8 @@ import (
 // procLine 系统进程枚举结果的一行。
 type procLine struct {
 	PID  int    `json:"pid"`
-	Name string `json:"name"` // 进程名（opencode2api.exe / sing-box.exe）
+	PPID int    `json:"ppid"` // 父进程 PID（插件子进程判定宿主存活用；Windows=ParentProcessId）
+	Name string `json:"name"` // 进程名（opencode2api.exe / sing-box.exe / 插件入口）
 	Cmd  string `json:"cmd"`  // 命令行
 }
 
@@ -50,6 +53,9 @@ type OrphanKillResult struct {
 
 var portFlagRe = regexp.MustCompile(`-port\s+(\d+)`)
 
+// providerDirRe 从插件子进程命令行提取插件 id（.../providers/<id>/<entry> 路径段）。
+var providerDirRe = regexp.MustCompile(`(?i)[\\/]providers[\\/]([^\\/"]+)`)
+
 // portFromCmd 从命令行提取 -port 值（无则 0）。
 func portFromCmd(cmd string) uint16 {
 	m := portFlagRe.FindStringSubmatch(cmd)
@@ -61,6 +67,15 @@ func portFromCmd(cmd string) uint16 {
 		return 0
 	}
 	return uint16(n)
+}
+
+// pluginIDFromCmd 从插件子进程命令行提取插件 id（.../providers/<id>/<entry> 路径段）。
+func pluginIDFromCmd(cmd string) string {
+	m := providerDirRe.FindStringSubmatch(cmd)
+	if len(m) != 2 {
+		return ""
+	}
+	return m[1]
 }
 
 // classifyOrphans 纯函数：按命令行分类残留进程（便于单测）。
@@ -75,6 +90,14 @@ func classifyOrphans(procs []procLine, runtimeDir string, instances []Instance) 
 	}
 	runtimeLow := strings.ToLower(runtimeDir)
 	dirSep := string(os.PathSeparator)
+
+	// 宿主动进程集合：插件子进程的宿主 = opencode2api 主进程（按 PID 匹配）。
+	hosts := map[int]bool{}
+	for _, p := range procs {
+		if strings.Contains(strings.ToLower(p.Name), "opencode2api") {
+			hosts[p.PID] = true
+		}
+	}
 
 	for _, p := range procs {
 		if p.Cmd == "" {
@@ -118,6 +141,19 @@ func classifyOrphans(procs []procLine, runtimeDir string, instances []Instance) 
 		}
 		// 管理器自身（config.json 在数据目录，不在 runtime/）：保留。
 		if strings.Contains(low, "config.json") && !strings.Contains(low, runtimeLow) {
+			continue
+		}
+		// 插件子进程（--provider-serve）：宿主存活 = 运行中，保留；
+		// 宿主退出（PPID 不在宿主动进程集合 / 无 PPID 信息）= 残留，按孤儿处理。
+		if strings.Contains(low, "--provider-serve") {
+			if p.PPID > 0 && hosts[p.PPID] {
+				continue // 宿主 opencode2api 存活，由插件管理器自行管理
+			}
+			scan.Items = append(scan.Items, OrphanProcess{
+				PID: p.PID, Name: p.Name, Category: "orphan",
+				Instance: pluginIDFromCmd(p.Cmd),
+				Detail:   "插件子进程残留（宿主 opencode2api 已退出）",
+			})
 			continue
 		}
 		// runtime/ 下未识别归属的进程（罕见历史残留）。

@@ -67,6 +67,13 @@ func fakeProviderMain(mode string) {
 	case "need_config":
 		fmt.Println(`{"state":"need_config","hint":"请填写 provider_private_configs 中的凭据"}`)
 		select {}
+	case "need_then_ready":
+		// 先 need_config（待配置），sleep 后补打 ready（模拟用户填配置 → 子进程转就绪）。
+		// 宿主必须持续消费 stdout 行流才能捕获这条后续 ready（设计文档 §4.1；R5 回归）。
+		fmt.Println(`{"state":"need_config","hint":"请填写 provider_private_configs 中的凭据"}`)
+		time.Sleep(800 * time.Millisecond)
+		readyLine(ln.Addr().(*net.TCPAddr).Port)
+		select {}
 	case "fatal":
 		fmt.Println(`{"state":"fatal","error":"缺少关键配置"}`)
 		time.Sleep(300 * time.Millisecond)
