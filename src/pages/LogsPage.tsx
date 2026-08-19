@@ -344,10 +344,11 @@ export default function LogsPage({
     return visible.slice(start, start + PAGE_SIZE)
   }, [visible, currentPage])
 
-  // 汇总统计与列表同一筛选视图（日期/关键词/只看失败均联动）
-  const okCount = visible.filter((l) => l.status === 'ok').length
-  const failCount = visible.length - okCount
-  const issueCount = visible.filter(hasIssue).length
+  // 汇总统计与列表同一筛选视图（日期/关键词/只看失败均联动）。
+  // 三类互斥：失败（最终失败）/ 异常切换（成功但中途切换/超时/中断等事件）/ 成功（无事件）——相加恰为总数。
+  const failCount = visible.filter((l) => l.status !== 'ok').length
+  const issueCount = visible.filter((l) => l.status === 'ok' && hasIssue(l)).length
+  const okCount = visible.length - failCount - issueCount
 
   return (
     <div className="p-6">
