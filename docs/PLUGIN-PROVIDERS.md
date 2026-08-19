@@ -134,11 +134,11 @@ argv         = --provider-serve --port 0   （port 0 = OS 分配随机端口）
 | 事件 | 主进程行为 |
 |---|---|
 | 发现新供应商 | spawn → 等就绪行 → 注册厂商（走 `rebuildVendors()` 热重建） |
-| 子进程崩溃 | 指数退避重启（1s/2s/4s…封顶 60s），面板显示异常 + 最近错误 |
+| 子进程崩溃 | 指数退避重启（1s/2s/4s…封顶 60s），面板显示异常 + 最近错误；**崩溃即从聚合目录移出该插件模型，重启就绪后自动回到目录**（running 集合变化经 OnChange → rebuildVendors 单点合并） |
 | `enabled=false` | 停进程 + 注销厂商（模型移出 /v1/models），**不删文件** |
 | 删除 | 停进程 + 整目录删除（前端二次确认） |
 | 主进程退出 | 统一 kill 全部子进程（复用 orphan/process 管理逻辑） |
-| 配置文件变更 | 供应商自 watch 自己的 `provider.json`（3s ticker，仿 `startConfigWatcher`），自行重载 |
+| 配置文件变更 | 供应商自 watch 自己的 `provider.json`（3s ticker，仿 `startConfigWatcher`），自行重载；entry/api_version 变更才由主进程重启子进程 |
 
 ## 五、配置自举（首次安装体验）
 

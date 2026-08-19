@@ -139,8 +139,9 @@ func newAggregator() *aggregator.Aggregator {
 
 	// 未配置 → 自动注册所有已编译厂商（扩增供应商零配置）。
 	// custom 例外：必须带 base_url 等条目级参数，无参自动注册必失败 → 跳过。
+	// remote 例外：必须由插件管理器注入子进程端点/令牌（R2 桥接），无参无法构造 → 跳过。
 	for _, t := range contract.RegisteredTypes() {
-		if t == "custom" {
+		if t == "custom" || t == "remote" {
 			continue
 		}
 		if v, err := contract.Create(t, contract.ProviderSpec{

@@ -183,7 +183,9 @@ func main() {
 	// 主进程正常退出时经 Close 统一 kill 全部插件子进程（设计文档 §4.3）；
 	// 强杀路径（taskkill /F / SIGKILL）无法触发，Linux 由 systemd cgroup 兜底，
 	// Windows 桌面壳按进程树回收，属既有进程管理边界（详见 PLUGIN-PROVIDERS.md §9）。
-	pluginMgr := pluginprovider.New(pluginprovider.Config{})
+	// R2：OnChange（子进程就绪/状态/增删）→ syncPlugins 重建插件厂商并入 rebuildVendors。
+	// bind 必须在 Start 之前（就绪行由监督协程异步到达，先记引用再拉起）。
+	pluginMgr := bindPluginMgr(pluginprovider.New(pluginprovider.Config{OnChange: syncPlugins}))
 	pluginMgr.Start()
 	defer pluginMgr.Close()
 	registerHTTPRoutes(mux, managerInst, pluginMgr)

@@ -596,6 +596,35 @@ func TestPluginHTTPHandlers(t *testing.T) {
 	}
 }
 
+// RunningPlugins：R2 装配契约——只有 running 且端点就绪的插件进桥接集合。
+func TestRunningPlugins(t *testing.T) {
+	setHelper(t, "ready", "rp1")
+	h := newHarness(t, Config{})
+	h.installPlugin("rp1", "", "")
+	h.pm.Start()
+	waitStatus(t, h.pm, "rp1", StatusRunning, 5*time.Second)
+
+	rps := h.pm.RunningPlugins()
+	if len(rps) != 1 || rps[0].ID != "rp1" || rps[0].URL == "" || rps[0].Auth == "" {
+		t.Fatalf("RunningPlugins = %v, want [rp1 url auth]", rps)
+	}
+	if !strings.HasPrefix(rps[0].URL, "http://127.0.0.1:") {
+		t.Fatalf("url = %q, want 127.0.0.1 随机端口", rps[0].URL)
+	}
+	if rps[0].Name != "测试供应商 rp1" {
+		t.Fatalf("name = %q", rps[0].Name)
+	}
+
+	// 停用 → 不再列入（厂商注销路径依据）。
+	if _, err := h.pm.Toggle("rp1", false); err != nil {
+		t.Fatal(err)
+	}
+	waitStatus(t, h.pm, "rp1", StatusDisabled, 5*time.Second)
+	if rps = h.pm.RunningPlugins(); len(rps) != 0 {
+		t.Fatalf("disabled 插件不应在列: %v", rps)
+	}
+}
+
 // Close 统一回收：运行中的子进程随管理器关闭被杀。
 func TestPluginCloseReapsChildren(t *testing.T) {
 	setHelper(t, "ready", "cl1")

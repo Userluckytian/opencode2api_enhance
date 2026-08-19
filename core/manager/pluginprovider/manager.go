@@ -28,11 +28,11 @@ import (
 
 // 插件状态（面板展示）。
 const (
-	StatusDisabled = "disabled"   // 已停用（enabled=false，文件保留）
-	StatusStarting = "starting"   // 拉起中（等就绪行）
-	StatusRunning  = "running"    // 已就绪，厂商可用
+	StatusDisabled = "disabled"    // 已停用（enabled=false，文件保留）
+	StatusStarting = "starting"    // 拉起中（等就绪行）
+	StatusRunning  = "running"     // 已就绪，厂商可用
 	StatusNeedCfg  = "need_config" // 待配置（子进程自举后报告，不注册厂商）
-	StatusError    = "error"      // 启动失败/崩溃退避中（含最近错误）
+	StatusError    = "error"       // 启动失败/崩溃退避中（含最近错误）
 )
 
 // 默认生命周期参数（设计文档 §4.3）。
@@ -186,17 +186,17 @@ type plugin struct {
 	manErr       string // 清单校验错误（非空 = 拒绝加载，面板告警）
 	raw          []byte // provider.json 全文（回显/编辑回填）
 
-	enabled  bool
-	status   string
-	lastError string
-	pid      int
-	auth     string // 一次性令牌（就绪行校验后保留，供 R2 桥接鉴权；不出现在 API 视图）
-	url      string
-	startedAt time.Time
-	modelCount int
+	enabled      bool
+	status       string
+	lastError    string
+	pid          int
+	auth         string // 一次性令牌（就绪行校验后保留，供 R2 桥接鉴权；不出现在 API 视图）
+	url          string
+	startedAt    time.Time
+	modelCount   int
 	restartCount int
 
-	supervising bool   // 监督协程是否存活（startSupervisor 去重）
+	supervising bool          // 监督协程是否存活（startSupervisor 去重）
 	stopCh      chan struct{} // 删除/关闭时关闭（不可重建，见 stopPlugin）
 	stopped     bool
 	retryCh     chan struct{} // 唤醒监督协程立即行动（启用/配置保存/清单修复）
@@ -812,6 +812,39 @@ func (m *Manager) Endpoint(id string) (url, auth string, ok bool) {
 		return "", "", false
 	}
 	return p.url, p.auth, true
+}
+
+// RunningPlugin 已就绪插件的桥接信息（R2 装配 vendors/remote 用）。
+type RunningPlugin struct {
+	ID   string // 插件 id（= remote vendor 的模型目录前缀）
+	Name string // 展示名（provider.json name，缺省 = id）
+	URL  string // 子进程 HTTP 端点（http://127.0.0.1:<port>）
+	Auth string // 一次性令牌（子进程鉴权）
+}
+
+// RunningPlugins 返回全部 running 状态插件的桥接信息（按 id 排序）。
+// starting/need_config/error/disabled 的插件不在列——装配方据此重建厂商集合，
+// 使聚合器目录与插件真实可用状态保持一致。
+func (m *Manager) RunningPlugins() []RunningPlugin {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	ids := make([]string, 0, len(m.plugins))
+	for id, p := range m.plugins {
+		if p.status == StatusRunning && p.url != "" {
+			ids = append(ids, id)
+		}
+	}
+	sort.Strings(ids)
+	out := make([]RunningPlugin, 0, len(ids))
+	for _, id := range ids {
+		p := m.plugins[id]
+		name := p.man.Name
+		if name == "" {
+			name = id
+		}
+		out = append(out, RunningPlugin{ID: id, Name: name, URL: p.url, Auth: p.auth})
+	}
+	return out
 }
 
 // SaveConfig 校验并原子写回 provider.json（设计文档 §六编辑保存）：

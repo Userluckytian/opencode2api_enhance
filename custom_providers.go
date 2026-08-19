@@ -27,6 +27,10 @@ import (
 var (
 	vendorsSigMu   sync.Mutex
 	lastVendorsSig string
+	// rebuildVendorsMu 串行化厂商热重建：config watcher（maybeRebuildVendors）/ 自定义源
+	// 保存（applyCustomProvidersSave）/ 插件 OnChange（syncPlugins）三来源并发触发，
+	// 防 ReplaceAll 与目录刷新交错导致聚合目录短暂对应错误厂商集合。
+	rebuildVendorsMu sync.Mutex
 )
 
 // providersSignature providers 配置签名（变化才重建）。
@@ -67,6 +71,8 @@ func rebuildVendors() {
 	if globalAgg == nil {
 		return
 	}
+	rebuildVendorsMu.Lock()
+	defer rebuildVendorsMu.Unlock()
 	configMu.RLock()
 	cfgs := append([]ProviderCfg(nil), providersCfg...)
 	configMu.RUnlock()
@@ -111,9 +117,10 @@ func rebuildVendors() {
 			}
 		}
 	} else {
-		// 未配置 providers：自动注册全部内建类型（custom 除外，见 newAggregator 同款语义）。
+		// 未配置 providers：自动注册全部内建类型（custom/remote 除外——
+		// custom 需条目级参数、remote 需插件子进程端点，无参构造必失败，见 newAggregator 同款语义）。
 		for _, t := range contract.RegisteredTypes() {
-			if t == "custom" {
+			if t == "custom" || t == "remote" {
 				continue
 			}
 			if v, ok := old[t]; ok {
@@ -125,6 +132,10 @@ func rebuildVendors() {
 			}
 		}
 	}
+
+	// R2：并入 running 插件的 remote 厂商（syncPlugins 独立维护，见 plugin_vendors.go）。
+	// 与 providersCfg 厂商一次 ReplaceAll——插件就绪/崩溃与配置保存互不丢厂商。
+	list = appendPluginVendors(list)
 
 	globalAgg.ReplaceAll(list)
 	vendorsSigMu.Lock()
