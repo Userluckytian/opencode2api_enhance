@@ -46,6 +46,11 @@ legacy/opencode2api_enhance/进度.md
 .cdp-test/
 .omo/
 
+# UI visual self-check tooling & shots (local dev only)
+.ui-shots.mjs
+.ui-shots/
+docs/images/hermes_desktop_shot.png
+
 # portable test package output
 portable-out/
 
