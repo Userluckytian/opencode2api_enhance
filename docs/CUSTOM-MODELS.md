@@ -272,6 +272,29 @@ vendors/custom/
 仅从可信渠道获取插件；插件仅监听 127.0.0.1 并用一次性令牌鉴权，`provider.json` 中的密钥
 属本机敏感文件。
 
+### 插件合规要求（供应商必须满足）
+
+拿到一个插件时，可对照以下要点判断它是否合规（完整版见
+[PLUGIN-PROVIDERS.md](PLUGIN-PROVIDERS.md) §十「插件合规约束规范」，含插件作者自检清单）：
+
+**必须提供**：
+- `provider.json` 五个顶层保留键齐全：`id`（与目录名一致）/ `name` / `version` /
+  `api_version`（当前为 1）/ `entry`（指向目录内真实存在的 exe）
+- 两个 OpenAI 兼容端点：`GET /v1/models`（拉模型目录）与 `POST /v1/chat/completions`
+  （对话，`stream:true` 支持 SSE 流式）
+- 启动时按宿主契约工作：识别 `--provider-serve` 参数与 `PROVIDER_DIR` / `PROVIDER_CONFIG` /
+  `PLUGIN_AUTH_TOKEN` 三个环境变量；stdout 只输出一行行 JSON 状态消息（ready / need_config /
+  fatal），不打印其它横幅
+- 就绪行 `ready` 必须**原样回显**宿主注入的令牌（`auth` 字段），宿主校验不一致会拒绝
+
+**必须不做**：
+- 不监听除 127.0.0.1 以外的地址
+- 不在插件目录之外写文件（运行数据放自己的 `data/` 子目录）
+- 不自起守护进程（崩溃由主进程自动指数退避重启，1s→60s 封顶）
+
+**违反后果**：`id` 与目录名不一致、`api_version` 不兼容、`entry` 缺失 → 主进程**拒绝加载**并在
+面板显示「异常 + 具体错误」，不会影响其它插件的运行。
+
 ### 插件式供应商 · 常见问题
 
 **插件一直显示「待配置」，填了配置也不转运行中？**
