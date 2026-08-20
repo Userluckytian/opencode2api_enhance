@@ -59,6 +59,9 @@ type Config struct {
 	APIVersion int
 	// ModelTimeout 就绪后查询子进程模型数的超时（默认 5s）。
 	ModelTimeout time.Duration
+	// StateFile 插件启停状态落盘路径（跨进程共享：主管理器开关 → 实例子进程跟随）。
+	// 空 = <ProvidersDir>/.plugin-state.json。文件不存在 = 全部默认启用。
+	StateFile string
 	// OnChange 就绪/状态/增删变化回调（R2 桥接厂商经此触发 rebuildVendors；可为 nil）。
 	OnChange func()
 }
@@ -69,6 +72,8 @@ type Manager struct {
 	cfg     Config
 	mu      sync.Mutex
 	plugins map[string]*plugin
+	state   map[string]bool // 跨进程启停状态（id → enabled；缺失 = 默认启用）
+	stateMu sync.Mutex      // 保护 state 读写（updateStateFile 在 mu 外写盘）
 	wg      sync.WaitGroup
 	ctx     context.Context
 	cancel  context.CancelFunc
@@ -100,7 +105,12 @@ func New(cfg Config) *Manager {
 		cfg.ModelTimeout = defaultModelTimeout
 	}
 	ctx, cancel := context.WithCancel(context.Background())
-	return &Manager{cfg: cfg, plugins: map[string]*plugin{}, ctx: ctx, cancel: cancel}
+	m := &Manager{cfg: cfg, plugins: map[string]*plugin{}, ctx: ctx, cancel: cancel}
+	if cfg.StateFile == "" {
+		m.cfg.StateFile = filepath.Join(cfg.ProvidersDir, ".plugin-state.json")
+	}
+	m.state = loadPluginState(m.cfg.StateFile)
+	return m
 }
 
 // defaultProvidersDir 计算 providers/ 根目录：env 优先（自定义部署/测试隔离），
@@ -124,6 +134,7 @@ func (m *Manager) Start() {
 	}
 	m.started = true
 	m.mu.Unlock()
+	m.reapOrphans() // 回收本 providers 目录的插件孤儿（旧主进程强杀/崩溃残留长期占端口）
 	m.scan()
 	if m.cfg.RescanInterval > 0 {
 		m.wg.Add(1)
@@ -211,11 +222,17 @@ type plugin struct {
 
 func newPlugin(m *Manager, id string) *plugin {
 	dir := filepath.Join(m.cfg.ProvidersDir, id)
+	// enabled 按跨进程共享状态初始化（须在 m.mu 锁内调用：读 m.state）。
+	// 状态文件缺失 = 默认启用（向后兼容）。
+	enabled := true
+	if v, ok := m.state[id]; ok {
+		enabled = v
+	}
 	return &plugin{
 		id:           id,
 		dir:          dir,
 		manifestPath: filepath.Join(dir, "provider.json"),
-		enabled:      true,
+		enabled:      enabled,
 		status:       StatusStarting,
 		stopCh:       make(chan struct{}),
 		retryCh:      make(chan struct{}, 1),
@@ -284,6 +301,7 @@ func (m *Manager) scan() {
 	if len(gone) > 0 {
 		m.notifyChange()
 	}
+	m.applyStateChanges() // 跨进程开关跟随（主管理器写的状态文件，子进程同步）
 }
 
 // ensurePlugin 按扫描/保存结果装载插件：不存在则建档并拉起，已存在则按文件内容
@@ -530,6 +548,117 @@ func (m *Manager) notifyChange() {
 	}
 }
 
+// procInfo 系统进程枚举结果（孤儿回收用：--provider-serve 插件子进程）。
+type procInfo struct {
+	PID  int
+	PPID int // 父进程 PID（宿主存活判定）
+	Cmd  string
+}
+
+// reapOrphans 回收本 providers 目录下宿主已退出的插件子进程残留（孤儿）。
+// 枚举系统插件子进程（--provider-serve），命令行指向本 ProvidersDir、非本管理器
+// 持活、且父进程（宿主 opencode2api/本测试二进制）已不存在的 → 杀之。宿主存活的
+// 插件子进程归其宿主进程管理（主管理器与实例子进程共享 providers 目录时互不干扰）。
+func (m *Manager) reapOrphans() {
+	procs, err := listProviderProcesses()
+	if err != nil {
+		slog.Debug("plugin orphan scan failed", "error", err)
+		return
+	}
+	dirLow := strings.ToLower(filepath.Clean(m.cfg.ProvidersDir))
+	hosts := map[int]bool{}
+	for _, pr := range procs {
+		if strings.Contains(strings.ToLower(pr.Cmd), "opencode2api") {
+			hosts[pr.PID] = true
+		}
+	}
+	m.mu.Lock()
+	alive := map[int]bool{}
+	for _, p := range m.plugins {
+		if p.pid > 0 {
+			alive[p.pid] = true
+		}
+	}
+	m.mu.Unlock()
+	for _, pr := range procs {
+		low := strings.ToLower(pr.Cmd)
+		if !strings.Contains(low, "--provider-serve") {
+			continue
+		}
+		if !strings.Contains(low, dirLow) {
+			continue // 只处理本 providers 目录的进程，不动别处的插件子进程
+		}
+		if alive[pr.PID] {
+			continue // 当前持活的子进程
+		}
+		if pr.PPID > 0 && hosts[pr.PPID] {
+			continue // 宿主存活（主管理器/其它实例子进程管理，非孤儿）
+		}
+		slog.Info("plugin orphan reaped", "pid", pr.PID)
+		killPID(pr.PID)
+	}
+}
+
+// loadPluginState 读取跨进程启停状态文件。不存在/非法（含 UTF-8 BOM）→ 空表
+// （= 全部默认启用）。主管理器写、实例/网关子进程读，据此跟随开关。
+func loadPluginState(path string) map[string]bool {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return map[string]bool{}
+	}
+	data = bytes.TrimPrefix(data, []byte("\xef\xbb\xbf")) // 容忍 UTF-8 BOM
+	var st struct {
+		Enabled map[string]bool `json:"enabled"`
+	}
+	if json.Unmarshal(data, &st) != nil || st.Enabled == nil {
+		return map[string]bool{}
+	}
+	return st.Enabled
+}
+
+// updateStateFile 更新单个插件启停状态并原子写盘（临时文件 + rename），
+// 供其它进程（实例/统一网关子进程）在下一个扫描周期跟随。
+func (m *Manager) updateStateFile(id string, enabled bool) {
+	m.stateMu.Lock()
+	m.state[id] = enabled
+	data, err := json.Marshal(map[string]any{"enabled": m.state})
+	m.stateMu.Unlock()
+	if err != nil {
+		return
+	}
+	tmp := m.cfg.StateFile + ".tmp"
+	if err := os.WriteFile(tmp, data, 0o644); err != nil {
+		slog.Debug("plugin state write failed", "path", m.cfg.StateFile, "error", err)
+		return
+	}
+	if err := os.Rename(tmp, m.cfg.StateFile); err != nil {
+		slog.Debug("plugin state rename failed", "path", m.cfg.StateFile, "error", err)
+	}
+}
+
+// applyStateChanges 跨进程启停状态跟随：重读状态文件，凡与当前 enabled 不一致的
+// 插件对称执行 Toggle（kill/拉起 + 聚合器变更经 OnChange 传播）。主管理器开关
+// 关闭后，实例子进程在此 ≤1 个扫描周期（默认 3s）内停掉自家插件并移除模型。
+func (m *Manager) applyStateChanges() {
+	st := loadPluginState(m.cfg.StateFile)
+	if len(st) == 0 {
+		return
+	}
+	m.mu.Lock()
+	var diff []string
+	for id, want := range st {
+		if p, ok := m.plugins[id]; ok && p.enabled != want {
+			diff = append(diff, id)
+		}
+	}
+	m.mu.Unlock()
+	for _, id := range diff {
+		if _, err := m.Toggle(id, st[id]); err != nil {
+			slog.Debug("plugin state follow failed", "id", id, "error", err)
+		}
+	}
+}
+
 // spawnAndReadReady 拉起子进程并等待就绪行（设计文档 §4.1）。
 //
 // 契约：cwd=供应商目录；env 传 PROVIDER_DIR / PROVIDER_CONFIG / PLUGIN_AUTH_TOKEN；
@@ -541,6 +670,11 @@ func (m *Manager) spawnAndReadReady(p *plugin) bool {
 	if err != nil {
 		m.setStatus(p, StatusError, "entry 非法: "+err.Error())
 		return false
+	}
+	// 重新拉起前先回收上一周期的子进程（反复启停/配置重启/崩溃重试不叠加进程）。
+	// 首个周期 p.pid == 0 时 killCurrent 直接返回 0，无副作用。
+	if old := m.killCurrent(p); old > 0 {
+		waitPIDGone(old, 2*time.Second)
 	}
 	token := randomToken()
 
@@ -959,6 +1093,9 @@ func (m *Manager) Toggle(id string, enabled bool) (View, error) {
 	} else {
 		m.killCurrent(p)
 		m.setStatus(p, StatusDisabled, "")
+	}
+	if !same {
+		m.updateStateFile(id, enabled) // 跨进程共享：实例/网关子进程据此跟随
 	}
 	return m.View(id), nil
 }

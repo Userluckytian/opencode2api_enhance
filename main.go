@@ -185,6 +185,13 @@ func main() {
 	// Windows 桌面壳按进程树回收，属既有进程管理边界（详见 PLUGIN-PROVIDERS.md §9）。
 	// R2：OnChange（子进程就绪/状态/增删）→ syncPlugins 重建插件厂商并入 rebuildVendors。
 	// bind 必须在 Start 之前（就绪行由监督协程异步到达，先记引用再拉起）。
+	//
+	// 所有 opencode2api 进程（主管理器 / 实例子进程 / 统一网关子进程）都装配插件
+	// 管理器：客户端无论从管理入口、实例端口还是统一网关（如 48280/v1）调用，
+	// 插件模型都可用（running 时）。启停状态经 <providers>/.plugin-state.json 跨进程
+	// 共享：主管理器开关落盘，实例/网关子进程下一扫描周期（≤3s）跟随停/启自家插件
+	// 并移除/恢复聚合模型——开关全局一致生效（2026-08-20 现场：客户端连统一网关
+	// 48280，网关进程旧装配不启插件，导致开/关都获取不到插件模型）。
 	pluginMgr := bindPluginMgr(pluginprovider.New(pluginprovider.Config{OnChange: syncPlugins}))
 	pluginMgr.Start()
 	defer pluginMgr.Close()
