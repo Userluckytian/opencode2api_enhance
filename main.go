@@ -86,7 +86,7 @@ var httpClient = &http.Client{
 }
 
 var (
-	version = "v1.5.4"
+	version = "v1.6.0"
 	commit  = "none"
 	date    = "unknown"
 )
