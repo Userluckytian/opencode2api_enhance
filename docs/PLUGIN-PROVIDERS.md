@@ -141,6 +141,16 @@ argv         = --provider-serve --port 0   （port 0 = OS 分配随机端口）
 - 响应/SSE 原样透传（对齐 `vendors/custom` 的 openaiProto 语义）。
 - 上游特殊需求（traceparent、token 头、session 续期等）**全部由子进程自行处理**，主进程不感知。
 
+### 4.2a 出站协议分工（插件 vs 自定义源 vs opencode）
+
+| 路径 | 出站协议 | 说明 |
+|---|---|---|
+| **插件式供应商**（remote） | **恒 OpenAI Chat**（线协议固定 `/v1/chat/completions`） | 主进程只以 OpenAI Chat 形态传给子进程；插件**在自己内部**适配上游协议怪癖（traceparent / token 头 / session 续期等）。「插件自身」指内部连上游的方式，不是插件可自选接收协议 |
+| **自定义供应商**（custom） | **按用户选择**：`openai` / `anthropic` / `gemini` / `responses` | 出站侧按所选协议转换直发（含 system 抽取、多模态转 base64、tool 消息映射等）；但**入站仍先归一化 OpenAI Chat 再转出**，协议选择在出站生效 |
+| **opencode** | 恒 OpenAI Chat | 上游（`zen/v1/chat/completions`）只有 Chat 端点，无第二选择 |
+
+设计意图：自定义源适合"上游支持原生协议"的场景（由用户选）；插件源把协议复杂性封装在插件内部（主进程无感知）；单协议上游（opencode）无需选择。
+
 ### 4.3 生命周期
 
 | 事件 | 主进程行为 |
