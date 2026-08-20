@@ -46,6 +46,9 @@ legacy/opencode2api_enhance/进度.md
 .cdp-test/
 .omo/
 
+# Go test source files — 测试源码不入库（本地保留，测试纪律仍在本地执行）
+*_test.go
+
 # UI visual self-check tooling & shots (local dev only)
 .ui-shots.mjs
 .ui-shots/

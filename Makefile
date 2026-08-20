@@ -7,7 +7,7 @@ LDFLAGS := -s -w -X main.version=$(VERSION) -X main.commit=$(COMMIT) -X main.dat
 .PHONY: fmt test vet build release-snapshot clean
 
 fmt:
-	gofmt -w main.go main_test.go
+	gofmt -w main.go
 
 test:
 	go test ./...
