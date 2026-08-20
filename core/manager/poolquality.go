@@ -1,8 +1,8 @@
 // 实例池链路级主动探活 + 滑动窗口质量评分（性能模式 P1）。
 //
 // 与 health.go 的纯 TCP 巡检互补：TCP 只判实例进程/端口存活，测不出链路抖动
-// （用户场景端口恒通、巡检恒健康）；这里经实例 sing-box SOCKS 出口发真实
-// HTTP 探测（GET /v1/models），度量整条链路（本地 sing-box → 远端厂商 API）
+// （用户场景端口恒通、巡检恒健康）；这里经实例 API 端口（带实例 key）发真实
+// HTTP 探测（GET /v1/models），度量整条链路（实例进程 → 节点出口 → 上游 API）
 // 的延迟与成败，以滑动窗口样本计算每实例质量分（0~100）与等级。
 package manager
 
@@ -15,7 +15,6 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
-	"strings"
 	"sync"
 	"time"
 )
@@ -28,10 +27,6 @@ const (
 	// qualityUnknown 无探活样本（空窗口）的节点：不参与竞速候选（S1 冷启动不竞速）。
 	qualityUnknown = "unknown"
 
-	// defaultProbeTarget 默认探活目标：opencode 厂商模型列表端点
-	// （与 vendors/opencode 的 zenModelsURL 一致；配置 base_url 可覆盖）。
-	defaultProbeTarget = "https://opencode.ai/zen/v1/models"
-
 	// poolProbeWorkers 探活并发上限（避免探测风暴）。
 	poolProbeWorkers = 4
 
@@ -43,9 +38,10 @@ const (
 
 // ProbeSample 单次链路探测样本（滑动窗口的基本单元）。
 type ProbeSample struct {
-	OK        bool  `json:"ok"`         // 探测成功（链路通）
-	LatencyMS int64 `json:"latency_ms"` // 探测耗时（毫秒）
-	TS        int64 `json:"ts"`         // 探测时刻（Unix 秒）
+	OK        bool   `json:"ok"`                   // 探测成功（链路通）
+	LatencyMS int64  `json:"latency_ms"`           // 探测耗时（毫秒）
+	TS        int64  `json:"ts"`                   // 探测时刻（Unix 秒）
+	LastError string `json:"last_error,omitempty"` // 失败原因（成功为空；透传给 UI 展示，不再黑盒 0 分）
 }
 
 // QualityRecord 单实例质量状态（持久化于 runtime/pool_quality.json）。
@@ -59,7 +55,8 @@ type QualityRecord struct {
 	AvgLatencyMS        int64         `json:"avg_latency_ms"`       // 窗口内平均延迟
 	ConsecutiveFailures int           `json:"consecutive_failures"` // 从最新样本回溯的连续失败数
 	LastProbeTS         int64         `json:"last_probe_ts"`
-	Samples             []ProbeSample `json:"samples"` // 滑动窗口内样本
+	LastError           string        `json:"last_error,omitempty"` // 最新一次失败的原因（UI 展示，定位探测黑盒问题）
+	Samples             []ProbeSample `json:"samples"`              // 滑动窗口内样本
 }
 
 // PoolQualitySummary 质量汇总视图（管理 API / 后续 UI 展示）。
@@ -247,23 +244,6 @@ func poolProbeConcurrencyOf(cfg Config) int {
 	return 4
 }
 
-// probeTargetURL 探测目标：配置 pool_probe_target 非空时直接使用（默认 "" = 按 base_url 自动拼接）；
-// base_url 为空时用默认厂商端点。
-func probeTargetURL(cfg Config) string {
-	if target := strings.TrimSpace(cfg.PoolProbeTarget); target != "" {
-		return target
-	}
-	base := strings.TrimSpace(cfg.BaseURL)
-	if base == "" {
-		return defaultProbeTarget
-	}
-	base = strings.TrimRight(base, "/")
-	if strings.HasSuffix(base, "/v1") {
-		return base + "/models"
-	}
-	return base + "/v1/models"
-}
-
 // ---- 评分模型 ----
 
 // computeQuality 由窗口内样本计算质量分与等级（纯函数，便于单测）。
@@ -329,6 +309,14 @@ func computeQuality(rec *QualityRecord, samples []ProbeSample, now, windowSec in
 	rec.AvgLatencyMS = avg
 	rec.ConsecutiveFailures = cf
 	rec.LastProbeTS = lastTS
+	// 透传最新一次失败原因（从最新样本回溯；全成功 or 空窗口清空）。
+	rec.LastError = ""
+	for i := len(win) - 1; i >= 0; i-- {
+		if !win[i].OK && win[i].LastError != "" {
+			rec.LastError = win[i].LastError
+			break
+		}
+	}
 
 	switch {
 	case cf >= 3 || (rate == 0 && len(win) >= 2):
@@ -436,7 +424,6 @@ func (m *Manager) RunPoolQualityOnce(runner Runner) PoolQualitySummary {
 	cfg := m.loadConfig()
 	timeout := poolProbeTimeout(cfg)
 	windowSec := poolQualityWindowSec(cfg)
-	target := probeTargetURL(cfg)
 	now := time.Now().Unix()
 
 	saved := m.loadPoolQuality()
@@ -467,7 +454,7 @@ func (m *Manager) RunPoolQualityOnce(runner Runner) PoolQualitySummary {
 		go func() {
 			defer wg.Done()
 			defer func() { <-sem }()
-			sample := probeInstanceOnce(inst, target, timeout)
+			sample := probeInstanceOnce(inst, timeout)
 			mu.Lock()
 			rec := byName[inst.Name]
 			if rec == nil {

@@ -252,8 +252,6 @@ export type ConfigView = {
   /** 实例池链路探活（P1） */
   pool_probe_interval_sec: number
   pool_probe_timeout_sec: number
-  /** 探活目标（空 = 按 base_url 自动拼接；S4 可配） */
-  pool_probe_target: string
   pool_quality_window_min: number
   pool_probe_enabled: boolean
   probe_solo_enabled: boolean
@@ -357,6 +355,8 @@ export type PoolQualityRecord = {
   avg_latency_ms: number
   consecutive_failures: number
   last_probe_ts: number
+  /** 最新一次失败原因（探测透传，悬停显示） */
+  last_error?: string
 }
 
 export type PoolQualitySummary = {

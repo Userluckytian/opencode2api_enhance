@@ -22,7 +22,7 @@ function qualityBadge(r?: PoolQualityRecord) {
   return (
     <span
       className={clsx('inline-block px-2 py-0.5 rounded-full text-[11px] font-medium whitespace-nowrap', cls)}
-      title={`成功率 ${(r.success_rate * 100).toFixed(0)}% · 平均延迟 ${r.avg_latency_ms}ms · 连续失败 ${r.consecutive_failures} 次`}
+      title={`成功率 ${(r.success_rate * 100).toFixed(0)}% · 平均延迟 ${r.avg_latency_ms}ms · 连续失败 ${r.consecutive_failures} 次${r.last_error ? ` · 原因: ${r.last_error}` : ''}`}
     >
       {r.score} 分 · {label}
       {r.avg_latency_ms > 0 ? ` · ${r.avg_latency_ms}ms` : ''}

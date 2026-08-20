@@ -14,6 +14,12 @@ import (
 	"time"
 )
 
+// mustURLPort 取 httptest server 监听端口（问题 1 改造后探测经实例 API 端口）。
+func mustURLPort(t *testing.T, srv *httptest.Server) int {
+	t.Helper()
+	return srv.Listener.Addr().(*net.TCPAddr).Port
+}
+
 // ---- 滑动窗口评分 ----
 
 func TestComputeQualityEmptyWindow(t *testing.T) {
@@ -186,68 +192,6 @@ func TestComputeQualityLowRate(t *testing.T) {
 	}
 	if rec.Level != qualityDegraded {
 		t.Fatalf("level=%s, want degraded", rec.Level)
-	}
-}
-
-// ---- 探活目标 URL ----
-
-func TestProbeTargetURL(t *testing.T) {
-	if got := probeTargetURL(Config{}); got != defaultProbeTarget {
-		t.Fatalf("default target=%s, want %s", got, defaultProbeTarget)
-	}
-	if got := probeTargetURL(Config{BaseURL: "http://127.0.0.1:8088/v1"}); got != "http://127.0.0.1:8088/v1/models" {
-		t.Fatalf("base /v1 target=%s", got)
-	}
-	if got := probeTargetURL(Config{BaseURL: "http://127.0.0.1:8088/"}); got != "http://127.0.0.1:8088/v1/models" {
-		t.Fatalf("base / target=%s", got)
-	}
-	if got := probeTargetURL(Config{BaseURL: "  https://x.example  "}); got != "https://x.example/v1/models" {
-		t.Fatalf("trimmed target=%s", got)
-	}
-}
-
-// S4：pool_probe_target 覆盖默认拼接；空值回退现状自动拼接。
-func TestProbeTargetURLOverride(t *testing.T) {
-	custom := "https://probe.example/custom/v1/models"
-	if got := probeTargetURL(Config{PoolProbeTarget: custom}); got != custom {
-		t.Fatalf("override target=%s, want %s", got, custom)
-	}
-	// 带空白会被 trim。
-	if got := probeTargetURL(Config{PoolProbeTarget: "  " + custom + "  "}); got != custom {
-		t.Fatalf("trimmed override=%s, want %s", got, custom)
-	}
-	// 空值 = 现状：优先 base_url 拼接。
-	if got := probeTargetURL(Config{BaseURL: "http://127.0.0.1:8088/v1", PoolProbeTarget: ""}); got != "http://127.0.0.1:8088/v1/models" {
-		t.Fatalf("empty override target=%s, want base concat", got)
-	}
-	// 空值 + 无 base_url = 默认厂商端点。
-	if got := probeTargetURL(Config{PoolProbeTarget: ""}); got != defaultProbeTarget {
-		t.Fatalf("empty override default=%s, want %s", got, defaultProbeTarget)
-	}
-}
-
-// S4：pool_probe_target 配置解析（ConfigSet/ConfigGet/ConfigViewOf）。
-func TestPoolProbeTargetConfigSetGet(t *testing.T) {
-	m := New(t.TempDir())
-
-	if err := m.ConfigSet("pool_probe_target", "https://probe.example/v1/models"); err != nil {
-		t.Fatalf("set: %v", err)
-	}
-	if got, _ := m.ConfigGet("pool_probe_target"); got != "https://probe.example/v1/models" {
-		t.Fatalf("get=%s", got)
-	}
-	// 空值允许（重置为自动拼接）。
-	if err := m.ConfigSet("pool_probe_target", ""); err != nil {
-		t.Fatalf("set empty: %v", err)
-	}
-	if got, _ := m.ConfigGet("pool_probe_target"); got != "" {
-		t.Fatalf("get after empty=%q, want empty", got)
-	}
-
-	_ = m.ConfigSet("pool_probe_target", "https://probe.example/custom")
-	v := m.ConfigViewOf()
-	if v.PoolProbeTarget != "https://probe.example/custom" {
-		t.Fatalf("view target=%q", v.PoolProbeTarget)
 	}
 }
 
@@ -665,19 +609,24 @@ func TestHTTPGetViaSocksServerError(t *testing.T) {
 func TestRunPoolQualityOnce(t *testing.T) {
 	m := New(t.TempDir())
 
-	// 后端目标（经 SOCKS 转发可达）。
-	back := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusOK)
+	// 探测改经实例 API 端口（2026-08-20 问题 1 修复）：good=/v1/models 2xx（通）、
+	// bad=5xx（失败）；stopped 不探测。
+	goodSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/v1/models" {
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+		http.NotFound(w, r)
 	}))
-	defer back.Close()
+	defer goodSrv.Close()
+	badSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusServiceUnavailable)
+	}))
+	defer badSrv.Close()
 
-	goodSocks := startTestSocks5(t, socksModeProxy)
-	badSocks := startTestSocks5(t, socksModeReject)
-
-	// 预置 3 实例：good（Running，链路通）、bad（Running，链路拒）、stopped（Stopped，不探测）。
-	_ = m.AddInstance(Instance{Name: "good", Port: 14400, SingboxPort: socksPort(t, goodSocks), Node: "n1", Password: "sk"})
-	_ = m.AddInstance(Instance{Name: "bad", Port: 14401, SingboxPort: socksPort(t, badSocks), Node: "n2", Password: "sk"})
-	_ = m.AddInstance(Instance{Name: "stopped", Port: 14402, SingboxPort: socksPort(t, goodSocks), Node: "n3", Password: "sk"})
+	_ = m.AddInstance(Instance{Name: "good", Port: uint16(mustURLPort(t, goodSrv)), Node: "n1", Password: "sk"})
+	_ = m.AddInstance(Instance{Name: "bad", Port: uint16(mustURLPort(t, badSrv)), Node: "n2", Password: "sk"})
+	_ = m.AddInstance(Instance{Name: "stopped", Port: uint16(mustURLPort(t, goodSrv)), Node: "n3", Password: "sk"})
 	for _, inst := range m.ListInstances() {
 		inst.Status = StatusRunning()
 		if inst.Name == "stopped" {
@@ -686,8 +635,6 @@ func TestRunPoolQualityOnce(t *testing.T) {
 		_ = m.UpdateInstance(inst)
 	}
 
-	// 配置探测目标指向本地后端（base_url 生效）。
-	_ = m.ConfigSet("base_url", back.URL+"/v1")
 	_ = m.ConfigSet("pool_probe_timeout_sec", "2")
 
 	// 第 1 轮：good 健康，bad 单次失败 → flaky（down 需连续 3 次失败）。
@@ -739,7 +686,7 @@ func TestRunPoolQualityOnce(t *testing.T) {
 	}
 
 	// GET 视图：非 Running 的陈旧记录被过滤。
-	_ = m.UpdateInstance(Instance{Name: "good", Port: 14400, SingboxPort: socksPort(t, goodSocks), Node: "n1", Password: "sk", Status: StatusStopped()})
+	_ = m.UpdateInstance(Instance{Name: "good", Port: uint16(mustURLPort(t, goodSrv)), Node: "n1", Password: "sk", Status: StatusStopped()})
 	view := m.poolQualityView()
 	if view.Total != 1 {
 		t.Fatalf("view total=%d, want 1", view.Total)
@@ -751,18 +698,17 @@ func TestRunPoolQualityOnce(t *testing.T) {
 func TestRunPoolQualityOnceConcurrent(t *testing.T) {
 	m := New(t.TempDir())
 
-	back := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	// 探测经实例 API 端口 2xx（通过）。
+	goodSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	}))
-	defer back.Close()
+	defer goodSrv.Close()
 
-	goodSocks := startTestSocks5(t, socksModeProxy)
-	_ = m.AddInstance(Instance{Name: "good", Port: 14410, SingboxPort: socksPort(t, goodSocks), Node: "n1", Password: "sk"})
+	_ = m.AddInstance(Instance{Name: "good", Port: uint16(mustURLPort(t, goodSrv)), Node: "n1", Password: "sk"})
 	for _, inst := range m.ListInstances() {
 		inst.Status = StatusRunning()
 		_ = m.UpdateInstance(inst)
 	}
-	_ = m.ConfigSet("base_url", back.URL+"/v1")
 	_ = m.ConfigSet("pool_probe_timeout_sec", "2")
 
 	// 多 goroutine 同时触发探活轮。

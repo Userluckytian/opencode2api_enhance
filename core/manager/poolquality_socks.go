@@ -13,6 +13,7 @@ import (
 	"net"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -148,15 +149,53 @@ func httpGetViaSocks(socksPort uint16, targetURL string, timeout time.Duration) 
 }
 
 // probeInstanceOnce 对单实例执行一次链路探测并返回样本。
-func probeInstanceOnce(inst Instance, targetURL string, timeout time.Duration) ProbeSample {
-	if inst.SingboxPort == 0 {
-		return ProbeSample{OK: false, LatencyMS: 0, TS: time.Now().Unix()}
+//
+// 2026-08-20 改造（问题 1 修复）：探测改为**经实例 API 端口（带实例 key）请求
+// /v1/models**，对齐 freeCompletion 第一段——把「实例进程 + 鉴权 + 出口 + 上游」
+// 整条链纳入探测范围；失败原因透传 LastError（旧实现直拨 sing-box SOCKS 且
+// `ok, _ :=` 丢弃错误，UI 只能看到黑盒 0 分，与「测试按钮成功但质量不可用」
+// 的现象矛盾（实际是两条不同链路各自为政））。
+// 用标准 net/http 客户端（自动处理 chunked/gzip），与裸 TCP httpGetJSON
+// 的 chunked 解码缺陷（问题 5，同事在改）互不影响。
+func probeInstanceOnce(inst Instance, timeout time.Duration) ProbeSample {
+	ts := time.Now()
+	if inst.Port == 0 {
+		return ProbeSample{OK: false, LatencyMS: 0, TS: ts.Unix(),
+			LastError: "实例 API 端口未配置"}
 	}
-	start := time.Now()
-	ok, _ := httpGetViaSocks(inst.SingboxPort, targetURL, timeout)
-	return ProbeSample{
-		OK:        ok,
-		LatencyMS: time.Since(start).Milliseconds(),
-		TS:        time.Now().Unix(),
+	url := fmt.Sprintf("http://127.0.0.1:%d/v1/models", inst.Port)
+	req, err := http.NewRequest(http.MethodGet, url, nil)
+	if err != nil {
+		return ProbeSample{OK: false, TS: ts.Unix(), LastError: "构造请求失败: " + err.Error()}
 	}
+	if inst.Password != "" {
+		req.Header.Set("Authorization", "Bearer "+inst.Password)
+	}
+	client := &http.Client{Timeout: timeout}
+	resp, err := client.Do(req)
+	if err != nil {
+		return ProbeSample{OK: false, LatencyMS: time.Since(ts).Milliseconds(), TS: ts.Unix(),
+			LastError: "实例 API 不可达: " + err.Error()}
+	}
+	defer resp.Body.Close()
+	latency := time.Since(ts).Milliseconds()
+	// 2xx = 实例 API + 上游链路通（对齐 freeCompletion：/v1/models 2xx 即节点可用）。
+	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+		return ProbeSample{OK: true, LatencyMS: latency, TS: ts.Unix()}
+	}
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
+	detail := strings.TrimSpace(string(body))
+	if len(detail) > 200 {
+		detail = detail[:200]
+	}
+	return ProbeSample{OK: false, LatencyMS: latency, TS: ts.Unix(),
+		LastError: fmt.Sprintf("实例 /v1/models 返回 %d%s", resp.StatusCode, withPrefix(detail, ": "))}
+}
+
+// withPrefix 返回 prefix + detail（detail 非空时），用于组装错误详情。
+func withPrefix(detail, prefix string) string {
+	if detail == "" {
+		return ""
+	}
+	return prefix + detail
 }
