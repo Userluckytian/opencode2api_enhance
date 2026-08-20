@@ -724,6 +724,31 @@ func streamWithResume(w http.ResponseWriter, r *http.Request, upstreamBody []byt
 				// 累积内容（续写用）——从原始 JSON 提取
 				var obj map[string]any
 				if json.Unmarshal([]byte(dataStr), &obj) == nil {
+					// 问题7：上游在流中途以 SSE error 事件报告故障（如免费额度用尽、
+					// 限流 429 等），随后可能跟 [DONE] 或直接 EOF——若不识别，下游会
+					// 看到错误内容后收到正常结束，网关却当作成功完成不切节点。
+					// 可切换故障（额度用尽/限流/5xx）视为中断走续写+换节点；
+					// 请求级错误（400 类）切换无意义，保持原样透传。
+					if e, ok := obj["error"].(map[string]any); ok {
+						errMsg, _ := e["message"].(string)
+						if errMsg == "" {
+							errMsg, _ = e["type"].(string)
+						}
+						status, _ := e["code"].(string)
+						switching := strings.HasPrefix(status, "5") || strings.Contains(status, "429") ||
+							strings.Contains(strings.ToLower(status), "rate") || strings.Contains(strings.ToLower(status), "quota") ||
+							strings.Contains(status, "额度")
+						// code 缺失/非标准时按文案弱判断（额度用尽/限流文案）
+						lowMsg := strings.ToLower(errMsg)
+						switching = switching || strings.Contains(lowMsg, "rate") || strings.Contains(lowMsg, "quota") ||
+							strings.Contains(lowMsg, "limit") || strings.Contains(lowMsg, "额度") || strings.Contains(lowMsg, "用尽")
+						if switching {
+							interrupted = true
+							res.ErrMsg = "上游流中途错误: " + errMsg
+							callRec.Events = append(callRec.Events, CallEvent{Type: "stream_error", Node: proxyAddr, Detail: "upstream SSE error (switching): " + errMsg, At: time.Now()})
+							break readLoop
+						}
+					}
 					if u, ok := obj["usage"].(map[string]any); ok {
 						lastUsage = u
 					}

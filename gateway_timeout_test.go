@@ -343,6 +343,63 @@ func TestStreamWithResumeSwitchOnInterrupt(t *testing.T) {
 	}
 }
 
+// 问题7：上游在流中途以 SSE error 事件报告故障（免费额度用尽）+ [DONE]，
+// 网关应识别为中断、切节点续写，而不是当作成功完成直接结束。
+func TestStreamWithResumeSwitchOnSSEError(t *testing.T) {
+	transport := installFakeOpenCodeClient(t, []fakeUpstreamResponse{
+		// 第一次：200 建立，吐一句内容后发 SSE error（额度用尽）+ [DONE]
+		{status: http.StatusOK, body: "data: {\"choices\":[{\"delta\":{\"content\":\"开头内容\"}}]}\n\ndata: {\"error\":{\"message\":\"免费额度已用尽（Rate limit exceeded）\",\"code\":\"rate_limit_exceeded\"}}\n\ndata: [DONE]\n\n", header: http.Header{"Content-Type": {"text/event-stream"}}},
+		// 第二次：正常 SSE（切节点后续写）
+		{status: http.StatusOK, body: "data: {\"choices\":[{\"delta\":{\"content\":\"续写内容\"}}]}\n\ndata: [DONE]\n\n", header: http.Header{"Content-Type": {"text/event-stream"}}},
+	})
+
+	orig := timeoutCfg
+	timeoutCfg = TimeoutConfig{
+		TTFTRange:    [2]time.Duration{500 * time.Millisecond, 600 * time.Millisecond},
+		SilenceRange: [2]time.Duration{300 * time.Millisecond, 400 * time.Millisecond},
+		ProbeRange:   [2]int{2, 3},
+	}
+	defer func() { timeoutCfg = orig }()
+
+	body := []byte(`{"model":"m","stream":true,"messages":[{"role":"user","content":"hi"}]}`)
+	rr := httptest.NewRecorder()
+	req := httptest.NewRequest("POST", "/v1/chat/completions", nil)
+	callRec := &CallRecord{ReqID: "test-sse-err", Model: "m"}
+
+	res := streamWithResume(rr, req, body, "m", UpstreamAuth{Mode: AuthRoutePublic}, nil, "", false, callRec)
+	if !res.OK {
+		t.Fatalf("expected OK after switch on SSE error, got %+v", res)
+	}
+	if !res.Switched {
+		t.Fatalf("expected switch flag on SSE error")
+	}
+	if !strings.Contains(rr.Body.String(), "续写内容") {
+		t.Fatalf("expected resumed content, got: %s", rr.Body.String())
+	}
+	// 事件应有 stream_error 和 switch
+	foundErr := false
+	foundSwitch := false
+	for _, ev := range callRec.Events {
+		if ev.Type == "stream_error" {
+			foundErr = true
+		}
+		if ev.Type == "switch" {
+			foundSwitch = true
+		}
+	}
+	if !foundErr || !foundSwitch {
+		t.Fatalf("expected stream_error + switch events, got %+v", callRec.Events)
+	}
+	// 第二次请求的 payload 应包含续写消息
+	if len(transport.requestPayloads) < 2 {
+		t.Fatalf("expected 2 upstream requests, got %d", len(transport.requestPayloads))
+	}
+	msgs, _ := transport.requestPayloads[1]["messages"].([]any)
+	if len(msgs) < 3 {
+		t.Fatalf("expected resume messages, got %v", transport.requestPayloads[1]["messages"])
+	}
+}
+
 // 坏状态码：429 连续 3 次 → 节点进坏池（badReason 非空），pickHealthyProxy 跳过
 func TestBadStatusCodeEntersBadPool(t *testing.T) {
 	// 重置健康表
