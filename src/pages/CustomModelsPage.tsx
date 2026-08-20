@@ -167,9 +167,11 @@ export default function CustomModelsPage({ toast }: { toast: (msg: string, ok?: 
     })
   }
 
-  // 表单 → 保存请求项（id 编辑中不可改）
-  const formToInput = (f: FormState): CustomProviderInput | null => {
-    if (!validId(f.id.trim())) {
+  // 表单 → 请求项（id 编辑中不可改）。
+  // forTest=true 时跳过源 ID 校验：测试只验证 base_url + key 连通性，源 ID 可后填
+  // （后端测试接口对空 ID 自动占位 _test；保存时才要求 ID 合规——保存后不可改、作模型前缀）。
+  const formToInput = (f: FormState, forTest = false): CustomProviderInput | null => {
+    if (!forTest && !validId(f.id.trim())) {
       toast('源 ID 需字母数字开头，可含 - _，不超过 32 字符', false)
       return null
     }
@@ -184,8 +186,8 @@ export default function CustomModelsPage({ toast }: { toast: (msg: string, ok?: 
       return null
     }
     return {
-      id: f.id.trim(),
-      name: f.name.trim() || f.id.trim(),
+      id: f.id.trim() || (forTest ? '_test' : ''),
+      name: f.name.trim() || f.id.trim() || (forTest ? '_test' : ''),
       protocol: f.protocol,
       base_url: f.base_url.trim(),
       api_keys: keys.length > 0 ? keys : undefined, // 整体留空 = 保留原 keys
@@ -196,10 +198,11 @@ export default function CustomModelsPage({ toast }: { toast: (msg: string, ok?: 
     }
   }
 
-  // 「测试并获取模型」：当前表单临时拉取目录（不落盘）
+  // 「测试并获取模型」：当前表单临时拉取目录（不落盘）。
+  // forTest=true：未填源 ID 也允许测试（后端 _test 占位），只校验 API 地址。
   const doTest = async () => {
     if (!form) return
-    const input = formToInput(form)
+    const input = formToInput(form, true)
     if (!input) return
     setTesting(true)
     setTestResult(null)
