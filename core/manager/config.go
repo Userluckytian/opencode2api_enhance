@@ -48,13 +48,12 @@ type Config struct {
 	HealthCheckIntervalSec int `json:"health_check_interval_sec,omitempty"`
 	HealthRestartThreshold int `json:"health_restart_threshold,omitempty"`
 
-	// 实例池链路探活（性能模式 P1）：间隔（秒）、单次超时（秒）、质量窗口（分钟）、
-	// 探测目标（空 = 按 base_url 自动拼接），<=0 时用默认值（45s / 3s / 10min）；
+	// 实例池链路探活（性能模式 P1）：间隔（秒）、单次超时（秒）、质量窗口（分钟），
+	// <=0 时用默认值（45s / 3s / 10min）；
 	// PoolProbeEnabled 未设置（nil）默认开启。
 	PoolProbeIntervalSec int    `json:"pool_probe_interval_sec,omitempty"`
 	PoolProbeTimeoutSec  int    `json:"pool_probe_timeout_sec,omitempty"`
 	PoolQualityWindowMin int    `json:"pool_quality_window_min,omitempty"`
-	PoolProbeTarget      string `json:"pool_probe_target,omitempty"`
 	PoolProbeEnabled     *bool  `json:"pool_probe_enabled,omitempty"`
 	// ProbeSoloEnabled 是否对独享实例（未入池）也做链路质量探测（默认 true；false = 只探测池成员）。
 	ProbeSoloEnabled *bool `json:"probe_solo_enabled,omitempty"`
@@ -284,8 +283,6 @@ func (m *Manager) ConfigGet(key string) (string, error) {
 		return strconv.Itoa(cfg.PoolProbeIntervalSec), nil
 	case "pool_probe_timeout_sec":
 		return strconv.Itoa(cfg.PoolProbeTimeoutSec), nil
-	case "pool_probe_target":
-		return cfg.PoolProbeTarget, nil
 	case "pool_quality_window_min":
 		return strconv.Itoa(cfg.PoolQualityWindowMin), nil
 	case "pool_probe_enabled":
@@ -474,8 +471,6 @@ func (m *Manager) ConfigSet(key, value string) error {
 			return errors.New("pool_probe_timeout_sec 需 >= 0")
 		}
 		cfg.PoolProbeTimeoutSec = int(v)
-	case "pool_probe_target":
-		cfg.PoolProbeTarget = strings.TrimSpace(value)
 	case "pool_quality_window_min":
 		v, err := parseInt()
 		if err != nil {
@@ -726,7 +721,6 @@ type ConfigView struct {
 	HealthRestartThreshold  int     `json:"health_restart_threshold"`
 	PoolProbeIntervalSec    int     `json:"pool_probe_interval_sec"`
 	PoolProbeTimeoutSec     int     `json:"pool_probe_timeout_sec"`
-	PoolProbeTarget         string  `json:"pool_probe_target"`
 	PoolQualityWindowMin    int     `json:"pool_quality_window_min"`
 	PoolProbeEnabled        bool    `json:"pool_probe_enabled"`
 	ProbeSoloEnabled        bool    `json:"probe_solo_enabled"`
@@ -785,7 +779,6 @@ func (m *Manager) ConfigViewOf() ConfigView {
 		HealthRestartThreshold:  cfg.HealthRestartThreshold,
 		PoolProbeIntervalSec:    poolProbeInterval(cfg),
 		PoolProbeTimeoutSec:     int(poolProbeTimeout(cfg).Seconds()),
-		PoolProbeTarget:         cfg.PoolProbeTarget,
 		PoolQualityWindowMin:    int(poolQualityWindowSec(cfg) / 60),
 		PoolProbeEnabled:        poolProbeEnabled(cfg),
 		ProbeSoloEnabled:        probeSoloEnabled(cfg),

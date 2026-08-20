@@ -62,8 +62,6 @@ type AppConfig struct {
 	RateLimitBackoffCapMS  int `json:"rate_limit_backoff_cap_ms,omitempty"`
 	// ShowNodePrefix 是否在对话流首段展示「🤖 节点 · 模型」前缀（默认关闭）
 	ShowNodePrefix *bool `json:"show_node_prefix,omitempty"`
-	// PoolProbeTarget 实例池链路探活目标（空 = 按 base_url 自动拼接；S4 可配）。
-	PoolProbeTarget string `json:"pool_probe_target,omitempty"`
 
 	// Providers 厂商注册表（配置驱动；缺省 = 单 opencode）
 	Providers []ProviderCfg `json:"providers,omitempty"`
