@@ -189,25 +189,38 @@ vendors/custom/
 ### providers/ 目录结构
 
 ```
-<安装目录>/
-├── opencode2api.exe          # 主网关
-└── providers/                # ★ 主进程自动扫描此目录
-    └── loomy/                # 目录名 = 插件 id（决定模型前缀 loomy/）
-        ├── provider.json     # 契约 + 私有配置（单文件 all-in-one）
-        ├── loomy-provider.exe # 供应商侧车程序（独立可执行文件）
-        └── data/             # （可选）插件自己的运行数据，主进程不扫描不管理
+<安装目录>/                      # Windows: exe 旁；Linux deb 版: 数据目录 bin/ 下（OPCODE2API_DATA_DIR）
+├── opencode2api.exe            # 主网关（Linux 版无 .exe 后缀）
+└── providers/                  # ★ 主进程自动扫描此目录
+    └── loomy/                  # 目录名 = 插件 id（决定模型前缀 loomy/）
+        ├── provider.json       # 契约 + 私有配置（单文件 all-in-one）
+        ├── loomy-provider.exe  # 供应商侧车程序（Windows 形态；Linux/macOS 为无后缀 ELF/Mach-O）
+        └── data/               # （可选）插件自己的运行数据，主进程不扫描不管理
 ```
 
 主进程只认固定文件名 `provider.json`，只读不写；扫描到即自动拉起，无需重启网关。
+
+> **插件是可执行文件，必须与宿主平台匹配**（Windows 的 `.exe` 不能用于 Linux）：
+> Linux 版需交叉编译出无扩展名的 ELF 文件（`GOOS=linux CGO_ENABLED=0 go build`），并把
+> `provider.json` 的 `entry` 改成对应文件名（无 `.exe` 后缀）再部署——详见
+> [PLUGIN-PROVIDERS.md](PLUGIN-PROVIDERS.md) §2.1 平台形态。
 
 ### 快速接入三步
 
 拿到一个插件包（`providers/<id>/` 文件夹，含 `provider.json` + 供应商 exe）后的完整接入流程：
 
 1. **复制**：把整个插件文件夹放进 `<安装目录>/providers/` 下
-   ```powershell
-   Copy-Item "D:\tmp\loomy" "D:\Program Files\opencode2api\providers\" -Recurse
-   ```
+   - Windows：
+     ```powershell
+     Copy-Item "D:\tmp\loomy" "D:\Program Files\opencode2api\providers\" -Recurse
+     ```
+   - Linux（deb 安装版，数据目录见 `manager.env` 的 `OPCODE2API_DATA_DIR`）：
+     ```bash
+     sudo mkdir -p /var/lib/opencode2api/bin/providers
+     sudo tar -xzf loomy-provider-linux-amd64.tar.gz -C /var/lib/opencode2api/bin/providers/
+     sudo chmod +x /var/lib/opencode2api/bin/providers/loomy/loomy-provider
+     sudo chown -R opencode2api:opencode2api /var/lib/opencode2api/bin/providers/loomy
+     ```
 2. **启动/扫描**：双击主程序（或已运行时点面板「插件式供应商」标签的「重新扫描」），
    主进程 3 秒内自动发现并拉起子进程（无需重启网关）
 3. **验证闭环**（面板第七页「自定义模型」→「插件式供应商」标签）：
@@ -242,7 +255,7 @@ vendors/custom/
 | `id` | 与目录名一致；模型前缀来源；编辑页面只读 |
 | `name` / `version` | 展示名 / 版本号 |
 | `api_version` | 契约版本；主进程不兼容则拒绝加载并在面板告警 |
-| `entry` | 相对本目录的可执行文件名；必须指向目录内实际存在的文件 |
+| `entry` | 相对本目录的可执行文件名；必须指向目录内实际存在的文件。**平台相关**：Windows 为 `xx.exe`，Linux/macOS 为无后缀 ELF/Mach-O——跨平台时需用对应平台编译产物并改此字段，否则拒绝加载 |
 | `provider_private_configs` | **仅供应商自己读**的私有配置大对象，主进程整体不解析、不记录、不写日志 |
 
 ### 复制即用（同快速接入第一步）
@@ -268,7 +281,7 @@ vendors/custom/
 
 ### 安全提醒
 
-复制供应商 exe 进 `providers/` 等价于允许该程序以你的用户权限运行任意代码（同安装软件）。
+复制供应商可执行程序（exe / ELF / Mach-O）进 `providers/` 等价于允许该程序以你的用户权限运行任意代码（同安装软件）。
 仅从可信渠道获取插件；插件仅监听 127.0.0.1 并用一次性令牌鉴权，`provider.json` 中的密钥
 属本机敏感文件。
 
@@ -279,7 +292,7 @@ vendors/custom/
 
 **必须提供**：
 - `provider.json` 五个顶层保留键齐全：`id`（与目录名一致）/ `name` / `version` /
-  `api_version`（当前为 1）/ `entry`（指向目录内真实存在的 exe）
+  `api_version`（当前为 1）/ `entry`（指向目录内真实存在的可执行文件——Windows 为 `.exe`，Linux/macOS 为无后缀 ELF/Mach-O）
 - 两个 OpenAI 兼容端点：`GET /v1/models`（拉模型目录）与 `POST /v1/chat/completions`
   （对话，`stream:true` 支持 SSE 流式）
 - 启动时按宿主契约工作：识别 `--provider-serve` 参数与 `PROVIDER_DIR` / `PROVIDER_CONFIG` /

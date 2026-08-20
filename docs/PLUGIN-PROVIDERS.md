@@ -46,6 +46,38 @@
 - 目录名 = 供应商 id（`providers/loomy/` → id `loomy`）。
 - `data/` 子目录为供应商自用运行数据（缓存/db），主进程不扫描、不进模型目录、删除时随目录一起删。
 
+### 2.1 平台形态（Windows / Linux / macOS 插件形式不同）
+
+**插件是可执行文件，必须与宿主运行平台匹配**——一份插件包只适配一个平台：
+
+| 平台 | entry 文件名 | 可执行文件格式 | 构建方式 |
+|---|---|---|---|
+| Windows | `loomy-provider.exe` | PE（.exe） | 常规 `go build`（宿主 `bin/` 内嵌同样按平台释放，Windows 找 `.exe`） |
+| Linux | `loomy-provider`（**无 `.exe` 后缀**） | ELF | 交叉编译 `GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build` |
+| macOS | `loomy-provider`（无后缀） | Mach-O | 交叉编译 `GOOS=darwin GOARCH=arm64` |
+
+要点：
+
+- `provider.json` 的 `entry` 是**精确文件名**，必须与磁盘上实际存在的文件一致——宿主
+  **不会**像系统组件那样"Windows 自动找 `.exe`、Linux 找无后缀"，写错直接拒绝加载
+  （`entry 必须指向目录内实际存在的文件`，见 §3.2/§10.1）。
+- **同一份源码可跨平台**：插件契约（`--provider-serve` + 环境变量 + stdout 就绪行 + HTTP 端点）
+  是纯 IO/网络逻辑，Go 标准库即可实现；只要不依赖平台私有 API，交叉编译即可出三平台包。
+- 构建插件时务必 `CGO_ENABLED=0` 静态编译，产出无动态库依赖的独立可执行文件（Linux 上无需
+  任何运行时/glibc 版本匹配）。
+- 部署示例如下（deb 安装版，数据目录见 `manager.env` 的 `OPCODE2API_DATA_DIR`）：
+
+  ```bash
+  # 上传插件包（providers/<id>/ 目录）到 providers 根目录
+  sudo tar -xzf loomy-provider-linux-amd64.tar.gz \
+    -C /var/lib/opencode2api/bin/providers/
+  sudo chmod +x /var/lib/opencode2api/bin/providers/loomy/loomy-provider  # 必须有执行权限
+  sudo chown -R opencode2api:opencode2api \
+    /var/lib/opencode2api/bin/providers/loomy                          # 服务用户可读可执行
+  ```
+
+  之后面板「插件式供应商」标签 3 秒内自动发现并拉起，无需重启服务、无需手动启动。
+
 ## 三、provider.json 契约
 
 ### 3.1 顶层结构
@@ -76,7 +108,7 @@
 | `name` | 主进程 | 展示名 |
 | `version` | 主进程 | 供应商版本号（展示） |
 | `api_version` | 主进程 | 契约版本；主进程不兼容则拒绝加载并面板告警（不静默坏掉） |
-| `entry` | 主进程 | 相对本目录的可执行文件名；**必须指向目录内实际存在的文件** |
+| `entry` | 主进程 | 相对本目录的可执行文件名；**必须指向目录内实际存在的文件**。**平台相关**：Windows 为 `xx.exe`，Linux/macOS 为无后缀 ELF/Mach-O（见 §2.1），不可跨平台混用 |
 | `provider_private_configs` | **仅供应商** | 供应商私有配置大对象，主进程整体不解析、不记录、不写日志 |
 
 ### 3.3 边界
@@ -211,7 +243,7 @@ argv         = --provider-serve --port 0   （port 0 = OS 分配随机端口）
 
 ## 九、安全边界
 
-- 信任模型：复制供应商 exe 进去 = 让该程序以用户权限运行任意代码（等价于安装软件），文档中明示。
+- 信任模型：复制供应商可执行程序（exe / ELF / Mach-O）进去 = 让该程序以用户权限运行任意代码（等价于安装软件），文档中明示。
 - 子进程仅绑定 127.0.0.1，一次性令牌鉴权，防本地其它进程冒充/调用。
 - 主进程不解析 `provider_private_configs`，不写日志、不统计其内容。
 - `provider.json` 含密钥，属用户本机敏感文件；面板回显全文是单用户/内网定位下的既有取舍（与
@@ -231,7 +263,7 @@ argv         = --provider-serve --port 0   （port 0 = OS 分配随机端口）
 | `name` | 建议 | 空则回退用 id 展示 |
 | `version` | 建议 | 空则展示 `-` |
 | `api_version` | ✅ | 必须 = `1`（当前契约版本；不兼容 → **拒绝加载**，面板告警，不静默坏掉） |
-| `entry` | ✅ | 相对本目录、不得目录穿越（`safeJoin`）；**必须指向目录内实际存在的文件**（否则拒绝加载） |
+| `entry` | ✅ | 相对本目录、不得目录穿越（`safeJoin`）；**必须指向目录内实际存在的文件**（否则拒绝加载）；**文件名随平台**：Windows 带 `.exe`，Linux/macOS 不带（§2.1） |
 | `provider_private_configs` | 可选 | 宿主不解析、不校验、不写日志，整体不透明；插件自行负责默认值与健壮性 |
 
 **加载期校验触发点**：目录扫描发现 / 面板编辑保存（`validateSave` 校验 id 一致 + entry 存在）/
