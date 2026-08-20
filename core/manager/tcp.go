@@ -72,6 +72,7 @@ func httpRequest(method, path string, port uint16, readTimeout time.Duration, au
 	reader := bufio.NewReader(conn)
 	status := 0
 	contentLength := -1
+	chunked := false
 	for {
 		line, err := reader.ReadString('\n')
 		if err != nil {
@@ -88,14 +89,58 @@ func httpRequest(method, path string, port uint16, readTimeout time.Duration, au
 				status = code
 			}
 		}
-		if k, v, ok := strings.Cut(line, ":"); ok && strings.EqualFold(strings.TrimSpace(k), "Content-Length") {
-			if n, err := strconv.Atoi(strings.TrimSpace(v)); err == nil {
-				contentLength = n
+		if k, v, ok := strings.Cut(line, ":"); ok {
+			key := strings.TrimSpace(k)
+			if strings.EqualFold(key, "Content-Length") {
+				if n, err := strconv.Atoi(strings.TrimSpace(v)); err == nil {
+					contentLength = n
+				}
+			}
+			if strings.EqualFold(key, "Transfer-Encoding") && strings.Contains(strings.ToLower(v), "chunked") {
+				chunked = true
 			}
 		}
 	}
 	var rest []byte
-	if contentLength >= 0 {
+	if chunked {
+		// Transfer-Encoding: chunked：按 chunk 解码（大小行 → 数据块 → CRLF → 0 块结束）。
+		// Go 服务端 json.NewEncoder(w).Encode 未预置 Content-Length 时大响应走 chunked，
+		// 裸读会保留 chunk 元数据（如 "80e\r\n"）导致 json.Unmarshal 失败（实例测试误报）。
+		for {
+			sizeLine, err := reader.ReadString('\n')
+			if err != nil {
+				return 0, nil, err
+			}
+			sizeStr := strings.TrimSpace(strings.SplitN(sizeLine, ";", 2)[0]) // 去扩展参数（如 ";ext"）
+			size, err := strconv.ParseUint(sizeStr, 16, 32)
+			if err != nil {
+				return 0, nil, fmt.Errorf("chunked size parse %q: %w", sizeStr, err)
+			}
+			if size == 0 {
+				// 尾部 trailer（可选）直到空行后结束。
+				for {
+					line, err := reader.ReadString('\n')
+					if err != nil {
+						return 0, nil, err
+					}
+					if strings.TrimRight(line, "\r\n") == "" {
+						break
+					}
+				}
+				break
+			}
+			chunk := make([]byte, size)
+			if _, err := io.ReadFull(reader, chunk); err != nil {
+				return 0, nil, err
+			}
+			rest = append(rest, chunk...)
+			// 块后 CRLF。
+			var crlf [2]byte
+			if _, err := io.ReadFull(reader, crlf[:]); err != nil {
+				return 0, nil, err
+			}
+		}
+	} else if contentLength >= 0 {
 		// 按 Content-Length 精确读取（避免依赖连接关闭；Windows 关闭延迟会触发超时）
 		rest = make([]byte, contentLength)
 		if _, err := io.ReadFull(reader, rest); err != nil {
