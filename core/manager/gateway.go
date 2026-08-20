@@ -10,7 +10,6 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
-	"strings"
 	"sync"
 	"time"
 )
@@ -410,7 +409,14 @@ func (g *Gateway) clearModels() {
 	g.modelsErr = ""
 }
 
-// fetchGatewayModels 请求 http://127.0.0.1:<port>/v1/models，返回免费模型 id。
+// fetchGatewayModels 请求 http://127.0.0.1:<port>/v1/models，返回模型 id 列表。
+//
+// 注意：不在此处做 isFreeModelID 二次过滤——上游 /v1/models（listModelsHandler）
+// 已按 Free 标记过滤成"免费目录"（opencode 按 -free 后缀、自定义/插件源按 Free:true
+// 标记并入），返回的本身就是免费模型；再按名字后缀过滤会把不带 -free 的自定义/
+// 插件模型（如 myglm/glm-4.7、loomy/qwen3.8-max）误杀，导致实例池「网关可用免费
+// 模型」与 auto 模型列表缺失这些模型（2026-08-20 问题#6）。auto 虚拟模型已在响应中
+// （autoEnabled 时置顶返回），无需特例。
 func fetchGatewayModels(port uint16, key string) ([]string, error) {
 	url := fmt.Sprintf("http://127.0.0.1:%d/v1/models", port)
 	req, err := http.NewRequest("GET", url, nil)
@@ -436,13 +442,12 @@ func fetchGatewayModels(port uint16, key string) ([]string, error) {
 	if err := json.Unmarshal(body, &v); err != nil {
 		return nil, err
 	}
-	var out []string
+	out := make([]string, 0, len(v.Data))
 	for _, m := range v.Data {
-		// auto 虚拟模型：网关开启后出现在 /v1/models，实例池页免费模型列表随之可见。
-		// 特例放行（不进 isFreeModelID：那是探测挑模型用的，探针不应选中虚拟模型）。
-		if isFreeModelID(m.ID) || strings.EqualFold(strings.TrimSpace(m.ID), "auto") {
-			out = append(out, m.ID)
+		if m.ID == "" {
+			continue
 		}
+		out = append(out, m.ID)
 	}
 	return out, nil
 }
