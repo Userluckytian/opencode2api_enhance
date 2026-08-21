@@ -12,16 +12,10 @@ import (
 // isFreeModelID 免费模型判定。
 func isFreeModelID(id string) bool {
 	low := strings.ToLower(strings.TrimSpace(id))
-	if strings.Contains(low, "-free") || low == "big-pickle" {
-		return true
-	}
-	switch low {
-	case "deepseek-v4-flash", "mimo-v2.5", "ling-3.0-flash",
-		"nemotron-3-ultra", "north-mini-code", "laguna-s-2.1",
-		"hy3", "nemotron-3.5-lightning":
-		return true
-	}
-	return false
+	// 免费判定只认两条规则：-free 后缀 + big-pickle（唯一不满足 -free 命名但确实免费的上游模型）。
+	// 不再维护硬编码模型名单——上游下架/新增免费模型由 /v1/models 自动反映，
+	// 避免名单过期导致探测误报（历史问题：hy3、nemotron-3.5-lightning 等曾被迫逐个补录）。
+	return strings.Contains(low, "-free") || low == "big-pickle"
 }
 
 // pickFreeModel 从 /v1/models data[] 挑选免费模型（-free/big-pickle 立即命中）。
