@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import clsx from 'clsx'
-import { Loader2, Pencil, Plus, PlugZap, Activity, Trash2, X, Plug, RefreshCw } from 'lucide-react'
+import { Loader2, Pencil, Plus, PlugZap, Activity, Trash2, X, Plug, RefreshCw, ListChecks } from 'lucide-react'
 import { api, type CustomKeyStrategy, type CustomProviderInput, type CustomProviderTestResult, type CustomProviderView, type CustomProtocol, type PluginProviderView, type PluginStatus } from '../lib/api'
 
 // 自定义模型源表单（新增/编辑共用）。编辑时 key 留空 = 保留原 key。
@@ -78,6 +78,18 @@ type PluginEditState = {
   disk: string
 }
 
+// 插件暴露模型弹层状态（对齐自定义源表单交互）
+type PluginExposeState = {
+  id: string
+  name: string
+  /** 全量模型清单（弹层勾选用；来自后端 models_all） */
+  allModels: string[]
+  /** 全部暴露（默认 true；false = 只暴露 allowed 里的勾选项） */
+  exposeAll: boolean
+  /** 暴露白名单 */
+  allowed: Set<string>
+}
+
 // 顶层 name 编辑 → 同步写回 JSON 的 name 字段（id/entry 由后端保护，前端不动）
 const applyJsonName = (json: string, name: string): string => {
   try {
@@ -109,11 +121,12 @@ export default function CustomModelsPage({ toast }: { toast: (msg: string, ok?: 
   const [confirmClear, setConfirmClear] = useState(false)
   const [clearing, setClearing] = useState(false)
 
-  // 插件式供应商（R4 双标签）：状态齐全前默认展示插件 tab（设计文档 §六）
-  const [tab, setTab] = useState<'plugins' | 'custom'>('plugins')
+  // 双标签：默认展示自定义供应商 tab（插件列表仍在 useEffect 预加载，切过去即有数据）
+  const [tab, setTab] = useState<'plugins' | 'custom'>('custom')
   const [plugins, setPlugins] = useState<PluginProviderView[] | null>(null)
   const [pluginFilter, setPluginFilter] = useState<PluginStatus | 'all'>('all')
   const [pluginEditing, setPluginEditing] = useState<PluginEditState | null>(null)
+  const [pluginExposing, setPluginExposing] = useState<PluginExposeState | null>(null)
   const [pluginConfirmDelete, setPluginConfirmDelete] = useState<string | null>(null)
   const [pluginBusy, setPluginBusy] = useState(false)
   // 启停/保存后子进程状态异步推进（starting→running/need_config），延迟刷新让状态落定
@@ -309,6 +322,8 @@ export default function CustomModelsPage({ toast }: { toast: (msg: string, ok?: 
     }
   }
 
+  // 整表重建输入（启停/删除复用）：必须带上每个源的完整白名单，否则提交体缺
+  // allowed_models 键会被后端「空=全部暴露」语义擦除（问题 4 数据丢失根因）。
   const toInputs = (ps: CustomProviderView[]): CustomProviderInput[] =>
     ps.map((p) => ({
       id: p.id,
@@ -319,6 +334,8 @@ export default function CustomModelsPage({ toast }: { toast: (msg: string, ok?: 
       key_strategy: p.key_strategy,
       via_proxy: p.via_proxy,
       enabled: p.enabled,
+      // 带上当前白名单（空 = 该源本就是全部暴露，序列化后键省略、后端不误伤）
+      allowed_models: p.allowed_models && p.allowed_models.length > 0 ? p.allowed_models : undefined,
     }))
 
   const doDelete = async (id: string) => {
@@ -398,6 +415,42 @@ export default function CustomModelsPage({ toast }: { toast: (msg: string, ok?: 
       content: p.provider_json,
       disk: p.provider_json,
     })
+  }
+
+  // 打开暴露模型弹层（对齐自定义源表单交互）
+  const openPluginExpose = (p: PluginProviderView) => {
+    setPluginExposing({
+      id: p.id,
+      name: p.name || p.id,
+      allModels: p.models_all ?? [],
+      exposeAll: p.expose_all,
+      allowed: new Set(p.exposed_models ?? []),
+    })
+  }
+
+  // 保存暴露白名单（主进程侧过滤，保存后聚合目录/网关即时生效）
+  const savePluginExpose = async () => {
+    if (!pluginExposing) return
+    if (!pluginExposing.exposeAll && pluginExposing.allowed.size === 0) {
+      toast('请至少勾选一个要暴露的模型，或选择「全部暴露」', false)
+      return
+    }
+    setPluginBusy(true)
+    try {
+      const r = await api.pluginSaveExposedModels(
+        pluginExposing.id,
+        pluginExposing.exposeAll,
+        pluginExposing.exposeAll ? [] : Array.from(pluginExposing.allowed),
+      )
+      setPlugins((prev) => prev?.map((x) => (x.id === pluginExposing.id ? r.plugin : x)) ?? null)
+      setPluginExposing(null)
+      toast(`已保存 ${pluginExposing.id} 的暴露模型（${r.plugin.expose_all ? '全部暴露' : `白名单 ${r.plugin.exposed_models?.length ?? 0} 个`}）`, true)
+      schedulePluginRefresh()
+    } catch (e) {
+      toast(`保存失败：${String(e)}`, false)
+    } finally {
+      setPluginBusy(false)
+    }
   }
 
   // 保存编辑：前端先校验 JSON 合法性；id/entry 及 provider_private_configs 内部由后端/供应商校验
@@ -487,18 +540,8 @@ export default function CustomModelsPage({ toast }: { toast: (msg: string, ok?: 
         </div>
       </div>
 
-      {/* 双标签（设计文档 §六）：插件式供应商 / 用户自定义供应商 */}
+      {/* 双标签（设计文档 §六）：用户自定义供应商在前、插件式供应商在后，默认展示自定义 tab */}
       <div className="flex items-center gap-4 border-b border-zinc-200">
-        <button
-          type="button"
-          onClick={() => switchTab('plugins')}
-          className={clsx(
-            'pb-2 -mb-px text-[13px] font-medium border-b-2 transition-colors',
-            tab === 'plugins' ? 'border-zinc-900 text-zinc-900' : 'border-transparent text-zinc-500 hover:text-zinc-700',
-          )}
-        >
-          插件式供应商
-        </button>
         <button
           type="button"
           onClick={() => switchTab('custom')}
@@ -508,6 +551,16 @@ export default function CustomModelsPage({ toast }: { toast: (msg: string, ok?: 
           )}
         >
           用户自定义供应商
+        </button>
+        <button
+          type="button"
+          onClick={() => switchTab('plugins')}
+          className={clsx(
+            'pb-2 -mb-px text-[13px] font-medium border-b-2 transition-colors',
+            tab === 'plugins' ? 'border-zinc-900 text-zinc-900' : 'border-transparent text-zinc-500 hover:text-zinc-700',
+          )}
+        >
+          插件式供应商
         </button>
       </div>
 
@@ -913,6 +966,7 @@ export default function CustomModelsPage({ toast }: { toast: (msg: string, ok?: 
                       </div>
                       <div className="text-xs text-zinc-500">
                         {p.models} 个模型
+                        {!p.expose_all && p.exposed_models ? ` · 白名单 ${p.exposed_models.length} 个` : ''}
                         {p.started_at ? ` · 启动 ${fmtTime(p.started_at)}` : ''}
                         {p.restart_count > 0 ? ` · 已重启 ${p.restart_count} 次` : ''}
                         {p.last_error ? <span className="text-red-500"> · {p.last_error}</span> : null}
@@ -936,6 +990,16 @@ export default function CustomModelsPage({ toast }: { toast: (msg: string, ok?: 
                             p.status !== 'disabled' ? 'translate-x-[22px]' : 'translate-x-[2px]',
                           )}
                         />
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => openPluginExpose(p)}
+                        disabled={p.status !== 'running' || (p.models_all ?? []).length === 0}
+                        className="p-2 rounded-lg text-zinc-500 hover:bg-zinc-100 disabled:opacity-40 disabled:cursor-not-allowed"
+                        aria-label="暴露模型"
+                        title={p.status !== 'running' ? '插件运行中才能配置暴露模型' : (p.models_all ?? []).length === 0 ? '尚未获取到模型清单' : '自定义要暴露给 /v1/models 的模型'}
+                      >
+                        <ListChecks size={15} />
                       </button>
                       <button
                         type="button"
@@ -979,6 +1043,78 @@ export default function CustomModelsPage({ toast }: { toast: (msg: string, ok?: 
               ))}
             </div>
           )}
+        </div>
+      )}
+
+      {/* 插件式供应商「暴露模型」弹层（对齐自定义源表单交互） */}
+      {pluginExposing && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-zinc-900/40 p-4">
+          <div className="bg-white rounded-2xl shadow-xl w-full max-w-[722px] max-h-[90vh] overflow-y-auto p-6 space-y-4" onClick={(e) => e.stopPropagation()}>
+            <div className="flex items-center justify-between">
+              <div className="text-[15px] font-semibold text-zinc-900">暴露模型 · {pluginExposing.name}</div>
+              <button type="button" onClick={() => setPluginExposing(null)} className="p-1.5 rounded-lg text-zinc-400 hover:bg-zinc-100">
+                <X size={16} />
+              </button>
+            </div>
+
+            <div className="space-y-2">
+              <div className="flex items-center justify-between">
+                <label className="block text-sm font-medium text-zinc-700">暴露模型</label>
+                <label className="flex items-center gap-1.5 text-xs text-zinc-600 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={pluginExposing.exposeAll}
+                    onChange={(e) => setPluginExposing((prev) => (prev ? { ...prev, exposeAll: e.target.checked } : prev))}
+                    className="accent-zinc-900"
+                  />
+                  全部暴露
+                </label>
+              </div>
+              <div className={clsx('border rounded-lg max-h-72 overflow-y-auto', pluginExposing.exposeAll && 'opacity-50 pointer-events-none')}>
+                {pluginExposing.allModels.map((m) => (
+                  <label key={m} className="flex items-center gap-2 px-3 py-1.5 text-[13px] font-mono text-zinc-700 hover:bg-zinc-50 cursor-pointer border-b last:border-b-0">
+                    <input
+                      type="checkbox"
+                      checked={pluginExposing.exposeAll || pluginExposing.allowed.has(m)}
+                      disabled={pluginExposing.exposeAll}
+                      onChange={() => {
+                        setPluginExposing((prev) => {
+                          if (!prev) return prev
+                          const next = new Set(prev.allowed)
+                          if (next.has(m)) next.delete(m)
+                          else next.add(m)
+                          return { ...prev, allowed: next }
+                        })
+                      }}
+                      className="accent-zinc-900"
+                    />
+                    <span className="truncate">{m}</span>
+                  </label>
+                ))}
+              </div>
+              {!pluginExposing.exposeAll && (
+                <div className="flex items-center gap-3 text-xs text-zinc-500">
+                  <span>已勾选 {pluginExposing.allowed.size} / {pluginExposing.allModels.length}</span>
+                  <button type="button" className="text-zinc-600 hover:text-zinc-900 underline" onClick={() => setPluginExposing((prev) => (prev ? { ...prev, allowed: new Set(prev.allModels) } : prev))}>全选</button>
+                  <button type="button" className="text-zinc-600 hover:text-zinc-900 underline" onClick={() => setPluginExposing((prev) => (prev ? { ...prev, allowed: new Set() } : prev))}>清零</button>
+                </div>
+              )}
+              <p className="text-zinc-500 text-xs">未勾选的模型不会出现在 /v1/models，也无法经网关调用</p>
+            </div>
+
+            <div className="flex items-center gap-2 pt-1">
+              <div className="flex-1" />
+              <button
+                type="button"
+                onClick={() => void savePluginExpose()}
+                disabled={pluginBusy}
+                className="flex items-center gap-1.5 bg-zinc-900 text-white rounded-lg px-4 py-2 text-[13px] hover:bg-zinc-700 disabled:opacity-60 disabled:cursor-not-allowed"
+              >
+                {pluginBusy ? <Loader2 size={14} className="animate-spin" /> : null}
+                {pluginBusy ? '保存中…' : '保存'}
+              </button>
+            </div>
+          </div>
         </div>
       )}
 
