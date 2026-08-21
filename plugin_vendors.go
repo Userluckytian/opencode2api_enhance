@@ -62,6 +62,8 @@ func syncPlugins() {
 			Name:      rp.Name,
 			BaseURL:   rp.URL,
 			AuthToken: rp.Auth,
+			// 模型暴露白名单（主进程侧过滤；ExposeAll=false 时只暴露 ExposedModels）。
+			AllowedModels: allowedOf(rp),
 			// 与 custom 同款：注入网关传输（直连 TierPaid 语义，子进程仅监听 127.0.0.1）。
 			Transport: rootTransport{},
 		})
@@ -87,6 +89,15 @@ func appendPluginVendors(list []contract.Vendor) []contract.Vendor {
 	return append(list, pvs...)
 }
 
+// allowedOf 计算 remote vendor 的暴露白名单（ExposeAll=false 时取 ExposedModels，
+// 否则 nil = 全部暴露）。
+func allowedOf(rp pluginprovider.RunningPlugin) []string {
+	if rp.ExposeAll {
+		return nil
+	}
+	return rp.ExposedModels
+}
+
 // pluginSigOf running 插件集合签名（RunningPlugins 已按 id 排序，拼接即稳定指纹）。
 func pluginSigOf(rps []pluginprovider.RunningPlugin) string {
 	var sb strings.Builder
@@ -96,6 +107,13 @@ func pluginSigOf(rps []pluginprovider.RunningPlugin) string {
 		sb.WriteString(rp.URL)
 		sb.WriteByte('|')
 		sb.WriteString(rp.Auth)
+		sb.WriteByte('|')
+		// 暴露白名单纳入签名：白名单变化需触发重建（remote vendor 的 AllowedModels）。
+		if rp.ExposeAll {
+			sb.WriteString("all")
+		} else {
+			sb.WriteString(strings.Join(rp.ExposedModels, ","))
+		}
 		sb.WriteByte('\n')
 	}
 	return sb.String()

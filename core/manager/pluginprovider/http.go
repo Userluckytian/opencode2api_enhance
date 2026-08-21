@@ -110,6 +110,36 @@ func (m *Manager) ToggleHandler() http.HandlerFunc {
 	}
 }
 
+// ExposedModelsHandler POST /api/admin/plugins/{id}/exposed-models：保存模型暴露白名单
+// （设计文档 §六「获取模型并自定义暴露」）。body: {"expose_all":bool,"exposed_models":[...]}；
+// expose_all=true 时忽略 exposed_models（全量透传并清除旧白名单）。
+func (m *Manager) ExposedModelsHandler() http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if !requireMethod(w, r, http.MethodPost) {
+			return
+		}
+		id := r.PathValue("id")
+		var req struct {
+			ExposeAll     bool     `json:"expose_all"`
+			ExposedModels []string `json:"exposed_models"`
+		}
+		body, err := io.ReadAll(io.LimitReader(r.Body, 1<<20))
+		if err != nil || json.Unmarshal(body, &req) != nil {
+			writeErr(w, http.StatusBadRequest, "请求体需为 {\"expose_all\":bool,\"exposed_models\":[...]}")
+			return
+		}
+		if err := m.SetExposedModels(id, req.ExposeAll, req.ExposedModels); err != nil {
+			if errors.Is(err, errNotFound) {
+				writeErr(w, http.StatusNotFound, err.Error())
+			} else {
+				writeErr(w, http.StatusBadRequest, err.Error())
+			}
+			return
+		}
+		writeJSON(w, map[string]any{"status": "ok", "plugin": m.View(id)})
+	}
+}
+
 // DeleteHandler DELETE /api/admin/plugins/{id}：停进程 + 整目录删除。
 func (m *Manager) DeleteHandler() http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {

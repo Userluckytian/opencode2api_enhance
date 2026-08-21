@@ -39,6 +39,10 @@ type Config struct {
 	BaseURL   string             // 子进程 HTTP 端点（pluginprovider Endpoint 的 url，如 http://127.0.0.1:54321）
 	AuthToken string             // 一次性令牌（子进程就绪行回显校验后保留）
 	Transport contract.Transport // 由 core（网关）注入；未注入 → DirectTransport 直连
+	// AllowedModels 暴露白名单（主进程侧过滤，对齐 vendors/custom 同名语义）：
+	// 空 = 全部暴露；非空 = 仅在 ListModels 返回白名单内的模型。目录仍拉全量，
+	// 仅返回时过滤——编辑界面始终能拿到全量清单。
+	AllowedModels []string
 }
 
 // Vendor 插件子进程桥接厂商。
@@ -117,14 +121,34 @@ func (v *Vendor) ListModels(ctx context.Context) ([]contract.Model, error) {
 		models = append(models, contract.Model{
 			ID:       v.prefix() + m.ID,
 			Provider: v.cfg.ID,
-			// 令牌由网关持有，客户端无需携带 → 对外即"免费可用"目录（与 custom 同款语义）。
+			// 令牌由网关持有，客户端无需携带 → 对外即「免费可用」目录（与 custom 同款语义）。
 			Free: true,
 		})
 	}
+	models = v.filterAllowed(models)
 	if len(models) == 0 {
 		return nil, fmt.Errorf("remote %s: empty model list", v.cfg.ID)
 	}
 	return models, nil
+}
+
+// filterAllowed 按暴露白名单过滤目录（空白名单 = 全部暴露）。
+// 对齐 vendors/custom filterAllowed：目录/缓存保存全量，仅在 ListModels 返回时过滤。
+func (v *Vendor) filterAllowed(models []contract.Model) []contract.Model {
+	if len(v.cfg.AllowedModels) == 0 {
+		return models
+	}
+	allow := make(map[string]bool, len(v.cfg.AllowedModels))
+	for _, id := range v.cfg.AllowedModels {
+		allow[id] = true
+	}
+	out := make([]contract.Model, 0, len(models))
+	for _, m := range models {
+		if allow[strings.TrimPrefix(m.ID, v.prefix())] {
+			out = append(out, m)
+		}
+	}
+	return out
 }
 
 // IsFree 插件模型恒可用（令牌藏在网关侧），返回 true。

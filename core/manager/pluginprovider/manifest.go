@@ -1,5 +1,5 @@
 // provider.json 契约解析（设计定稿 docs/PLUGIN-PROVIDERS.md §三）。
-// 主进程只读五个顶层保留键（id/name/version/api_version/entry）；
+// 主进程只读七个顶层保留键（id/name/version/api_version/entry/expose_all/exposed_models）；
 // provider_private_configs 整体不解析（不透明）——Go json.Unmarshal 天然忽略未声明
 // 字段，密钥从结构上就进不了主进程内存。provider.json 全文保留（面板回显/编辑回填，
 // 与 /api/admin/custom-providers api_keys 明文回显同款取舍，见设计文档 §九）。
@@ -23,6 +23,11 @@ type Manifest struct {
 	Version    string `json:"version"`
 	APIVersion int    `json:"api_version"`
 	Entry      string `json:"entry"`
+	// 模型暴露白名单（设计文档 §3.3）：ExposeAll 缺省 = true（全量透传）；
+	// ExposeAll=false 时仅暴露 ExposedModels 内的模型 ID（对齐自定义源
+	// allowed_models 语义，主进程侧过滤，插件零改动获得暴露控制）。
+	ExposeAll     *bool    `json:"expose_all,omitempty"`
+	ExposedModels []string `json:"exposed_models,omitempty"`
 }
 
 // parseManifest 仅做 JSON 解析（不含目录一致 / 文件存在等上下文校验）。

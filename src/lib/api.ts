@@ -161,6 +161,12 @@ export type PluginProviderView = {
   status: PluginStatus
   /** 就绪后拉取的模型数（失败=0） */
   models: number
+  /** 全量模型 ID 清单（暴露勾选弹层用；running 且拉取成功才有值） */
+  models_all?: string[]
+  /** 全部暴露（true 时 exposed_models 无意义） */
+  expose_all: boolean
+  /** 暴露白名单（expose_all=false 时生效） */
+  exposed_models?: string[]
   /** providers/<id> 绝对路径（展示用） */
   path: string
   /** provider.json 全文（编辑回填） */
@@ -645,6 +651,11 @@ export const api = {
     req<PluginSaveResponse>('POST', `/plugins/${encodeURIComponent(id)}/config`, { provider_json: providerJSON }),
   pluginToggle: (id: string, enabled: boolean) =>
     req<PluginToggleResponse>('POST', `/plugins/${encodeURIComponent(id)}/toggle`, { enabled }),
+  pluginSaveExposedModels: (id: string, exposeAll: boolean, exposedModels: string[]) =>
+    req<PluginSaveResponse>('POST', `/plugins/${encodeURIComponent(id)}/exposed-models`, {
+      expose_all: exposeAll,
+      exposed_models: exposedModels,
+    }),
   pluginDelete: (id: string) => req<PluginDeleteResponse>('DELETE', `/plugins/${encodeURIComponent(id)}`),
 
   // 订阅（main 功能 M1）：preview 拉取解析、import 建实例、import-pool 仅入缓存

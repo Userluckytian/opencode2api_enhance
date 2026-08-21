@@ -299,6 +299,7 @@ func registerHTTPRoutes(mux *http.ServeMux, managerInst *manager.Manager, plugin
 		mux.HandleFunc("/api/admin/plugins/rescan", loggingMiddleware(requireAuth(pluginMgr.RescanHandler())))
 		mux.HandleFunc("/api/admin/plugins/{id}/config", loggingMiddleware(requireAuth(pluginMgr.ConfigSaveHandler())))
 		mux.HandleFunc("/api/admin/plugins/{id}/toggle", loggingMiddleware(requireAuth(pluginMgr.ToggleHandler())))
+		mux.HandleFunc("/api/admin/plugins/{id}/exposed-models", loggingMiddleware(requireAuth(pluginMgr.ExposedModelsHandler())))
 		mux.HandleFunc("/api/admin/plugins/{id}", loggingMiddleware(requireAuth(pluginMgr.DeleteHandler())))
 	}
 	// T3: 订阅源列表管理（新增/删除/立即拉取）+ 列表查看。

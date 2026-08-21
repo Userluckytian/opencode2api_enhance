@@ -110,14 +110,17 @@
 | `api_version` | 主进程 | 契约版本；主进程不兼容则拒绝加载并面板告警（不静默坏掉） |
 | `entry` | 主进程 | 相对本目录的可执行文件名；**必须指向目录内实际存在的文件**。**平台相关**：Windows 为 `xx.exe`，Linux/macOS 为无后缀 ELF/Mach-O（见 §2.1），不可跨平台混用 |
 | `provider_private_configs` | **仅供应商** | 供应商私有配置大对象，主进程整体不解析、不记录、不写日志 |
+| `expose_all` | 主进程 | 模型暴露开关（可选，缺省 = `true` 全量透传）；`false` 时仅暴露 `exposed_models` 内的模型（主进程侧过滤，对齐自定义源 `allowed_models` 语义） |
+| `exposed_models` | 主进程 | 暴露白名单（可选，模型 ID 数组）；仅 `expose_all=false` 时生效。目录仍拉全量，仅在聚合器/`/v1/models` 返回时过滤 |
 
 ### 3.3 边界
 
-- 主进程只读五个顶层保留键（`id`/`name`/`version`/`api_version`/`entry`）。
+- 主进程只读七个顶层保留键（`id`/`name`/`version`/`api_version`/`entry`/`expose_all`/`exposed_models`）。
 - `provider_private_configs` 内部结构**零校验**，供应商自行负责；主进程通过结构体解析天然忽略未知键（Go
   `json.Unmarshal` 默认行为），密钥从结构上就进不了主进程内存。
 - 主进程**只读**此文件，**绝不回写**（读-改-写会冲掉供应商私有键）；写文件的只有供应商自己（自举模板、
-  配置热更新）——唯一的例外是面板「编辑」保存（见 §六），由用户显式触发的全量写回。
+  配置热更新）——唯二的例外是面板「编辑」保存（见 §六）与「暴露模型」保存（`POST .../exposed-models`），
+  均由用户显式触发：前者全量写回，后者仅合并 `expose_all`/`exposed_models` 两个保留键（其余键原样保留）。
 - 插件读写自身 `provider.json` 时应**容忍 UTF-8 BOM**（Windows 记事本/PowerShell 5.1 写入常带 BOM，
   Go `json` 包不认会解析失败；若按"损坏即重建模板"处理会冲掉用户配置）——读侧先剥 BOM。
 - 「就绪」的最小前置由供应商自定（如 loomy 只要求 `provider_private_configs.session` 非空），
@@ -221,8 +224,9 @@ argv         = --provider-serve --port 0   （port 0 = OS 分配随机端口）
 
 | 端点 | 方法 | 说明 |
 |---|---|---|
-| `/api/admin/plugins` | GET | 扫描结果列表（id/name/version/状态/模型数/路径/provider.json 全文） |
+| `/api/admin/plugins` | GET | 扫描结果列表（id/name/version/状态/模型数/全量模型清单 models_all/暴露配置/路径/provider.json 全文） |
 | `/api/admin/plugins/{id}/config` | POST | 保存编辑后的 provider.json（校验后原子写盘） |
+| `/api/admin/plugins/{id}/exposed-models` | POST | 保存模型暴露白名单（`{"expose_all":bool,"exposed_models":[...]}`；仅合并两个保留键，写盘后聚合目录/网关即时生效） |
 | `/api/admin/plugins/{id}/toggle` | POST | 启停（停进程 or 拉起+注册） |
 | `/api/admin/plugins/{id}` | DELETE | 停进程 + 整目录删除 |
 | `/api/admin/plugins/rescan` | POST | 手动重扫 `providers/` |

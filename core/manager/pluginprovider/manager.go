@@ -205,6 +205,7 @@ type plugin struct {
 	url          string
 	startedAt    time.Time
 	modelCount   int
+	modelsAll    []string // 就绪后拉取的全量模型 ID 清单（暴露勾选弹层用；尽力而为，失败为空）
 	restartCount int
 
 	supervising bool          // 监督协程是否存活（startSupervisor 去重）
@@ -905,6 +906,13 @@ func (m *Manager) queryModelCount(p *plugin) {
 	}
 	m.mu.Lock()
 	p.modelCount = len(out.Data)
+	ids := make([]string, 0, len(out.Data))
+	for _, d := range out.Data {
+		if d.ID != "" {
+			ids = append(ids, d.ID)
+		}
+	}
+	p.modelsAll = ids
 	m.mu.Unlock()
 }
 
@@ -937,18 +945,21 @@ func (m *Manager) Rescan() []View {
 
 // View 插件列表项（管理 API 契约，设计文档 §七）。
 type View struct {
-	ID           string `json:"id"`
-	Name         string `json:"name"`
-	Version      string `json:"version"`
-	Status       string `json:"status"`
-	Models       int    `json:"models"`
-	Path         string `json:"path"`
-	ProviderJSON string `json:"provider_json"` // provider.json 全文（面板编辑回填）
-	PID          int    `json:"pid,omitempty"`
-	URL          string `json:"url,omitempty"`
-	LastError    string `json:"last_error,omitempty"`
-	StartedAt    string `json:"started_at,omitempty"`
-	RestartCount int    `json:"restart_count"`
+	ID           string   `json:"id"`
+	Name         string   `json:"name"`
+	Version      string   `json:"version"`
+	Status       string   `json:"status"`
+	Models       int      `json:"models"`
+	ModelsAll    []string `json:"models_all,omitempty"`    // 全量模型 ID 清单（暴露勾选弹层用）
+	ExposeAll    bool     `json:"expose_all"`              // 全部暴露（true 时 ExposedModels 无意义）
+	ExposedModels []string `json:"exposed_models,omitempty"` // 暴露白名单（ExposeAll=false 时生效）
+	Path         string   `json:"path"`
+	ProviderJSON string   `json:"provider_json"` // provider.json 全文（面板编辑回填）
+	PID          int      `json:"pid,omitempty"`
+	URL          string   `json:"url,omitempty"`
+	LastError    string   `json:"last_error,omitempty"`
+	StartedAt    string   `json:"started_at,omitempty"`
+	RestartCount int      `json:"restart_count"`
 }
 
 // View 查询单个插件视图（不存在返回零值）。
@@ -993,6 +1004,8 @@ func (m *Manager) viewOf(p *plugin) View {
 	return View{
 		ID: p.id, Name: name, Version: ver,
 		Status: p.status, Models: p.modelCount,
+		ModelsAll: p.modelsAll, ExposeAll: p.man.ExposeAll == nil || *p.man.ExposeAll,
+		ExposedModels: p.man.ExposedModels,
 		Path: p.dir, ProviderJSON: string(p.raw),
 		PID: p.pid, URL: p.url, LastError: p.lastError,
 		StartedAt: started, RestartCount: p.restartCount,
@@ -1012,10 +1025,14 @@ func (m *Manager) Endpoint(id string) (url, auth string, ok bool) {
 
 // RunningPlugin 已就绪插件的桥接信息（R2 装配 vendors/remote 用）。
 type RunningPlugin struct {
-	ID   string // 插件 id（= remote vendor 的模型目录前缀）
+	ID   string // 插件 id；remote vendor 的模型目录前缀
 	Name string // 展示名（provider.json name，缺省 = id）
 	URL  string // 子进程 HTTP 端点（http://127.0.0.1:<port>）
 	Auth string // 一次性令牌（子进程鉴权）
+	// 模型暴露白名单（主进程侧过滤，对齐自定义源 allowed_models）：
+	// ExposeAll=true 全量透传；false 时仅暴露 ExposedModels 内的模型。
+	ExposeAll     bool
+	ExposedModels []string
 }
 
 // RunningPlugins 返回全部 running 状态插件的桥接信息（按 id 排序）。
@@ -1038,7 +1055,11 @@ func (m *Manager) RunningPlugins() []RunningPlugin {
 		if name == "" {
 			name = id
 		}
-		out = append(out, RunningPlugin{ID: id, Name: name, URL: p.url, Auth: p.auth})
+		exposeAll := p.man.ExposeAll == nil || *p.man.ExposeAll
+		out = append(out, RunningPlugin{
+			ID: id, Name: name, URL: p.url, Auth: p.auth,
+			ExposeAll: exposeAll, ExposedModels: append([]string(nil), p.man.ExposedModels...),
+		})
 	}
 	return out
 }
@@ -1067,6 +1088,57 @@ func (m *Manager) SaveConfig(id string, data []byte) error {
 		return fmt.Errorf("provider.json 写入失败: %w", err)
 	}
 	m.ensurePlugin(id, data)
+	return nil
+}
+
+// SetExposedModels 保存插件的模型暴露白名单（设计文档 §六「获取模型并自定义暴露」）。
+// 主进程侧过滤：把 expose_all/exposed_models 合并进 provider.json（保留其余键原样），
+// 原子写盘后触发 OnChange 重建桥接厂商，过滤即时生效（无需插件改动）。
+// exposeAll=true 时 exposedModels 无意义（清除旧白名单键）。
+func (m *Manager) SetExposedModels(id string, exposeAll bool, exposedModels []string) error {
+	if err := validPluginID(id); err != nil {
+		return fmt.Errorf("非法插件 id %q", id)
+	}
+	m.mu.Lock()
+	p, ok := m.plugins[id]
+	m.mu.Unlock()
+	if !ok {
+		return errNotFound
+	}
+	// 基于当前 manifest 原文合并（不回写私有配置/其它键，仅改暴露配置两个保留键）。
+	var doc map[string]any
+	if len(p.raw) > 0 {
+		if err := json.Unmarshal(p.raw, &doc); err != nil {
+			return fmt.Errorf("provider.json 不是合法 JSON: %w", err)
+		}
+	} else {
+		doc = map[string]any{}
+	}
+	doc["expose_all"] = exposeAll
+	if exposeAll || len(exposedModels) == 0 {
+		// 全暴露（或空白名单）→ 清除白名单键，回退「空 = 全部暴露」语义。
+		delete(doc, "exposed_models")
+		if len(exposedModels) == 0 {
+			doc["expose_all"] = true
+		}
+	} else {
+		list := make([]any, 0, len(exposedModels))
+		for _, s := range exposedModels {
+			if s = strings.TrimSpace(s); s != "" {
+				list = append(list, s)
+			}
+		}
+		doc["exposed_models"] = list
+	}
+	data, err := json.MarshalIndent(doc, "", "  ")
+	if err != nil {
+		return err
+	}
+	if err := writeFileAtomic(p.manifestPath, data); err != nil {
+		return fmt.Errorf("provider.json 写入失败: %w", err)
+	}
+	m.ensurePlugin(id, data)
+	m.notifyChange() // 白名单变化 → 桥接厂商重建 → 聚合目录/网关过滤即时生效
 	return nil
 }
 
