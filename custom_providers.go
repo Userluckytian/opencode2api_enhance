@@ -348,10 +348,16 @@ func applyCustomProvidersSave(m *manager.Manager, inputs []customProviderInput) 
 	seen := map[string]bool{}
 	// 旧 custom 条目的 key 列表（按 id）：编辑时 keys 全留空 → 保留旧 keys（「留空则不修改」）。
 	oldKeys := map[string][]string{}
+	// 旧 custom 条目的模型白名单（按 id）：整表提交缺 allowed_models 键时保留旧值，
+	// 避免「改启停洗掉白名单」（问题 4，对齐 keys 的「留空=保留旧」惯例）。
+	oldAllowed := map[string][]string{}
 	for _, pc := range cfg.Providers {
 		if pc.Type == "custom" {
 			if ks := customKeyListFromParams(pc.Params); len(ks) > 0 {
 				oldKeys[pc.ID] = ks
+			}
+			if am := customAllowedListFromParams(pc.Params); len(am) > 0 {
+				oldAllowed[pc.ID] = am
 			}
 		}
 	}
@@ -406,8 +412,15 @@ func applyCustomProvidersSave(m *manager.Manager, inputs []customProviderInput) 
 		if len(keys) > 0 {
 			params[custom.ParamAPIKeys] = keys
 		}
-		if len(allowed) > 0 {
-			params[custom.ParamAllowedModels] = allowed
+		// allowed_models：区分「键缺失」与「键为空数组」（问题 4 修复核心）——
+		// nil（请求缺键，如整表提交漏带）→ 保留旧白名单，避免改启停洗掉白名单；
+		// 显式空数组 → 不写键（= 全部暴露）；非空 → 写入白名单。
+		if in.AllowedModels != nil {
+			if len(allowed) > 0 {
+				params[custom.ParamAllowedModels] = allowed
+			}
+		} else if old, ok := oldAllowed[in.ID]; ok {
+			params[custom.ParamAllowedModels] = old
 		}
 		pc := ProviderCfg{
 			ID: in.ID, Type: "custom", Name: strings.TrimSpace(in.Name),
@@ -575,6 +588,26 @@ func customKeyListFromParams(p map[string]any) []string {
 	}
 	if s, ok := p[custom.ParamAPIKey].(string); ok {
 		add(s)
+	}
+	return out
+}
+
+// customAllowedListFromParams 提取条目 params 里的模型白名单（allowed_models，去空去重）。
+// 对齐 customKeyListFromParams：config.json 里白名单存为 []any，需逐项断言 string。
+func customAllowedListFromParams(p map[string]any) []string {
+	var out []string
+	seen := map[string]bool{}
+	if arr, ok := p[custom.ParamAllowedModels].([]any); ok {
+		for _, v := range arr {
+			if s, ok := v.(string); ok {
+				s = strings.TrimSpace(s)
+				if s == "" || seen[s] {
+					continue
+				}
+				seen[s] = true
+				out = append(out, s)
+			}
+		}
 	}
 	return out
 }
