@@ -316,6 +316,7 @@ func registerHTTPRoutes(mux *http.ServeMux, managerInst *manager.Manager, plugin
 	mux.HandleFunc("/api/admin/pool/quality/probe", loggingMiddleware(requireAuth(managerInst.PoolProbeTriggerHandler())))
 	mux.HandleFunc("/api/admin/data/clean", loggingMiddleware(requireAuth(managerInst.DataCleanHandler())))
 	mux.HandleFunc("/api/admin/gateway/status", loggingMiddleware(requireAuth(managerInst.GatewayStatusHandler())))
+	mux.HandleFunc("/api/admin/gateway/models/refresh", loggingMiddleware(requireAuth(managerInst.GatewayModelsRefreshHandler())))
 	mux.HandleFunc("/api/admin/gateway/route-mode", loggingMiddleware(requireAuth(managerInst.GatewayRouteModeHandler())))
 	mux.HandleFunc("/api/admin/auto-model", loggingMiddleware(requireAuth(managerInst.AutoModelConfigHandler())))
 	mux.HandleFunc("/api/admin/gateway/stop", loggingMiddleware(requireAuth(managerInst.GatewayStopHandler())))
