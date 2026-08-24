@@ -61,6 +61,9 @@ portable-out/
 linux-out/
 test_picture/
 
+# Plugin provider packages (local build artifacts)
+providers/
+
 # R&D process docs (not part of the released product)
 docs/ARCHITECTURE-V2-PLAN.md
 docs/REVIEW-PD-DIFF.md
@@ -77,6 +80,7 @@ docs/群友建议_EGRESS-PROXY-MODE.md
 docs/节点问题_修复说明.md
 docs/R-SERIES-EXECUTION.md
 docs/2026-08-19-问题记录.md
+docs/2026-08-21-问题记录.md
 docs/images/pool_perf_sketch/
 
 # Ad-hoc research & meeting notes (local only, not shipped)
