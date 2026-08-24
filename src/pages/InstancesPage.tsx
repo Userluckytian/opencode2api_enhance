@@ -3,13 +3,15 @@ import clsx from 'clsx'
 import { RefreshCw, Play, Square, Trash2, TestTube2, Copy, Loader2, Search, Server, Activity, Settings2, ChevronDown, X } from 'lucide-react'
 import { api, type Instance, type TestResult, type PoolQualityRecord, type PoolQualityLevel } from '../lib/api'
 
-/** 链路质量徽标（与实例池页一致）：质量分 + 等级 + 延迟（无记录显示"未探测"） */
+/** 链路质量徽标（与实例池页一致）：质量分 + 等级 + 延迟（无记录显示"未探测"）；
+ *  悬浮展示窗口明细（2026-08-24 问题2，与 PoolPage.qualityBadge 对齐） */
 function qualityBadge(r?: PoolQualityRecord) {
   const levelMap: Record<PoolQualityLevel, [string, string]> = {
     healthy: ['bg-green-50 text-green-700', '健康'],
     degraded: ['bg-amber-50 text-amber-700', '较慢'],
     flaky: ['bg-orange-50 text-orange-600', '抖动'],
     down: ['bg-red-50 text-red-600', '不可用'],
+    unknown: ['bg-zinc-100 text-zinc-400', '探测中'],
   }
   if (!r) {
     return (
@@ -18,11 +20,17 @@ function qualityBadge(r?: PoolQualityRecord) {
       </span>
     )
   }
-  const [cls, label] = levelMap[r.level] ?? levelMap.healthy
+  const [cls, label] = levelMap[r.level] ?? levelMap.unknown
+  const sampleCount = r.samples?.length ?? 0
+  const title =
+    `成功率 ${(r.success_rate * 100).toFixed(0)}% · 平均延迟 ${r.avg_latency_ms}ms · ` +
+    `窗口样本 ${sampleCount} 个 · 连续失败 ${r.consecutive_failures} 次` +
+    (r.last_probe_ts > 0 ? ` · 最近探测 ${new Date(r.last_probe_ts * 1000).toLocaleTimeString()}` : '') +
+    (r.last_error ? ` · 最近失败: ${r.last_error}` : '')
   return (
     <span
       className={clsx('inline-block px-2 py-0.5 rounded-full text-[11px] font-medium whitespace-nowrap', cls)}
-      title={`成功率 ${(r.success_rate * 100).toFixed(0)}% · 平均延迟 ${r.avg_latency_ms}ms · 连续失败 ${r.consecutive_failures} 次${r.last_error ? ` · 原因: ${r.last_error}` : ''}`}
+      title={title}
     >
       {r.score} 分 · {label}
       {r.avg_latency_ms > 0 ? ` · ${r.avg_latency_ms}ms` : ''}

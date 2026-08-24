@@ -171,6 +171,23 @@ export default memo(function PoolPage({
     }
   }
 
+  // 网关免费模型手动刷新（2026-08-24 问题1）：强制同步拉取，结果随响应返回，
+  // 消掉轮询链路「异步晚一拍 + 60 秒缓存」导致的「点了看不到新数据」。
+  const [modelsRefreshing, setModelsRefreshing] = useState(false)
+  const handleRefreshModels = async () => {
+    setModelsRefreshing(true)
+    try {
+      const g = await api.gatewayModelsRefresh()
+      setGw(g)
+      if (g.free_models_error) toast(g.free_models_error, false)
+    } catch (e) {
+      console.error('刷新免费模型失败', e)
+      toast(String(e), false)
+    } finally {
+      setModelsRefreshing(false)
+    }
+  }
+
   // 性能模式参数初始值（P2）：从配置加载生效默认值，保证输入框有默认填充
   useEffect(() => {
     api
@@ -805,9 +822,9 @@ export default memo(function PoolPage({
         {/* 免费模型 */}
         <div className="mt-4 flex flex-wrap items-center gap-x-4 gap-y-2">
           <span className="text-[12px] text-zinc-500">网关可用免费模型：</span>
-          {gw?.free_models_loading ? (
+          {modelsRefreshing ? (
             <span className="flex items-center gap-1 text-[12px] text-zinc-400">
-              <Loader2 size={12} className="animate-spin" /> 探测中…
+              <Loader2 size={12} className="animate-spin" /> 刷新中…
             </span>
           ) : freeModels.length > 0 ? (
             <div className="flex flex-wrap gap-1.5">
@@ -818,10 +835,18 @@ export default memo(function PoolPage({
               ))}
             </div>
           ) : freeModelsError ? (
-            <span className="text-[12px] text-red-500">探测失败，{freeModelsError}</span>
+            <span className="text-[12px] text-red-500">{freeModelsError}</span>
           ) : (
             <span className="text-[12px] text-zinc-400">—</span>
           )}
+          <button
+            onClick={() => void handleRefreshModels()}
+            disabled={modelsRefreshing}
+            className="flex items-center gap-1 px-2 py-1 rounded-md text-[11px] text-zinc-500 hover:bg-zinc-100 hover:text-zinc-700 disabled:opacity-50"
+            title="强制重新拉取网关模型目录（绕过缓存，同步等待结果）"
+          >
+            <RefreshCw size={11} /> 刷新模型
+          </button>
         </div>
       </div>
 
@@ -1474,7 +1499,7 @@ export default memo(function PoolPage({
               {openSections.ui && (
                 <div className="p-4 space-y-4">
                   <p className="text-[12px] text-zinc-400">
-                    本页按此间隔自动刷新实例池成员状态与链路质量（轻量轮询）；深度状态校正仍由「刷新」按钮执行
+                    本页按此间隔自动刷新实例池成员状态与链路质量（轻量轮询，与「刷新」按钮执行相同的加载）；免费模型区另有独立的「刷新模型」按钮可强制拉取最新目录
                   </p>
                   <div className="flex items-center gap-3">
                     <label className="text-[13px] text-zinc-700 flex-1 min-w-0 whitespace-nowrap">刷新间隔（秒，默认 5）</label>
@@ -1599,13 +1624,15 @@ export default memo(function PoolPage({
 })
 
 /** 测试结果徽章：✓ 通过+延迟+详情 / ✗ 失败+原因（无结果返回 null 不占位） */
-/** 链路质量徽标（P1 探活评分）：质量分 + 等级 + 平均延迟（无记录显示"未探测"） */
+/** 链路质量徽标（P1 探活评分）：质量分 + 等级 + 平均延迟（无记录显示"未探测"）；
+ *  悬浮展示窗口明细（成功率/平均延迟/样本数/连续失败/最近探测/失败原因，2026-08-24 问题2） */
 function qualityBadge(r?: PoolQualityRecord) {
   const levelMap: Record<PoolQualityLevel, [string, string]> = {
     healthy: ['bg-green-50 text-green-700', '健康'],
     degraded: ['bg-amber-50 text-amber-700', '较慢'],
     flaky: ['bg-orange-50 text-orange-600', '抖动'],
     down: ['bg-red-50 text-red-600', '不可用'],
+    unknown: ['bg-zinc-100 text-zinc-400', '探测中'],
   }
   if (!r) {
     return (
@@ -1614,11 +1641,17 @@ function qualityBadge(r?: PoolQualityRecord) {
       </span>
     )
   }
-  const [cls, label] = levelMap[r.level] ?? levelMap.healthy
+  const [cls, label] = levelMap[r.level] ?? levelMap.unknown
+  const sampleCount = r.samples?.length ?? 0
+  const title =
+    `成功率 ${(r.success_rate * 100).toFixed(0)}% · 平均延迟 ${r.avg_latency_ms}ms · ` +
+    `窗口样本 ${sampleCount} 个 · 连续失败 ${r.consecutive_failures} 次` +
+    (r.last_probe_ts > 0 ? ` · 最近探测 ${new Date(r.last_probe_ts * 1000).toLocaleTimeString()}` : '') +
+    (r.last_error ? ` · 最近失败: ${r.last_error}` : '')
   return (
     <span
       className={clsx('inline-block px-2 py-0.5 rounded-full text-[11px] font-medium whitespace-nowrap', cls)}
-      title={`成功率 ${(r.success_rate * 100).toFixed(0)}% · 平均延迟 ${r.avg_latency_ms}ms · 连续失败 ${r.consecutive_failures} 次`}
+      title={title}
     >
       {r.score} 分 · {label}
       {r.avg_latency_ms > 0 ? ` · ${r.avg_latency_ms}ms` : ''}

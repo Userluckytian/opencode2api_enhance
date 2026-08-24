@@ -740,6 +740,17 @@ func (m *Manager) GatewayStatusHandler() http.HandlerFunc {
 	}
 }
 
+// GatewayModelsRefreshHandler POST 强制同步刷新网关免费模型目录
+// （绕过 10s/60s 节流，结果随响应返回；2026-08-24 问题1 待办①）。
+func (m *Manager) GatewayModelsRefreshHandler() http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if !requireMethodOK(w, r, http.MethodPost) {
+			return
+		}
+		writeJSON(w, m.Gateway().ForceRefreshModels(m.Run()))
+	}
+}
+
 // GatewayRouteModeHandler POST {mode}。
 // 对齐 Rust gateway_set_route_mode：仅接受 smart / failover / round_robin。
 func (m *Manager) GatewayRouteModeHandler() http.HandlerFunc {

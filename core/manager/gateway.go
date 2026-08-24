@@ -314,9 +314,9 @@ func (g *Gateway) Status(runner Runner) GatewayStatus {
 	modelsErr := g.modelsErr
 	var models []string
 	if g.memberCount() == 0 {
-		if modelsErr != "" {
-			modelsErr = "请先启动下方节点实例"
-		}
+		// 无条件给明确提示（2026-08-24 问题1 待办③）：静默空列表让用户无从
+		// 知道原因；文案与既有分支一致。
+		modelsErr = "请先启动下方节点实例"
 		models = []string{}
 	} else {
 		models = append([]string{}, g.models...)
@@ -407,6 +407,36 @@ func (g *Gateway) clearModels() {
 	g.updatedAt = 0
 	g.lastFetch = 0
 	g.modelsErr = ""
+}
+
+// ForceRefreshModels 绕过 refreshModels 的 10s/60s 节流，同步拉取一次免费模型
+// 目录并随返回值带回最新结果（2026-08-24 问题1 待办①：消掉「异步晚一拍」——
+// 旧链路点刷新看到的永远是上一拍缓存）。
+//
+// 前置走一遍 Status：复用其自动拉起（池非空而网关未运行时）与 memberCount==0
+// 的空表+提示语义；仅当网关在跑且池有成员时才真正发同步请求。与后台异步拉取
+// 并发时双拉无害（幂等 GET，写回均在 g.mu 下，最后写赢）。
+func (g *Gateway) ForceRefreshModels(runner Runner) GatewayStatus {
+	st := g.Status(runner)
+	if !st.Running || st.RunningInsts == 0 {
+		return st
+	}
+	g.mu.Lock()
+	port, pwd := g.port, g.password
+	g.mu.Unlock()
+	models, err := fetchGatewayModels(port, pwd)
+	now := time.Now().Unix()
+	g.mu.Lock()
+	if err != nil {
+		g.modelsErr = err.Error()
+	} else {
+		g.models = models
+		g.updatedAt = now
+		g.lastFetch = now
+		g.modelsErr = ""
+	}
+	g.mu.Unlock()
+	return g.Status(runner)
 }
 
 // fetchGatewayModels 请求 http://127.0.0.1:<port>/v1/models，返回模型 id 列表。

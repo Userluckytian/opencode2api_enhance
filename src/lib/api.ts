@@ -322,7 +322,6 @@ export type GatewayStatus = {
   route_mode: 'smart' | 'failover' | 'round_robin'
   free_models: string[]
   free_models_updated_at: number | null
-  free_models_loading: boolean
   free_models_error: string | null
 }
 
@@ -348,7 +347,15 @@ export type AutoModelConfig = {
 
 // ─── 实例池链路质量（性能模式 P1/P2） ─────────────────────────────────────────────
 
-export type PoolQualityLevel = 'healthy' | 'degraded' | 'flaky' | 'down'
+/** unknown = 空窗口无探活样本（冷启动，乐观计 100 但不参与竞速） */
+export type PoolQualityLevel = 'healthy' | 'degraded' | 'flaky' | 'down' | 'unknown'
+
+export type PoolQualitySample = {
+  ok: boolean
+  latency_ms: number
+  ts: number
+  last_error?: string
+}
 
 export type PoolQualityRecord = {
   name: string
@@ -363,6 +370,8 @@ export type PoolQualityRecord = {
   last_probe_ts: number
   /** 最新一次失败原因（探测透传，悬停显示） */
   last_error?: string
+  /** 滑动窗口内样本（2026-08-24 问题2：徽标悬浮展示样本数） */
+  samples?: PoolQualitySample[]
 }
 
 export type PoolQualitySummary = {
@@ -726,6 +735,8 @@ export const api = {
 
   // 统一网关（实例池）
   gatewayStatus: () => req<GatewayStatus>('GET', '/gateway/status'),
+  /** 强制同步刷新网关免费模型目录（绕过 10s/60s 节流，结果随响应返回；2026-08-24 问题1） */
+  gatewayModelsRefresh: () => req<GatewayStatus>('POST', '/gateway/models/refresh'),
   gatewaySetRouteMode: (mode: 'smart' | 'failover' | 'round_robin') =>
     req<void>('POST', '/gateway/route-mode', { mode }),
   gatewayStop: () => req<void>('POST', '/gateway/stop'),
