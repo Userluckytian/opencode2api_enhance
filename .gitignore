@@ -91,3 +91,7 @@ research-*.md
 # Legacy source archive (kept locally as history, not shipped)
 legacy/
 .tokeny
+
+# 按天问题日志（只入库约定文档 README.md，每日日志本地保留不入库）
+docs/issue-log/*
+!docs/issue-log/README.md
