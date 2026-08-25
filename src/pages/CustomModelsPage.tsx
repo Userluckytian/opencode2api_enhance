@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import clsx from 'clsx'
-import { Loader2, Pencil, Plus, PlugZap, Activity, Trash2, X, Plug, RefreshCw, ListChecks } from 'lucide-react'
+import { Loader2, Pencil, Plus, PlugZap, Activity, Trash2, X, Plug, RefreshCw, ListChecks, Search } from 'lucide-react'
 import { api, type CustomKeyStrategy, type CustomProviderInput, type CustomProviderTestResult, type CustomProviderView, type CustomProtocol, type PluginProviderView, type PluginStatus } from '../lib/api'
 
 // 自定义模型源表单（新增/编辑共用）。编辑时 key 留空 = 保留原 key。
@@ -129,6 +129,7 @@ export default function CustomModelsPage({ toast }: { toast: (msg: string, ok?: 
   const [pluginExposing, setPluginExposing] = useState<PluginExposeState | null>(null)
   const [pluginConfirmDelete, setPluginConfirmDelete] = useState<string | null>(null)
   const [pluginBusy, setPluginBusy] = useState(false)
+  const [modelSearch, setModelSearch] = useState('')
   // 启停/保存后子进程状态异步推进（starting→running/need_config），延迟刷新让状态落定
   const pluginRefreshTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
 
@@ -297,6 +298,7 @@ export default function CustomModelsPage({ toast }: { toast: (msg: string, ok?: 
       const r = await api.customProvidersSave([...others, input])
       setList(r.providers ?? [])
       setForm(null)
+      setModelSearch('')
       setTestResult(null)
       toast(`已保存：模型名前缀 ${input.id}/，立即生效`, true)
     } catch (e) {
@@ -444,6 +446,7 @@ export default function CustomModelsPage({ toast }: { toast: (msg: string, ok?: 
       )
       setPlugins((prev) => prev?.map((x) => (x.id === pluginExposing.id ? r.plugin : x)) ?? null)
       setPluginExposing(null)
+      setModelSearch('')
       toast(`已保存 ${pluginExposing.id} 的暴露模型（${r.plugin.expose_all ? '全部暴露' : `白名单 ${r.plugin.exposed_models?.length ?? 0} 个`}）`, true)
       schedulePluginRefresh()
     } catch (e) {
@@ -699,7 +702,7 @@ export default function CustomModelsPage({ toast }: { toast: (msg: string, ok?: 
           <div className="bg-white rounded-2xl shadow-xl w-full max-w-[722px] max-h-[90vh] overflow-y-auto p-6 space-y-4" onClick={(e) => e.stopPropagation()}>
             <div className="flex items-center justify-between">
               <div className="text-[15px] font-semibold text-zinc-900">{form.editing ? `编辑模型源 · ${form.editing}` : '添加模型源'}</div>
-              <button type="button" onClick={() => setForm(null)} className="p-1.5 rounded-lg text-zinc-400 hover:bg-zinc-100">
+              <button type="button" onClick={() => { setForm(null); setModelSearch('') }} className="p-1.5 rounded-lg text-zinc-400 hover:bg-zinc-100">
                 <X size={16} />
               </button>
             </div>
@@ -840,27 +843,42 @@ export default function CustomModelsPage({ toast }: { toast: (msg: string, ok?: 
                 <p className="text-zinc-500 text-xs">先「测试并获取模型」拉取清单后可勾选要暴露的模型；留空默认全部暴露</p>
               ) : (
                 <>
+                  <div className="relative">
+                    <Search size={14} className="absolute left-2.5 top-1/2 -translate-y-1/2 text-zinc-400 pointer-events-none" />
+                    <input
+                      type="text"
+                      placeholder="搜索模型…"
+                      value={modelSearch}
+                      onChange={(e) => setModelSearch(e.target.value)}
+                      className={clsx('w-full border rounded-lg pl-8 pr-3 py-1.5 text-[13px] text-zinc-700 placeholder:text-zinc-400 focus:outline-none focus:ring-1 focus:ring-zinc-400', form.exposeAll && 'opacity-50 pointer-events-none')}
+                    />
+                  </div>
                   <div className={clsx('border rounded-lg max-h-44 overflow-y-auto', form.exposeAll && 'opacity-50 pointer-events-none')}>
-                    {form.allModels.map((m) => (
-                      <label key={m} className="flex items-center gap-2 px-3 py-1.5 text-[13px] font-mono text-zinc-700 hover:bg-zinc-50 cursor-pointer border-b last:border-b-0">
-                        <input
-                          type="checkbox"
-                          checked={form.exposeAll || form.allowed.has(m)}
-                          disabled={form.exposeAll}
-                          onChange={() => {
-                            setForm((prev) => {
-                              if (!prev) return prev
-                              const next = new Set(prev.allowed)
-                              if (next.has(m)) next.delete(m)
-                              else next.add(m)
-                              return { ...prev, allowed: next }
-                            })
-                          }}
-                          className="accent-zinc-900"
-                        />
-                        <span className="truncate">{m}</span>
-                      </label>
-                    ))}
+                    {form.allModels
+                      .filter((m) => !modelSearch || m.toLowerCase().includes(modelSearch.toLowerCase()))
+                      .map((m) => (
+                        <label key={m} className="flex items-center gap-2 px-3 py-1.5 text-[13px] font-mono text-zinc-700 hover:bg-zinc-50 cursor-pointer border-b last:border-b-0">
+                          <input
+                            type="checkbox"
+                            checked={form.exposeAll || form.allowed.has(m)}
+                            disabled={form.exposeAll}
+                            onChange={() => {
+                              setForm((prev) => {
+                                if (!prev) return prev
+                                const next = new Set(prev.allowed)
+                                if (next.has(m)) next.delete(m)
+                                else next.add(m)
+                                return { ...prev, allowed: next }
+                              })
+                            }}
+                            className="accent-zinc-900"
+                          />
+                          <span className="truncate">{m}</span>
+                        </label>
+                      ))}
+                    {form.allModels.filter((m) => !modelSearch || m.toLowerCase().includes(modelSearch.toLowerCase())).length === 0 && (
+                      <div className="px-3 py-2 text-xs text-zinc-400">无匹配模型</div>
+                    )}
                   </div>
                   {!form.exposeAll && (
                     <div className="flex items-center gap-3 text-xs text-zinc-500">
@@ -1052,7 +1070,7 @@ export default function CustomModelsPage({ toast }: { toast: (msg: string, ok?: 
           <div className="bg-white rounded-2xl shadow-xl w-full max-w-[722px] max-h-[90vh] overflow-y-auto p-6 space-y-4" onClick={(e) => e.stopPropagation()}>
             <div className="flex items-center justify-between">
               <div className="text-[15px] font-semibold text-zinc-900">暴露模型 · {pluginExposing.name}</div>
-              <button type="button" onClick={() => setPluginExposing(null)} className="p-1.5 rounded-lg text-zinc-400 hover:bg-zinc-100">
+              <button type="button" onClick={() => { setPluginExposing(null); setModelSearch('') }} className="p-1.5 rounded-lg text-zinc-400 hover:bg-zinc-100">
                 <X size={16} />
               </button>
             </div>
@@ -1070,27 +1088,42 @@ export default function CustomModelsPage({ toast }: { toast: (msg: string, ok?: 
                   全部暴露
                 </label>
               </div>
+              <div className="relative">
+                <Search size={14} className="absolute left-2.5 top-1/2 -translate-y-1/2 text-zinc-400 pointer-events-none" />
+                <input
+                  type="text"
+                  placeholder="搜索模型…"
+                  value={modelSearch}
+                  onChange={(e) => setModelSearch(e.target.value)}
+                  className={clsx('w-full border rounded-lg pl-8 pr-3 py-1.5 text-[13px] text-zinc-700 placeholder:text-zinc-400 focus:outline-none focus:ring-1 focus:ring-zinc-400', pluginExposing.exposeAll && 'opacity-50 pointer-events-none')}
+                />
+              </div>
               <div className={clsx('border rounded-lg max-h-72 overflow-y-auto', pluginExposing.exposeAll && 'opacity-50 pointer-events-none')}>
-                {pluginExposing.allModels.map((m) => (
-                  <label key={m} className="flex items-center gap-2 px-3 py-1.5 text-[13px] font-mono text-zinc-700 hover:bg-zinc-50 cursor-pointer border-b last:border-b-0">
-                    <input
-                      type="checkbox"
-                      checked={pluginExposing.exposeAll || pluginExposing.allowed.has(m)}
-                      disabled={pluginExposing.exposeAll}
-                      onChange={() => {
-                        setPluginExposing((prev) => {
-                          if (!prev) return prev
-                          const next = new Set(prev.allowed)
-                          if (next.has(m)) next.delete(m)
-                          else next.add(m)
-                          return { ...prev, allowed: next }
-                        })
-                      }}
-                      className="accent-zinc-900"
-                    />
-                    <span className="truncate">{m}</span>
-                  </label>
-                ))}
+                {pluginExposing.allModels
+                  .filter((m) => !modelSearch || m.toLowerCase().includes(modelSearch.toLowerCase()))
+                  .map((m) => (
+                    <label key={m} className="flex items-center gap-2 px-3 py-1.5 text-[13px] font-mono text-zinc-700 hover:bg-zinc-50 cursor-pointer border-b last:border-b-0">
+                      <input
+                        type="checkbox"
+                        checked={pluginExposing.exposeAll || pluginExposing.allowed.has(m)}
+                        disabled={pluginExposing.exposeAll}
+                        onChange={() => {
+                          setPluginExposing((prev) => {
+                            if (!prev) return prev
+                            const next = new Set(prev.allowed)
+                            if (next.has(m)) next.delete(m)
+                            else next.add(m)
+                            return { ...prev, allowed: next }
+                          })
+                        }}
+                        className="accent-zinc-900"
+                      />
+                      <span className="truncate">{m}</span>
+                    </label>
+                  ))}
+                {pluginExposing.allModels.filter((m) => !modelSearch || m.toLowerCase().includes(modelSearch.toLowerCase())).length === 0 && (
+                  <div className="px-3 py-2 text-xs text-zinc-400">无匹配模型</div>
+                )}
               </div>
               {!pluginExposing.exposeAll && (
                 <div className="flex items-center gap-3 text-xs text-zinc-500">
