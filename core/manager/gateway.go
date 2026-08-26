@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -258,6 +259,10 @@ func (g *Gateway) sync(runner Runner) error {
 	}
 
 	running := g.isRunning(runner)
+	if changed {
+		slog.Info("gateway sync: config changed, will restart",
+			"cfg_path", cfgPath, "running", running)
+	}
 	if changed && running {
 		g.stopChild(runner)
 		if err := g.startChild(runner); err != nil {

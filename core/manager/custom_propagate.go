@@ -7,6 +7,7 @@ package manager
 
 import (
 	"encoding/json"
+	"log/slog"
 	"os"
 	"path/filepath"
 )
@@ -63,12 +64,39 @@ func patchProvidersFile(path string, managerProviders []map[string]any) error {
 	}
 	merged := mergeProviderEntries(existingMaps, customs)
 	if len(customs) == 0 && len(existingMaps) == 0 {
+		slog.Info("patchProvidersFile: skip (both sides empty)", "path", path)
 		return nil // 两边都空：保持「无 providers = 自动注册内建」语义，不写
 	}
 	// 与现文件等价则跳过（map 顺序不稳定，按数量+逐条比对）。
 	if providersEquivalent(existingMaps, merged) {
+		slog.Info("patchProvidersFile: skip (equivalent)", "path", path, "count", len(merged))
 		return nil
 	}
+	// 诊断日志：记录传播前后差异
+	existingIDs := make([]string, 0, len(existingMaps))
+	for _, m := range existingMaps {
+		if id, _ := m["id"].(string); id != "" {
+			existingIDs = append(existingIDs, id)
+		}
+	}
+	customIDs := make([]string, 0, len(customs))
+	for _, m := range customs {
+		if id, _ := m["id"].(string); id != "" {
+			customIDs = append(customIDs, id)
+		}
+	}
+	mergedIDs := make([]string, 0, len(merged))
+	for _, m := range merged {
+		if id, _ := m["id"].(string); id != "" {
+			mergedIDs = append(mergedIDs, id)
+		}
+	}
+	slog.Info("patchProvidersFile: patching",
+		"path", path,
+		"existing_ids", existingIDs,
+		"customs_from_manager", customIDs,
+		"merged_ids", mergedIDs,
+	)
 	cfg["providers"] = merged
 	out, err := json.MarshalIndent(cfg, "", "  ")
 	if err != nil {

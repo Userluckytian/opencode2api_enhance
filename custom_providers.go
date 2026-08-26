@@ -81,6 +81,23 @@ func rebuildVendors() {
 	for _, v := range globalAgg.Vendors() {
 		old[v.ID()] = v
 	}
+	// 诊断日志：重建前快照
+	oldIDs := make([]string, 0, len(old))
+	for id := range old {
+		oldIDs = append(oldIDs, id)
+	}
+	cfgIDs := make([]string, 0, len(cfgs))
+	for _, pc := range cfgs {
+		if pc.ID != "" && (pc.Enabled == nil || *pc.Enabled) {
+			cfgIDs = append(cfgIDs, pc.ID+"("+pc.Type+")")
+		}
+	}
+	slog.Info("rebuildVendors: pre-rebuild snapshot",
+		"old_vendors", oldIDs,
+		"cfg_providers", cfgIDs,
+		"config_file", configPath,
+		"gateway_mode", gatewayMode,
+	)
 	create := func(pc ProviderCfg) (contract.Vendor, bool) {
 		name := pc.Name
 		if name == "" {
@@ -100,6 +117,9 @@ func rebuildVendors() {
 	}
 
 	var list []contract.Vendor
+	reused := []string{}
+	fresh := []string{}
+	skipped := []string{}
 	if len(cfgs) > 0 {
 		for _, pc := range cfgs {
 			if pc.ID == "" || (pc.Enabled != nil && !*pc.Enabled) {
@@ -109,11 +129,15 @@ func rebuildVendors() {
 			if pc.Type != "custom" {
 				if v, ok := old[pc.ID]; ok {
 					list = append(list, v)
+					reused = append(reused, pc.ID)
 					continue
 				}
 			}
 			if v, ok := create(pc); ok {
 				list = append(list, v)
+				fresh = append(fresh, pc.ID)
+			} else {
+				skipped = append(skipped, pc.ID)
 			}
 		}
 	} else {
@@ -141,7 +165,17 @@ func rebuildVendors() {
 	vendorsSigMu.Lock()
 	lastVendorsSig = providersSignature()
 	vendorsSigMu.Unlock()
-	slog.Info("vendors rebuilt", "count", len(list))
+	resultIDs := make([]string, 0, len(list))
+	for _, v := range list {
+		resultIDs = append(resultIDs, v.ID())
+	}
+	slog.Info("vendors rebuilt",
+		"count", len(list),
+		"reused", reused,
+		"fresh", fresh,
+		"skipped", skipped,
+		"result_ids", resultIDs,
+	)
 	refreshModelCatalog()
 }
 
@@ -433,6 +467,15 @@ func applyCustomProvidersSave(m *manager.Manager, inputs []customProviderInput) 
 	if err := saveConfig(configPath, cfg); err != nil {
 		return nil, fmt.Errorf("配置写入失败: %w", err)
 	}
+	// 诊断日志：保存前后 providers 对比
+	keptIDs := make([]string, 0, len(kept))
+	for _, pc := range kept {
+		keptIDs = append(keptIDs, pc.ID+"("+pc.Type+")")
+	}
+	slog.Info("applyCustomProvidersSave: config saved",
+		"configPath", configPath,
+		"providers", keptIDs,
+	)
 	applyConfig(cfg)
 	rebuildVendors()
 

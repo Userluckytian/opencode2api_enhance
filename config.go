@@ -236,10 +236,21 @@ func startConfigWatcher(path string) {
 				continue
 			}
 			applyConfig(cfg)
+			// 诊断日志：记录热重载时的 providers 信息
+			cfgIDs := make([]string, 0, len(cfg.Providers))
+			for _, pc := range cfg.Providers {
+				if pc.ID != "" {
+					cfgIDs = append(cfgIDs, pc.ID+"("+pc.Type+")")
+				}
+			}
+			slog.Info("config hot-reloaded",
+				"path", path,
+				"gateway_mode", gatewayMode,
+				"providers", cfgIDs,
+			)
 			// providers 变化（如自定义模型源增删改）→ 原地重建厂商集合并刷新目录。
 			maybeRebuildVendors()
 			lastData = append(lastData[:0], data...)
-			slog.Info("config hot-reloaded", "path", path)
 		}
 	}()
 }

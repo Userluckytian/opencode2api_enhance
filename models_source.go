@@ -295,9 +295,26 @@ func refreshModelCatalogIfDue() {
 func refreshModelCatalogLocked() {
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
-	if err := globalAgg.Refresh(ctx); err != nil {
-		slog.Warn("model catalog refresh failed", "error", err)
+	vendors := globalAgg.Vendors()
+	vendorIDs := make([]string, 0, len(vendors))
+	for _, v := range vendors {
+		vendorIDs = append(vendorIDs, v.ID())
 	}
+	if err := globalAgg.Refresh(ctx); err != nil {
+		slog.Warn("model catalog refresh failed", "error", err, "vendors", vendorIDs)
+	}
+	catalog := globalAgg.Catalog()
+	modelCount := len(catalog)
+	providerCounts := map[string]int{}
+	for _, m := range catalog {
+		providerCounts[m.Provider]++
+	}
+	slog.Info("model catalog refreshed",
+		"gateway_mode", gatewayMode,
+		"vendors", vendorIDs,
+		"total_models", modelCount,
+		"by_provider", providerCounts,
+	)
 	syncModelsFromAggregator(globalAgg)
 	// 目录代际+1：请求侧 syncVendorState/seedVendorCatalog 检测到变化才重新 SetCatalog。
 	catalogGen.Add(1)
