@@ -17,10 +17,14 @@ type Aggregator struct {
 	vendors          []contract.Vendor
 	catalog          []contract.Model    // 最近一次 Refresh 的合并结果
 	providersByModel map[string][]string // 倒排索引：modelID → 提供它的厂商 ID 列表（Refresh 时重建）
+	// lastGood 厂商 ID → 最近一次成功拉取的目录。Refresh 失败/空结果时回退沿用
+	//（上游抖动不让目录整体落空）；ReplaceAll 时按仍在册厂商剪枝后立即重建 catalog
+	//（消除「替换后到刷新完成」的目录空洞窗口——2026-08-26 网关 502 问题修复）。
+	lastGood map[string][]contract.Model
 }
 
 // New 构造空聚合器。
-func New() *Aggregator { return &Aggregator{} }
+func New() *Aggregator { return &Aggregator{lastGood: map[string][]contract.Model{}} }
 
 // Register 注册一个厂商（幂等：重复注册同一 ID 会追加，由调用方保证唯一）。
 func (a *Aggregator) Register(v contract.Vendor) {
@@ -30,14 +34,30 @@ func (a *Aggregator) Register(v contract.Vendor) {
 }
 
 // ReplaceAll 原地替换全部厂商（运行时热重建用：配置 providers 变化后不换聚合器实例，
-// 全局指针不动、读侧零改动）。同时清空合并目录与倒排索引——替换后到下次 Refresh
-// 之前不保留任何旧厂商的模型路由（避免已删除源继续命中）。调用方需随后 Refresh。
+// 全局指针不动、读侧零改动）。合并目录**不整体清空**：按仍在册厂商的 lastGood 立即重建
+// （已移除厂商的旧模型随剪枝淘汰、新增厂商首次成功拉取前无目录），避免替换后到下次
+// Refresh 完成之间的目录空洞导致请求兜底 502；调用方需随后 Refresh 拉取最新目录。
 func (a *Aggregator) ReplaceAll(vendors []contract.Vendor) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	a.vendors = append([]contract.Vendor(nil), vendors...)
-	a.catalog = nil
-	a.providersByModel = nil
+	keep := make(map[string]bool, len(vendors))
+	for _, v := range vendors {
+		keep[v.ID()] = true
+	}
+	var all []contract.Model
+	for _, v := range vendors {
+		if ms, ok := a.lastGood[v.ID()]; ok {
+			all = append(all, ms...)
+		}
+	}
+	for id := range a.lastGood {
+		if !keep[id] {
+			delete(a.lastGood, id)
+		}
+	}
+	a.catalog = all
+	a.providersByModel = indexOf(all)
 }
 
 // Vendors 返回已注册厂商快照。
@@ -50,6 +70,9 @@ func (a *Aggregator) Vendors() []contract.Vendor {
 // Refresh 并行拉取所有已注册厂商目录并合并缓存。
 // 每家厂商独立预算：在总 60s 预算内派生各自 ctx，一家慢/挂起只影响自己；
 // 单个厂商失败不影响其它厂商（记录到 catalog 之外由调用方决定是否告警）。
+// 某厂商本次拉取失败或返回空目录时，回退沿用其 lastGood（上一代成功目录）——
+// 单次刷新失败不让该厂商的模型从合并目录中消失（2026-08-26 网关 502 修复；
+// 注意 opencode 上游不可达时 ListModels 返回「空列表 + nil 错误」，故空结果同样回退）。
 // 合并仍单次写锁重建倒排索引；目录按注册顺序拼接。
 func (a *Aggregator) Refresh(ctx context.Context) error {
 	ctx, cancel := context.WithTimeout(ctx, 60*time.Second)
@@ -65,10 +88,15 @@ func (a *Aggregator) Refresh(ctx context.Context) error {
 			vctx, vcancel := context.WithTimeout(ctx, 60*time.Second)
 			defer vcancel()
 			ms, err := v.ListModels(vctx)
+			a.mu.Lock()
+			defer a.mu.Unlock()
 			if err != nil || len(ms) == 0 {
+				parts[i] = append([]contract.Model(nil), a.lastGood[v.ID()]...)
 				return
 			}
-			parts[i] = ms
+			cp := append([]contract.Model(nil), ms...)
+			a.lastGood[v.ID()] = cp
+			parts[i] = cp
 		}(i, v)
 	}
 	wg.Wait()
@@ -76,7 +104,15 @@ func (a *Aggregator) Refresh(ctx context.Context) error {
 	for _, ms := range parts {
 		all = append(all, ms...)
 	}
-	// 倒排索引：modelID → 提供厂商（去重、保持目录出现顺序）。
+	a.mu.Lock()
+	a.catalog = all
+	a.providersByModel = indexOf(all)
+	a.mu.Unlock()
+	return nil
+}
+
+// indexOf 由合并目录重建倒排索引：modelID → 提供厂商（去重、保持目录出现顺序）。
+func indexOf(all []contract.Model) map[string][]string {
 	by := make(map[string][]string, len(all))
 	for _, m := range all {
 		seen := false
@@ -90,11 +126,7 @@ func (a *Aggregator) Refresh(ctx context.Context) error {
 			by[m.ID] = append(by[m.ID], m.Provider)
 		}
 	}
-	a.mu.Lock()
-	a.catalog = all
-	a.providersByModel = by
-	a.mu.Unlock()
-	return nil
+	return by
 }
 
 // Catalog 返回合并后的全部模型（含免费与非免费，按出现顺序）。
