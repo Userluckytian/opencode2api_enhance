@@ -22,8 +22,8 @@ import (
 	"github.com/6Kmfi6HP/opencode2api/core/manager"
 )
 
-// defaultAutoContextTokens 未配置上下文上限的模型的保守默认（128k）。
-const defaultAutoContextTokens = 128000
+// defaultAutoContextTokens 未配置上下文上限的模型的保守默认（200k，2026-08-26 由 128k 调整）。
+const defaultAutoContextTokens = 200000
 
 // maxAutoSwitches 单次请求最多沿降级链切换的模型数（有界重试，防长链打爆上游）。
 const maxAutoSwitches = 3
@@ -65,9 +65,19 @@ func autoEnabled() bool {
 	return autoCfg.Enabled
 }
 
-// isAutoModelName 判定请求模型名是否为虚拟模型 auto（大小写不敏感、容忍空白）。
+// autoModelName 当前虚拟模型对外名称（默认 "auto"，可自定义避免与其它模型名冲突）。
+func autoModelName() string {
+	n := autoConfig().Name
+	if n == "" {
+		return "auto"
+	}
+	return n
+}
+
+// isAutoModelName 判定请求模型名是否为当前虚拟模型名（大小写不敏感、容忍空白）。
+// 仅匹配配置的名称——用户自定义名称后，原 "auto" 不再被本网关认作虚拟模型（避免冲突）。
 func isAutoModelName(model string) bool {
-	return strings.EqualFold(strings.TrimSpace(model), "auto")
+	return strings.EqualFold(strings.TrimSpace(model), autoModelName())
 }
 
 // lastNode 调用记录里最后使用的节点（流内切换后 Nodes 会追加，取末位即最终实例）。
@@ -104,15 +114,17 @@ type autoCtxKey struct{}
 
 // prepareAuto 入口拦截：auto → 选主选模型 + 生成降级链挂 ctx。
 // 非 auto / 未启用 / 无候选：原样返回（dec = nil，调用方零开销路径）。
-func prepareAuto(ctx context.Context, model string, upstreamBody []byte) (context.Context, string, *autoDecision) {
+// auto 已启用但无可用候选（未勾选模型 / 全部权重 0 / 目录为空）时返回明确错误，
+// 调用方应直接回客户端（不落到默认厂商撞 502/404——2026-08-26 方案 C）。
+func prepareAuto(ctx context.Context, model string, upstreamBody []byte) (context.Context, string, *autoDecision, error) {
 	if !isAutoModelName(model) || !autoEnabled() {
-		return ctx, model, nil
+		return ctx, model, nil, nil
 	}
 	est := estimateRequestTokens(upstreamBody)
 	chain, fallback := buildAutoChain(est)
 	if len(chain) == 0 {
-		// 目录为空等场景：不拦截，让下游按原模型名报错（与显式模型行为一致）。
-		return ctx, model, nil
+		name := autoModelName()
+		return ctx, model, nil, fmt.Errorf("%s 模型下没有可用模型，请先配置参与 %s 的模型", name, name)
 	}
 	dec := &autoDecision{
 		Strategy:        autoConfig().Strategy,
@@ -120,7 +132,7 @@ func prepareAuto(ctx context.Context, model string, upstreamBody []byte) (contex
 		ContextFallback: fallback,
 		Chain:           chain,
 	}
-	return context.WithValue(ctx, autoCtxKey{}, dec), chain[0].Upstream, dec
+	return context.WithValue(ctx, autoCtxKey{}, dec), chain[0].Upstream, dec, nil
 }
 
 // autoNextModel 降级循环取下一个候选；switched 为已切换次数。
@@ -247,43 +259,40 @@ func autoChainBalanced(elig []autoCand) []autoCand {
 	return chain
 }
 
-// autoCandidateModels 收集候选全集：目录中免费模型（opencode 内建），按（分, 权重, 名）降序。
-// 权重按展示名查（/v1/models 可见名）；缺省 5；0 = 排除。
+// autoCandidateModels 收集候选全集：与 /v1/models 同语义的可见免费模型中**已勾选
+//（Models 白名单）**的条目，按（分, 权重, 名）降序。权重/上下文按可见名（/v1/models 名，
+// 含供应商前缀）查；缺省 5；0 = 排除。白名单为空或全未命中 → 无候选（调用方按「未配置」
+// 返回明确错误）。候选覆盖全部供应商（opencode 内建 + 自定义/插件，2026-08-26 修复）。
 func autoCandidateModels(cfg manager.AutoModelCfg) []autoCand {
-	modelMu.RLock()
-	zen, goM := modelsCache, goModelsCache
-	modelMu.RUnlock()
+	whitelist := make(map[string]bool, len(cfg.Models))
+	for _, m := range cfg.Models {
+		whitelist[strings.TrimSpace(m)] = true
+	}
+	visible := visibleFreeModels(globalAgg)
+	out := make([]autoCand, 0, len(visible))
 	seen := map[string]bool{}
-	out := make([]autoCand, 0, len(zen)+len(goM))
-	add := func(id string) {
-		if seen[id] || !isFreeModel(id) {
-			return
+	for _, m := range visible {
+		if seen[m.Raw] || !autoWhitelisted(m, whitelist) {
+			continue
 		}
-		seen[id] = true
-		disp := displayModelName(id)
+		seen[m.Raw] = true
 		w := 5
-		if v, ok := cfg.Weights[disp]; ok {
+		if v, ok := cfg.Weights[m.Visible]; ok {
 			w = v
 		}
 		if w <= 0 {
-			return
+			continue
 		}
-		sr, ms := modelFeedbackStats(id)
+		sr, ms := modelFeedbackStats(m.Raw)
 		out = append(out, autoCand{
-			Upstream: id,
-			Display:  disp,
+			Upstream: m.Raw,
+			Display:  m.Visible,
 			Weight:   w,
 			SR:       sr,
 			AvgMS:    ms,
-			Limit:    effContextLimit(cfg, disp),
+			Limit:    effContextLimit(cfg, m.Visible),
 			Score:    float64(w) / 10 * sr,
 		})
-	}
-	for _, m := range zen {
-		add(m.ID)
-	}
-	for _, m := range goM {
-		add(m.ID)
 	}
 	sort.Slice(out, func(i, j int) bool {
 		if out[i].Score != out[j].Score {
@@ -295,6 +304,42 @@ func autoCandidateModels(cfg manager.AutoModelCfg) []autoCand {
 		return out[i].Display < out[j].Display
 	})
 	return out
+}
+
+// autoWhitelisted 判定可见模型是否命中白名单：可见名（含前缀）或「厂商前缀+原始名」
+// 任一命中即可——供应商前缀是否出现取决于目录是否同名冲突，两态都认，防配置失效
+// （2026-08-26 命名空间修复的鲁棒性补充）。
+func autoWhitelisted(m visibleFreeModel, whitelist map[string]bool) bool {
+	if whitelist[m.Visible] {
+		return true
+	}
+	return whitelist[m.Provider+"/"+m.Raw]
+}
+
+// autoHasCandidates 是否存在可参与 auto 的候选（白名单 ∩ 可见免费模型 ∩ 权重>0）。
+// 供 /v1/models 决定是否展示虚拟模型：无候选时不展示，避免客户端请求一个必然报错的模型名。
+func autoHasCandidates() bool {
+	cfg := autoConfig()
+	if !cfg.Enabled || len(cfg.Models) == 0 {
+		return false
+	}
+	whitelist := make(map[string]bool, len(cfg.Models))
+	for _, m := range cfg.Models {
+		whitelist[strings.TrimSpace(m)] = true
+	}
+	for _, m := range visibleFreeModels(globalAgg) {
+		if !autoWhitelisted(m, whitelist) {
+			continue
+		}
+		w := 5
+		if v, ok := cfg.Weights[m.Visible]; ok {
+			w = v
+		}
+		if w > 0 {
+			return true
+		}
+	}
+	return false
 }
 
 // effContextLimit 模型有效上下文上限：用户配置 > 失败学习值 > 保守默认，取最小。

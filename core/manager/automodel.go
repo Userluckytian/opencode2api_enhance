@@ -9,14 +9,19 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 )
 
 // AutoModelCfg auto 虚拟模型配置（config.json 的 auto_model 键；与 show_node_prefix /
 // providers 等键同款「根 AppConfig 与本 Config 双结构共用」生存策略，任一写者重写文件都不丢）。
 type AutoModelCfg struct {
 	Enabled bool `json:"enabled"`
+	// Name 虚拟模型对外名称（默认 "auto"；可自定义避免与上游/其它 API 的模型名冲突）。
+	Name string `json:"name,omitempty"`
 	// Strategy 选择策略：balanced（默认，平滑加权轮询）/ speed（权重≥5 中选最快）/ quality（按权重锁定，失败才降）。
 	Strategy string `json:"strategy,omitempty"`
+	// Models 已勾选参与 auto 的模型展示名白名单（空 = 无候选，调用返回明确错误「请先配置」）。
+	Models []string `json:"models,omitempty"`
 	// Weights 模型展示名（/v1/models 可见名）→ 权重 0~10；缺省 5；0 = 永不参与 auto。
 	Weights map[string]int `json:"weights,omitempty"`
 	// ContextWindows 模型展示名 → 上下文上限 token；未配置的模型按保守默认处理
@@ -30,15 +35,30 @@ const (
 	AutoStrategyQuality  = "quality"
 )
 
-// Normalize 就地规范：策略白名单（空/非法回 balanced）、权重钳 0~10、非正上下文删除。
+// Normalize 就地规范：策略白名单（空/非法回 balanced）、名称去空白、白名单去空去重、
+// 权重钳 0~10、非正上下文删除。
 func (c *AutoModelCfg) Normalize() {
 	if c == nil {
 		return
 	}
+	c.Name = strings.TrimSpace(c.Name)
 	switch c.Strategy {
 	case AutoStrategySpeed, AutoStrategyQuality:
 	default:
 		c.Strategy = AutoStrategyBalanced
+	}
+	if len(c.Models) > 0 {
+		seen := map[string]bool{}
+		ms := c.Models[:0]
+		for _, m := range c.Models {
+			m = strings.TrimSpace(m)
+			if m == "" || seen[m] {
+				continue
+			}
+			seen[m] = true
+			ms = append(ms, m)
+		}
+		c.Models = ms
 	}
 	for k, w := range c.Weights {
 		if w < 0 {
@@ -54,10 +74,10 @@ func (c *AutoModelCfg) Normalize() {
 	}
 }
 
-// isEmpty 判定「全空配置」（关闭 + 默认策略 + 无权重 + 无上下文）。
+// isEmpty 判定「全空配置」（关闭 + 默认名称 + 默认策略 + 无白名单 + 无权重 + 无上下文）。
 func (c *AutoModelCfg) isEmpty() bool {
-	return c == nil || (!c.Enabled && c.Strategy == AutoStrategyBalanced &&
-		len(c.Weights) == 0 && len(c.ContextWindows) == 0)
+	return c == nil || (!c.Enabled && c.Name == "" && c.Strategy == AutoStrategyBalanced &&
+		len(c.Models) == 0 && len(c.Weights) == 0 && len(c.ContextWindows) == 0)
 }
 
 // AutoModel 返回当前 auto 配置（未配置 = 关闭 + 默认策略的零值）。

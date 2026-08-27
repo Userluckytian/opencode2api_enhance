@@ -99,9 +99,14 @@ export default memo(function PoolPage({
   const [settingsOpen, setSettingsOpen] = useState(false)
   // 折叠面板：每个配置分组一个 section，默认收起
   const [openSections, setOpenSections] = useState<{ perf: boolean; timeout: boolean; auto: boolean; ui: boolean }>({ perf: false, timeout: false, auto: false, ui: false })
-  // auto 虚拟模型（默认关闭）：权重 0~10 + 每模型上下文上限，保存即热生效
-  const [autoForm, setAutoForm] = useState<AutoModelConfig>({ enabled: false, strategy: 'balanced' })
+  // auto 虚拟模型（默认关闭）：勾选（models 白名单）模型才参与；每模型权重步进 + 上下文下拉，保存即热生效
+  const [autoForm, setAutoForm] = useState<AutoModelConfig>({ enabled: false, name: '', strategy: 'balanced', models: [] })
   const [savingAuto, setSavingAuto] = useState(false)
+  // 补充模型弹层：勾选网关免费模型加入 auto 白名单
+  const [autoPickerOpen, setAutoPickerOpen] = useState(false)
+  const [autoPickerDraft, setAutoPickerDraft] = useState<Set<string>>(new Set())
+  const [autoPickerCandidates, setAutoPickerCandidates] = useState<string[]>([])
+  const [autoSearch, setAutoSearch] = useState('')
   // 界面刷新（U3）：轮询间隔（秒，0 = 关闭轮询）（生效值 + 表单值）
   const [uiPollSec, setUiPollSec] = useState(5)
   const [uiForm, setUiForm] = useState({ ui_poll_interval_sec: 5 })
@@ -137,14 +142,8 @@ export default memo(function PoolPage({
   const qualityByName = new Map<string, PoolQualityRecord>()
   if (quality) for (const r of quality.records) qualityByName.set(r.name, r)
 
-  // auto 模型行：网关免费模型（排除 auto 自身）∪ 已配置键（网关未启动时也能编辑既有配置）
-  const autoModelRows = Array.from(
-    new Set([
-      ...(gw?.free_models ?? []).filter((m) => m.toLowerCase() !== 'auto'),
-      ...Object.keys(autoForm.weights || {}),
-      ...Object.keys(autoForm.context_windows || {}),
-    ]),
-  ).sort()
+  // auto 模型行 = 已勾选白名单（勾选才参与；网关未启动时也能编辑既有配置）
+  const autoModelRows = Array.from(new Set(autoForm.models || [])).sort()
 
   // M9: 轮询代次守卫——load 开始记代，响应后比对，过期响应丢弃（慢响应不叠加、旧快照不覆盖新状态）
   const loadGen = useRef(0)
@@ -223,7 +222,18 @@ export default memo(function PoolPage({
       .catch(() => {})
     api
       .autoModelGet()
-      .then((a) => setAutoForm({ enabled: !!a.enabled, strategy: a.strategy || 'balanced', weights: a.weights || {}, context_windows: a.context_windows || {} }))
+      .then((a) => {
+        // 旧配置兼容：无 models 白名单时，按既有权重键（>0）回填为白名单
+        const legacyModels = a.models && a.models.length > 0 ? a.models : Object.keys(a.weights || {}).filter((k) => (a.weights?.[k] ?? 0) > 0)
+        setAutoForm({
+          enabled: !!a.enabled,
+          name: a.name || '',
+          strategy: a.strategy || 'balanced',
+          models: legacyModels,
+          weights: a.weights || {},
+          context_windows: a.context_windows || {},
+        })
+      })
       .catch(() => {})
   }, [])
 
@@ -367,27 +377,32 @@ export default memo(function PoolPage({
     }
   }
 
-  // auto 虚拟模型保存：权重钳 0~10、上下文仅收正数（空 = 保守默认），保存即热生效
+  // auto 虚拟模型保存：白名单 = 已勾选模型；权重钳 0~10（只写非默认 5）；上下文下拉（只写非默认 200K）；保存即热生效
   const handleSaveAuto = async () => {
     const weights: Record<string, number> = {}
     const contextWindows: Record<string, number> = {}
     for (const m of autoModelRows) {
       const w = Math.round(Number(autoForm.weights?.[m] ?? 5))
-      weights[m] = Number.isFinite(w) ? Math.min(10, Math.max(0, w)) : 5
+      const wc = Number.isFinite(w) ? Math.min(10, Math.max(0, w)) : 5
+      if (wc !== 5) weights[m] = wc
       const c = Math.round(Number(autoForm.context_windows?.[m] ?? 0))
-      if (Number.isFinite(c) && c > 0) contextWindows[m] = c
+      if (Number.isFinite(c) && c > 0 && c !== 200000) contextWindows[m] = c
     }
     setSavingAuto(true)
     try {
       const res = await api.autoModelSave({
         enabled: autoForm.enabled,
+        name: (autoForm.name || '').trim() || undefined,
         strategy: autoForm.strategy || 'balanced',
+        models: autoModelRows,
         weights,
         context_windows: contextWindows,
       })
       setAutoForm({
         enabled: res.config.enabled,
+        name: res.config.name || '',
         strategy: res.config.strategy || 'balanced',
+        models: res.config.models || [],
         weights: res.config.weights || {},
         context_windows: res.config.context_windows || {},
       })
@@ -399,6 +414,53 @@ export default memo(function PoolPage({
     } finally {
       setSavingAuto(false)
     }
+  }
+
+  // 补充模型弹层：候选 = 网关免费模型（排除虚拟模型自身）∪ 已勾选（网关未运行时也能编辑）
+  const openAutoPicker = () => {
+    const virtualName = (autoForm.name || '').trim().toLowerCase() || 'auto'
+    const base = (gw?.free_models ?? []).filter((m) => m.toLowerCase() !== virtualName)
+    setAutoPickerCandidates(Array.from(new Set([...base, ...(autoForm.models || [])])).sort())
+    setAutoPickerDraft(new Set(autoForm.models || []))
+    setAutoSearch('')
+    setAutoPickerOpen(true)
+  }
+  const toggleAutoPick = (m: string, on: boolean) => {
+    setAutoPickerDraft((prev) => {
+      const next = new Set(prev)
+      if (on) next.add(m)
+      else next.delete(m)
+      return next
+    })
+  }
+  const confirmAutoPick = () => {
+    setAutoForm((f) => ({ ...f, models: Array.from(autoPickerDraft).sort() }))
+    setAutoPickerOpen(false)
+  }
+  const bumpAutoWeight = (m: string, delta: number) => {
+    setAutoForm((f) => {
+      const cur = Math.round(Number(f.weights?.[m] ?? 5))
+      const next = Math.min(10, Math.max(0, cur + delta))
+      return { ...f, weights: { ...(f.weights || {}), [m]: next } }
+    })
+  }
+  const setAutoContext = (m: string, v: number) => {
+    setAutoForm((f) => {
+      const ctx = { ...(f.context_windows || {}) }
+      if (v > 0 && v !== 200000) ctx[m] = v
+      else delete ctx[m]
+      return { ...f, context_windows: ctx }
+    })
+  }
+  const removeAutoModel = (m: string) => {
+    setAutoForm((f) => {
+      const models = (f.models || []).filter((x) => x !== m)
+      const weights = { ...(f.weights || {}) }
+      delete weights[m]
+      const cw = { ...(f.context_windows || {}) }
+      delete cw[m]
+      return { ...f, models, weights, context_windows: cw }
+    })
   }
 
   // 校验区间：min <= max，且为正数
@@ -1399,7 +1461,7 @@ export default memo(function PoolPage({
               {openSections.auto && (
                 <div className="p-4 space-y-4">
                   <p className="text-[12px] text-zinc-400">
-                    开启后 /v1/models 顶部出现虚拟模型 auto：客户端只填 auto，网关按「权重 × 实测成功率」自动选模型，失败沿候选链无感降级；上下文装不下的模型自动避开。实例（节点）选择仍由上方路由模式负责。
+                    开启后 /v1/models 顶部出现虚拟模型（默认名 <span className="text-zinc-600">auto</span>，可自定义）：客户端填该名称，网关按「权重 × 实测成功率」在<b>已勾选</b>的模型里自动选，失败沿候选链无感降级，上下文装不下的模型自动避开。未勾选任何模型时调用会返回「请先配置」提示。
                   </p>
                   <div className="flex items-center justify-between gap-3">
                     <div className="flex items-center space-x-3">
@@ -1424,52 +1486,79 @@ export default memo(function PoolPage({
                       <option value="quality">能力优先 · 按权重锁定</option>
                     </select>
                   </div>
+                  <div className="flex items-center gap-3">
+                    <label className="text-[12px] text-zinc-500 w-24 shrink-0">虚拟模型名称</label>
+                    <input
+                      value={autoForm.name || ''}
+                      placeholder="auto"
+                      onChange={(e) => setAutoForm((f) => ({ ...f, name: e.target.value }))}
+                      className="flex-1 px-3 py-2 border rounded-lg text-[13px] text-zinc-700"
+                    />
+                  </div>
                   <div className="space-y-2">
-                    <div className="grid grid-cols-[1fr_88px_120px] gap-2 text-[11px] text-zinc-400 px-1">
-                      <span>模型</span>
+                    <div className="grid grid-cols-[1fr_96px_120px_28px] gap-2 text-[11px] text-zinc-400 px-1">
+                      <span>参与 auto 的模型（勾选才参与）</span>
                       <span className="text-right">权重 0~10</span>
-                      <span className="text-right">上下文（token）</span>
+                      <span className="text-right">上下文</span>
+                      <span />
                     </div>
                     {autoModelRows.length === 0 && (
-                      <p className="text-[12px] text-zinc-400 py-2">网关未运行或暂无免费模型——启动后此表自动列出；也可保存后稍后回来配置。</p>
+                      <p className="text-[12px] text-zinc-400 py-2">尚未添加模型——点下方【＋ 补充模型】从网关免费模型中勾选参与 auto 的模型。</p>
                     )}
                     {autoModelRows.map((m) => (
-                      <div key={m} className="grid grid-cols-[1fr_88px_120px] gap-2 items-center">
+                      <div key={m} className="grid grid-cols-[1fr_96px_120px_28px] gap-2 items-center">
                         <span className="text-[13px] text-zinc-700 truncate" title={m}>{m}</span>
-                        <input
-                          type="number"
-                          min={0}
-                          max={10}
-                          value={autoForm.weights?.[m] ?? 5}
-                          onChange={(e) =>
-                            setAutoForm((f) => ({
-                              ...f,
-                              weights: { ...(f.weights || {}), [m]: Number(e.target.value) },
-                            }))
-                          }
-                          className="w-full px-2 py-1.5 border rounded-lg text-[13px] text-right"
-                        />
-                        <input
-                          type="number"
-                          min={0}
-                          placeholder="默认 128k"
-                          value={autoForm.context_windows?.[m] ?? ''}
-                          onChange={(e) =>
-                            setAutoForm((f) => {
-                              const ctx = { ...(f.context_windows || {}) }
-                              const v = Math.round(Number(e.target.value))
-                              if (Number.isFinite(v) && v > 0) ctx[m] = v
-                              else delete ctx[m]
-                              return { ...f, context_windows: ctx }
-                            })
-                          }
-                          className="w-full px-2 py-1.5 border rounded-lg text-[13px] text-right"
-                        />
+                        <div className="flex items-center justify-end gap-1">
+                          <button
+                            type="button"
+                            onClick={() => bumpAutoWeight(m, -1)}
+                            disabled={(autoForm.weights?.[m] ?? 5) <= 0}
+                            className="w-6 h-6 border rounded-md text-[14px] leading-none text-zinc-500 hover:bg-zinc-100 disabled:opacity-40"
+                          >
+                            −
+                          </button>
+                          <span className="w-7 text-center text-[13px] text-zinc-700">{autoForm.weights?.[m] ?? 5}</span>
+                          <button
+                            type="button"
+                            onClick={() => bumpAutoWeight(m, 1)}
+                            disabled={(autoForm.weights?.[m] ?? 5) >= 10}
+                            className="w-6 h-6 border rounded-md text-[14px] leading-none text-zinc-500 hover:bg-zinc-100 disabled:opacity-40"
+                          >
+                            +
+                          </button>
+                        </div>
+                        <select
+                          value={autoForm.context_windows?.[m] ?? 200000}
+                          onChange={(e) => setAutoContext(m, Number(e.target.value))}
+                          className="w-full px-2 py-1.5 border rounded-lg text-[13px] text-right text-zinc-700"
+                        >
+                          <option value={128000}>128K</option>
+                          <option value={200000}>200K（默认）</option>
+                          <option value={256000}>256K</option>
+                          <option value={1000000}>1M</option>
+                        </select>
+                        <button
+                          type="button"
+                          onClick={() => removeAutoModel(m)}
+                          title="移除该模型"
+                          className="w-6 h-6 flex items-center justify-center text-zinc-400 hover:text-red-500 rounded-md hover:bg-red-50"
+                        >
+                          ✕
+                        </button>
                       </div>
                     ))}
                   </div>
+                  <div>
+                    <button
+                      type="button"
+                      onClick={openAutoPicker}
+                      className="flex items-center gap-1.5 border border-zinc-300 rounded-lg px-3 py-2 text-[13px] text-zinc-700 hover:bg-zinc-50"
+                    >
+                      ＋ 补充模型
+                    </button>
+                  </div>
                   <p className="text-[11px] text-zinc-400">
-                    权重 0 = 永不参与；未配置按 5。上下文填真实值（如 1000000 / 200000），留空按保守 128k 处理——超限对话自动避开小上下文模型，填错真实值会被系统的失败学习自动修正。
+                    权重默认 5（均衡），0 = 临时挂起不删除；上下文默认 200K，超限对话自动避开小上下文模型，失败学习会自动修正。保存只写非默认配置。
                   </p>
                   <div className="flex items-center justify-between">
                     <span className="text-[11px] text-zinc-400">保存后即时生效（子进程热重载），无需重启实例/网关</span>
@@ -1485,6 +1574,52 @@ export default memo(function PoolPage({
                 </div>
               )}
             </section>
+
+            {/* 补充模型弹层：从网关免费模型勾选参与 auto 的模型 */}
+            {autoPickerOpen && (
+              <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/40 p-4" onClick={() => setAutoPickerOpen(false)}>
+                <div className="bg-white rounded-xl shadow-xl w-[480px] max-h-[72vh] flex flex-col" onClick={(e) => e.stopPropagation()}>
+                  <div className="flex items-center justify-between px-4 py-3 border-b border-zinc-200">
+                    <span className="text-[14px] font-semibold text-zinc-900">补充模型</span>
+                    <button type="button" onClick={() => setAutoPickerOpen(false)} className="text-zinc-400 hover:text-zinc-600">✕</button>
+                  </div>
+                  <div className="px-4 py-2 border-b border-zinc-200">
+                    <input
+                      value={autoSearch}
+                      onChange={(e) => setAutoSearch(e.target.value)}
+                      placeholder="搜索模型…（大小写不敏感即时过滤）"
+                      className="w-full px-3 py-2 border rounded-lg text-[13px] text-zinc-700"
+                    />
+                  </div>
+                  <div className="flex-1 overflow-y-auto px-2 py-2">
+                    {autoPickerCandidates.filter((m) => !autoSearch || m.toLowerCase().includes(autoSearch.toLowerCase())).length === 0 && (
+                      <p className="text-[12px] text-zinc-400 px-2 py-3">无可勾选模型（网关未运行或暂无免费模型）</p>
+                    )}
+                    {autoPickerCandidates
+                      .filter((m) => !autoSearch || m.toLowerCase().includes(autoSearch.toLowerCase()))
+                      .map((m) => (
+                        <label key={m} className="flex items-center gap-2 px-2 py-1.5 rounded hover:bg-zinc-50 cursor-pointer">
+                          <input
+                            type="checkbox"
+                            checked={autoPickerDraft.has(m)}
+                            onChange={(e) => toggleAutoPick(m, e.target.checked)}
+                            className="accent-zinc-900"
+                          />
+                          <span className="text-[13px] text-zinc-700 truncate">{m}</span>
+                        </label>
+                      ))}
+                  </div>
+                  <div className="flex items-center justify-end gap-2 px-4 py-3 border-t border-zinc-200">
+                    <button type="button" onClick={() => setAutoPickerOpen(false)} className="px-4 py-2 border rounded-lg text-[13px] text-zinc-700">
+                      取消
+                    </button>
+                    <button type="button" onClick={confirmAutoPick} className="px-4 py-2 bg-zinc-900 text-white rounded-lg text-[13px]">
+                      确定 · 已选 {autoPickerDraft.size} 个
+                    </button>
+                  </div>
+                </div>
+              </div>
+            )}
 
             {/* 界面刷新（折叠面板，默认收起） */}
             <section className="border border-zinc-200 rounded-xl overflow-hidden">

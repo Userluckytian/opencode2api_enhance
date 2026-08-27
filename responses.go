@@ -846,7 +846,19 @@ func responsesHandler(w http.ResponseWriter, r *http.Request) {
 	callCtx := r.Context()
 	var autoDec *autoDecision
 	if isAutoModelName(chatReq.Model) {
-		callCtx, chatReq.Model, autoDec = prepareAuto(r.Context(), chatReq.Model, upstreamBody)
+		var autoErr error
+		callCtx, chatReq.Model, autoDec, autoErr = prepareAuto(r.Context(), chatReq.Model, upstreamBody)
+		if autoErr != nil {
+			// auto 已启用但无可用候选：直接回客户端明确错误（不落到默认厂商撞 502/404）。
+			callRec.Status = "fail"
+			callRec.ErrMsg = autoErr.Error()
+			callRec.DurationMS = time.Since(startTime).Milliseconds()
+			recordCall(callRec)
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusBadRequest)
+			json.NewEncoder(w).Encode(map[string]any{"error": map[string]any{"message": autoErr.Error(), "type": "auto_unconfigured"}})
+			return
+		}
 		if autoDec != nil {
 			callRec.Events = append(callRec.Events, autoDec.pickEvent())
 		}

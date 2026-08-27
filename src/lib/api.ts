@@ -335,13 +335,17 @@ export type RestartPoolResult = {
 
 // ─── auto 虚拟模型（实例池设置弹层） ─────────────────────────────────────────────
 
-/** auto 模型配置：enabled 开启后 /v1/models 顶部出现 auto；权重按模型展示名（0~10，0=永不参与，缺省 5） */
+/** auto 模型配置：enabled 开启后 /v1/models 顶部出现虚拟模型（名称默认 auto 可自定义）；勾选（models 白名单）的模型才参与 */
 export type AutoModelConfig = {
   enabled: boolean
+  /** 虚拟模型对外名称（默认 "auto"，可自定义避免与其它模型名冲突） */
+  name?: string
   /** 选择策略：balanced（默认，平滑加权轮询）/ speed（权重≥5 中选最快）/ quality（按权重锁定） */
   strategy?: string
+  /** 已勾选参与 auto 的模型展示名白名单（空 = 无候选，调用返回「请先配置」错误） */
+  models?: string[]
   weights?: Record<string, number>
-  /** 模型展示名 → 上下文上限 token（留空 = 保守默认 128k） */
+  /** 模型展示名 → 上下文上限 token（留空 = 保守默认 200k） */
   context_windows?: Record<string, number>
 }
 

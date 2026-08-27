@@ -73,7 +73,19 @@ func chatCompletionsHandler(w http.ResponseWriter, r *http.Request) {
 	callCtx := r.Context()
 	var autoDec *autoDecision
 	if isAutoModelName(req.Model) {
-		callCtx, req.Model, autoDec = prepareAuto(r.Context(), req.Model, upstreamBody)
+		var autoErr error
+		callCtx, req.Model, autoDec, autoErr = prepareAuto(r.Context(), req.Model, upstreamBody)
+		if autoErr != nil {
+			// auto 已启用但无可用候选：直接回客户端明确错误（不落到默认厂商撞 502/404）。
+			callRec.Status = "fail"
+			callRec.ErrMsg = autoErr.Error()
+			callRec.DurationMS = time.Since(startTime).Milliseconds()
+			recordCall(callRec)
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusBadRequest)
+			json.NewEncoder(w).Encode(map[string]any{"error": map[string]any{"message": autoErr.Error(), "type": "auto_unconfigured"}})
+			return
+		}
 		if autoDec != nil {
 			callRec.Events = append(callRec.Events, autoDec.pickEvent())
 		}
@@ -273,10 +285,11 @@ func listModelsHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// auto 虚拟模型置顶（仅开启后可见；关闭时不出现，避免客户端缓存无效模型名）。
-	if autoEnabled() {
+	// auto 虚拟模型置顶（仅开启且有可用候选后可见；空列表/关闭不出现，
+	// 避免客户端缓存无效模型名——2026-08-26 白名单化改造：勾选模型才展示）。
+	if autoHasCandidates() {
 		allModels = append([]ModelInfo{{
-			ID:      "auto",
+			ID:      autoModelName(),
 			Object:  "model",
 			Created: time.Now().Unix(),
 			OwnedBy: "gateway",

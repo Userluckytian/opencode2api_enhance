@@ -4,6 +4,7 @@ import (
 	"context"
 	"log/slog"
 	"net/http"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -214,6 +215,97 @@ func newChatRouter(agg *aggregator.Aggregator) *chatRouter.Router {
 	defaultID := routingCfg.DefaultProvider
 	configMu.RUnlock()
 	return chatRouter.New(agg, mm, defaultID)
+}
+
+// visibleFreeModel 一条按 /v1/models 展示语义的可见免费模型。
+type visibleFreeModel struct {
+	Visible  string // /v1/models 可见名（含别名替换与供应商前缀，如 asb/[opencode]deepseek-v4-flash）
+	Raw      string // 聚合目录原始 ID（路由/上游调用用）
+	Provider string // 提供厂商
+}
+
+// visibleFreeModels 按 /v1/models 同款语义汇总全部可见免费模型：
+// 基础 = modelsCache/goModelsCache（opencode，字符串 isFreeModel 过滤）→ 别名/去 -free 展示；
+// 并入 = 聚合器 FreeModels() 中其它厂商（目录 Free 标记）→ 同名冲突加厂商前缀。
+// auto 候选匹配与 /v1/models 展示共用本函数，保证「勾选所见 = auto 所路由」
+// （2026-08-26 auto 白名单命名空间修复：自定义/插件供应商的免费模型也能参与 auto）。
+func visibleFreeModels(agg *aggregator.Aggregator) []visibleFreeModel {
+	modelMu.RLock()
+	zen, goM := modelsCache, goModelsCache
+	modelMu.RUnlock()
+	configMu.RLock()
+	aliases := make(map[string]string, len(modelAlias))
+	for alias, upstream := range modelAlias {
+		aliases[alias] = upstream
+	}
+	configMu.RUnlock()
+
+	// opencode 基础免费目录（字符串 isFreeModel 规则，与 /v1/models 一致）。
+	var base []ModelInfo
+	for _, m := range zen {
+		if isFreeModel(m.ID) {
+			base = append(base, m)
+		}
+	}
+	for _, m := range goM {
+		if isFreeModel(m.ID) && !containsModelWithID(base, m.ID) {
+			base = append(base, m)
+		}
+	}
+
+	// 可见名映射（别名优先，-free 后缀兜底）：与 replaceModelIDsWithAliases 同语义，
+	// 同时保留原始可路由 ID（Raw）——auto 的 Upstream 必须用原名（如 deepseek-v4-flash-free），
+	// 展示名（如 deepseek-v4-flash）只用于白名单匹配。
+	aliasesByUpstream := make(map[string][]string, len(aliases))
+	for alias, upstream := range aliases {
+		alias = strings.TrimSpace(alias)
+		upstream = strings.TrimSpace(upstream)
+		if alias == "" || upstream == "" {
+			continue
+		}
+		aliasesByUpstream[upstream] = append(aliasesByUpstream[upstream], alias)
+	}
+	for upstream := range aliasesByUpstream {
+		sort.Strings(aliasesByUpstream[upstream])
+	}
+
+	out := make([]visibleFreeModel, 0, len(base)+8)
+	have := make(map[string]bool, len(base))
+	for _, m := range base {
+		visibleIDs := aliasesByUpstream[m.ID]
+		if len(visibleIDs) == 0 {
+			if strings.HasSuffix(m.ID, "-free") {
+				visibleIDs = []string{strings.TrimSuffix(m.ID, "-free")}
+			} else {
+				visibleIDs = []string{m.ID}
+			}
+		}
+		for _, vid := range visibleIDs {
+			if have[vid] {
+				continue
+			}
+			have[vid] = true
+			out = append(out, visibleFreeModel{Visible: vid, Raw: m.ID, Provider: "opencode"})
+		}
+	}
+	if agg == nil {
+		return out
+	}
+	for _, m := range agg.FreeModels() {
+		if m.Provider == "opencode" {
+			continue // opencode 已在基础列表
+		}
+		id := m.ID
+		if have[id] {
+			id = m.Provider + "/" + m.ID
+		}
+		if have[id] {
+			continue // 前缀后仍冲突 → 跳过重复
+		}
+		have[id] = true
+		out = append(out, visibleFreeModel{Visible: id, Raw: m.ID, Provider: m.Provider})
+	}
+	return out
 }
 
 // appendOtherFreeModels 把 opencode 之外其它厂商的免费模型并入展示列表。
