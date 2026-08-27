@@ -85,8 +85,44 @@ func newKeyPool(keys []string, strategy string) *keyPool {
 func (p *keyPool) tryAcquire(tried map[int]bool) (string, int, bool) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	return p.tryAcquireLocked(tried, p.nowFn())
+}
+
+// tryAcquirePrefer 优先从 preferred（key 下标子集，如「并集目录中能提供目标模型
+// 的 key」）里挑可用且未试过的 key，子集无可挑时退回全池普通调度。
+// round_robin 在子集内同样轮询；failover 在子集内保持粘主。
+func (p *keyPool) tryAcquirePrefer(tried map[int]bool, preferred []int) (string, int, bool) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
 	now := p.nowFn()
+	if len(preferred) > 0 {
+		start := 0
+		if p.strategy == StrategyRoundRobin {
+			start = int(p.rr % uint64(len(preferred)))
+		}
+		for off := 0; off < len(preferred); off++ {
+			i := preferred[(start+off)%len(preferred)]
+			if i < 0 || i >= len(p.keys) {
+				continue
+			}
+			if tried[i] || !p.keys[i].available(now) {
+				continue
+			}
+			if p.strategy == StrategyRoundRobin {
+				p.rr++
+			}
+			return p.keys[i].value, i, true
+		}
+	}
+	return p.tryAcquireLocked(tried, now)
+}
+
+// tryAcquireLocked 全池普通挑选（调用方已持 p.mu；now 为当前时间快照）。
+func (p *keyPool) tryAcquireLocked(tried map[int]bool, now time.Time) (string, int, bool) {
 	n := len(p.keys)
+	if n == 0 {
+		return "", -1, false
+	}
 	start := 0
 	if p.strategy == StrategyRoundRobin {
 		start = int(p.rr % uint64(n))

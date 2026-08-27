@@ -66,6 +66,7 @@ type Vendor struct {
 	pool        *keyPool
 	mu          sync.Mutex
 	models      []contract.Model // 最近一次成功目录（失败时兜底返回）
+	affinity    map[string][]int // 原始模型名 → 提供它的 key 下标（ListModels 并集时记录，请求按模型亲和路由）
 	lastErr     string
 	lastSuccess time.Time
 }
@@ -148,35 +149,55 @@ func (v *Vendor) ConfiguredKeys() []string { return v.pool.keysSnapshot() }
 // ListModels 拉取上游目录并加前缀。失败（含空列表，防上游抖动清空）时回退
 // 内存缓存 → 磁盘缓存；成功则更新两级缓存并写盘（stale-while-revalidate：
 // 进程重启后无需等上游，首个 /v1/models 即含自定义模型）。
+//
+// 多 key 目录取**并集**：逐个可用 key 各自拉取合并去重——不同 key 的模型子集
+// 不一致时（如同一供应商下不同订阅档），任一 key 独有的模型都进目录；同时记录
+// 每个模型由哪些 key 提供（affinity），供请求侧按模型亲和路由（见 preferredKeys）。
 func (v *Vendor) ListModels(ctx context.Context) ([]contract.Model, error) {
-	var ids []string
-	var err error
-	// 目录拉取同样走 key 池：429/401 标记后换下一个 key。
 	tried := map[int]bool{}
+	seen := map[string]bool{}
+	affinity := map[string][]int{}
+	var ids []string
+	var lastErr error
+	someOK := false
 	for {
-		var key string
-		var idx int
-		var ok bool
-		if key, idx, ok = v.pool.tryAcquire(tried); !ok {
+		key, idx, ok := v.pool.tryAcquire(tried)
+		if !ok {
 			break
 		}
 		tried[idx] = true
-		ids, err = v.proto.listModels(ctx, v, key)
-		if err == nil {
-			break
-		}
-		if se, ok := err.(*keyStatusError); ok {
-			switch se.status {
-			case http.StatusUnauthorized, http.StatusForbidden:
-				v.pool.disable(idx)
-			case http.StatusTooManyRequests:
-				v.pool.cool(idx, se.retryAfter)
+		perKey, err := v.proto.listModels(ctx, v, key)
+		if err != nil {
+			lastErr = err
+			if se, ok := err.(*keyStatusError); ok {
+				switch se.status {
+				case http.StatusUnauthorized, http.StatusForbidden:
+					v.pool.disable(idx)
+				case http.StatusTooManyRequests:
+					v.pool.cool(idx, se.retryAfter)
+				}
 			}
-			continue
+			continue // 单 key 失败不阻断并集；全部失败走缓存兜底
 		}
-		break // 传输/解析错误：不标记，走缓存兜底
+		someOK = true
+		for _, id := range perKey {
+			if id == "" {
+				continue
+			}
+			if !seen[id] {
+				seen[id] = true
+				ids = append(ids, id)
+			}
+			affinity[id] = appendKeyIdx(affinity[id], idx)
+		}
 	}
-	if err == nil && len(ids) == 0 {
+	var err error
+	if !someOK {
+		err = lastErr
+		if err == nil {
+			err = fmt.Errorf("custom %s: no key returned model list", v.cfg.ID)
+		}
+	} else if len(ids) == 0 {
 		// 成功但空列表：多为上游异常，按失败处理以保留既有目录。
 		err = fmt.Errorf("custom %s: empty model list", v.cfg.ID)
 	}
@@ -210,14 +231,48 @@ func (v *Vendor) ListModels(ctx context.Context) ([]contract.Model, error) {
 	if len(out) == 0 {
 		return nil, fmt.Errorf("custom %s: empty model list", v.cfg.ID)
 	}
-	// 内存/磁盘缓存保存全量（白名单变更无需重新拉取），返回时过滤。
+	// 内存/磁盘缓存保存全量（白名单变更无需重新拉取），返回时过滤；
+	// affinity 与目录同代更新，请求按模型直达可服务的 key。
 	v.mu.Lock()
 	v.models = out
+	v.affinity = affinity
 	v.mu.Unlock()
 	if !v.cfg.NoModelCache {
 		v.saveModelsCache(out)
 	}
 	return v.filterAllowed(out), nil
+}
+
+// appendKeyIdx 去重追加 key 下标（同一模型被多个 key 提供时各记一次）。
+func appendKeyIdx(list []int, idx int) []int {
+	for _, i := range list {
+		if i == idx {
+			return list
+		}
+	}
+	return append(list, idx)
+}
+
+// preferredKeys 返回能提供该模型（上游名）的 key 下标（affinity 命中时），
+// 目录未刷新/无记录返回 nil → 请求走全池普通调度。与 models 同锁保护。
+func (v *Vendor) preferredKeys(model string) []int {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	return v.affinity[model]
+}
+
+// hasModel 目标模型（上游名）是否在本源并集目录中（缓存兜底态也计入）。
+// 仅目录中存在时才值得为 404 换 key 重试——真不存在的模型各 key 404 一致，
+// 不放大请求；目录未刷新（models 为空）时返回 false 保持旧行为。
+func (v *Vendor) hasModel(upstreamModel string) bool {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	for _, m := range v.models {
+		if strings.TrimPrefix(m.ID, v.prefix()) == upstreamModel {
+			return true
+		}
+	}
+	return false
 }
 
 // filterAllowed 按暴露白名单过滤目录（空白名单 = 全部暴露）。
@@ -311,14 +366,16 @@ func (v *Vendor) markOK() {
 }
 
 // Chat 非流式：原始 OpenAI 请求体 → 上游协议适配 → OpenAI 形态响应。
-// key 池调度：失败按状态码标记并换 key 重试（见 withKeys）。
+// key 池调度：优先挑「并集目录中能提供该模型」的 key（多 key 模型子集不一致时
+// 直达正确 key），失败按状态码标记并换 key 重试（见 withKeys）。
 func (v *Vendor) Chat(ctx context.Context, msg *contract.Message) (*contract.Reply, error) {
 	body, err := v.buildBody(msg, false)
 	if err != nil {
 		return nil, err
 	}
-	return v.withKeys(func(key string) (*contract.Reply, error) {
-		return v.proto.chat(ctx, v, v.upstreamModel(msg.Model), key, body)
+	upstream := v.upstreamModel(msg.Model)
+	return v.withKeys(upstream, func(key string) (*contract.Reply, error) {
+		return v.proto.chat(ctx, v, upstream, key, body)
 	})
 }
 
@@ -328,20 +385,22 @@ func (v *Vendor) ChatStream(ctx context.Context, msg *contract.Message) (*contra
 	if err != nil {
 		return nil, err
 	}
-	return v.withKeysStream(func(key string) (*contract.Stream, error) {
-		return v.proto.chatStream(ctx, v, v.upstreamModel(msg.Model), key, body)
+	upstream := v.upstreamModel(msg.Model)
+	return v.withKeysStream(upstream, func(key string) (*contract.Stream, error) {
+		return v.proto.chatStream(ctx, v, upstream, key, body)
 	})
 }
 
-// withKeys 非流式调用的 key 池编排：按调度挑可用 key，429 冷却（Retry-After）、
-// 401/403 禁用并换下一个 key 重试，同请求每 key 至多一次；400/404 等请求级错误
+// withKeys 非流式调用的 key 池编排：按模型亲和 + 调度挑可用 key，429 冷却
+// （Retry-After）、401/403 禁用并换下一个 key 重试，404（目标模型在并集目录中
+// 但当前 key 不提供）同样换 key 重试；同请求每 key 至多一次；400 等请求级错误
 // 与 key 无关立即返回；全部耗尽返回最后一次结果（交由外层厂商级 failover 接管）。
-func (v *Vendor) withKeys(call func(key string) (*contract.Reply, error)) (*contract.Reply, error) {
+func (v *Vendor) withKeys(model string, call func(key string) (*contract.Reply, error)) (*contract.Reply, error) {
 	tried := map[int]bool{}
 	var lastReply *contract.Reply
 	var lastErr error
 	for {
-		key, idx, ok := v.pool.tryAcquire(tried)
+		key, idx, ok := v.pool.tryAcquirePrefer(tried, v.preferredKeys(model))
 		if !ok {
 			break
 		}
@@ -359,6 +418,9 @@ func (v *Vendor) withKeys(call func(key string) (*contract.Reply, error)) (*cont
 			v.pool.disable(idx)
 		case reply.Status == http.StatusTooManyRequests:
 			v.pool.cool(idx, parseRetryAfter(reply.Headers.Get("Retry-After")))
+		case reply.Status == http.StatusNotFound && v.hasModel(model):
+			// 多 key 模型子集不一致：当前 key 不提供该模型但并集目录中有它，
+			// 换下一个 key 再试（affinity 缺失/过期时的兜底）。
 		case reply.Status >= 500 || reply.Status == http.StatusRequestTimeout:
 			// 上游侧问题：不标记 key，仅换 key 重试
 		default:
@@ -369,12 +431,12 @@ func (v *Vendor) withKeys(call func(key string) (*contract.Reply, error)) (*cont
 }
 
 // withKeysStream 流式版（Stream 无响应头可读 Retry-After，429 用缺省冷却）。
-func (v *Vendor) withKeysStream(call func(key string) (*contract.Stream, error)) (*contract.Stream, error) {
+func (v *Vendor) withKeysStream(model string, call func(key string) (*contract.Stream, error)) (*contract.Stream, error) {
 	tried := map[int]bool{}
 	var lastStream *contract.Stream
 	var lastErr error
 	for {
-		key, idx, ok := v.pool.tryAcquire(tried)
+		key, idx, ok := v.pool.tryAcquirePrefer(tried, v.preferredKeys(model))
 		if !ok {
 			break
 		}
@@ -392,6 +454,8 @@ func (v *Vendor) withKeysStream(call func(key string) (*contract.Stream, error))
 			v.pool.disable(idx)
 		case stream.Status == http.StatusTooManyRequests:
 			v.pool.cool(idx, 0)
+		case stream.Status == http.StatusNotFound && v.hasModel(model):
+			// 同 withKeys：目标在并集目录中，当前 key 不提供 → 换 key 再试。
 		case stream.Status >= 500 || stream.Status == http.StatusRequestTimeout:
 		default:
 			return stream, nil
