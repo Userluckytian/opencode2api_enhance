@@ -1,6 +1,6 @@
 # 阶段 2：供应商×实例池并发与生命周期加固（3 个反证审查缺口）
 
-> **状态：** 实施中
+> **状态：** 已完成（Task 1-4 已实现并全量测试通过；待独立审查/验收，真机端到端为用户手工项）
 > **For agentic workers:** 按 Task 顺序执行；每 Task 测完再进下一 Task。
 > **元规范:** `docs/ai-framework/phased-plan-driven.md`
 
