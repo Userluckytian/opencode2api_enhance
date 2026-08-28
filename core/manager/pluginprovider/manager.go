@@ -44,6 +44,12 @@ const (
 	defaultModelTimeout   = 5 * time.Second  // 模型数查询超时
 )
 
+// orphanReapInterval watch 扫描循环内周期性孤儿回收的降频间隔（var 仅为测试可
+// 注入短间隔）。进程枚举（listProviderProcesses → PowerShell CIM）成本远高于
+// 目录扫描，不能每轮 scan 都跑；默认 15s 一次足以覆盖「实例被强杀后插件副本
+// 残留」的回收时效（2026-08-28 审查缺口 3）。
+var orphanReapInterval = 15 * time.Second
+
 // Config 插件管理器配置。零值全部回退默认（测试可注入短退避/短超时）。
 type Config struct {
 	// ProvidersDir providers/ 根目录（空 = OPCODE2API_PLUGIN_DIR env > <exe 目录>/providers）。
@@ -174,16 +180,24 @@ func (m *Manager) Close() {
 }
 
 // watch 目录 watcher：仿 startConfigWatcher 的 3s ticker，发现新增/移除供应商。
+// 每轮 scan 后按 orphanReapInterval 降频触发 reapOrphans：孤儿回收原先只在 Start
+// 时执行一次，实例被强杀后其插件副本将无限期存活（2026-08-28 审查缺口 3）；
+// reapOrphans 本体逻辑不变（只处理本 providers 目录、宿主存活/持活 pid 豁免）。
 func (m *Manager) watch() {
 	defer m.wg.Done()
 	t := time.NewTicker(m.cfg.RescanInterval)
 	defer t.Stop()
+	lastReap := time.Now() // Start 已 reap 过一次
 	for {
 		select {
 		case <-m.ctx.Done():
 			return
 		case <-t.C:
 			m.scan()
+			if time.Since(lastReap) >= orphanReapInterval {
+				lastReap = time.Now()
+				m.reapOrphans()
+			}
 		}
 	}
 }
