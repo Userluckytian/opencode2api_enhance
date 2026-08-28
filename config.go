@@ -27,6 +27,19 @@ func loadConfig(path string) AppConfig {
 	return cfg
 }
 
+// configStartupRewriteNeeded 启动回写判据（2026-08-28 审查缺口 2）：配置文件缺失
+// 或解析失败 → true（保留首次创建/损坏自愈回写）；文件健康 → false，跳过启动
+// saveConfig。子进程与管理器共用 main()：无条件回写会用启动瞬间解析的旧 providers
+// 覆掉并发落盘的 propagate 补丁；文件健康时磁盘已是最新，无需回写。
+func configStartupRewriteNeeded(path string) bool {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return true
+	}
+	var cfg AppConfig
+	return json.Unmarshal(data, &cfg) != nil
+}
+
 func saveConfig(path string, cfg AppConfig) error {
 	// config.json 由本 AppConfig 与 core/manager.Config 双结构共用（同一物理文件）。
 	// 整体覆盖会抹掉 manager 结构独有字段（如 gateway_key——用户设的自定义网关

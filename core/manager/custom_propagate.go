@@ -1,6 +1,6 @@
 // 自定义模型源向既有子进程传播：把 manager 配置里的 providers（含 custom）补写进
 // runtime 下每个实例与统一网关的 opencode2api.json。
-// 运行中的子进程靠自身 1s 配置监视热重载（providers 变化 → 原地重建厂商集合 →
+// 运行中的子进程靠自身 3s 配置监视热重载（providers 变化 → 原地重建厂商集合 →
 // /v1/models 立即出现自定义模型）；停着的实例下次启动时配置会整体重新生成，
 // 此处顺带保持磁盘一致。网关配置会在成员变化时整体重建，来源同为 manager 配置，不冲突。
 package manager
@@ -102,7 +102,7 @@ func patchProvidersFile(path string, managerProviders []map[string]any) error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(path, out, 0o644)
+	return WriteFileAtomic(path, out, 0o644)
 }
 
 // providersEquivalent 粗判两个 providers 列表是否等价（长度相同且逐条 JSON 相等，不计顺序差异

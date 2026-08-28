@@ -131,7 +131,7 @@ func (m *Manager) startInstanceLockFree(runner Runner, inst *Instance) error {
 		_ = runner.Kill(sbPID)
 		return fmt.Errorf("生成 opencode2api 配置失败: %w", err)
 	}
-	if err := os.WriteFile(filepath.Join(dir, "opencode2api.json"), ocCfg, 0o644); err != nil {
+	if err := WriteFileAtomic(filepath.Join(dir, "opencode2api.json"), ocCfg, 0o644); err != nil {
 		_ = runner.Kill(sbPID)
 		return fmt.Errorf("写入 opencode2api 配置失败: %w", err)
 	}

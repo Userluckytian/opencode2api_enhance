@@ -126,8 +126,13 @@ func main() {
 
 	cfg := loadConfig(configPath)
 	applyConfig(cfg)
-	if err := saveConfig(configPath, cfg); err != nil {
-		slog.Warn("failed to save config", "path", configPath, "error", err)
+	// 启动回写收窄（2026-08-28 审查缺口 2）：文件健康时跳过 saveConfig——子进程与
+	// 管理器共用本 main，无条件回写会用启动瞬间解析的旧 providers 覆掉并发落盘的
+	// propagate 补丁；缺失/损坏仍回写（首次创建与自愈路径保留）。
+	if configStartupRewriteNeeded(configPath) {
+		if err := saveConfig(configPath, cfg); err != nil {
+			slog.Warn("failed to save config", "path", configPath, "error", err)
+		}
 	}
 	startConfigWatcher(configPath)
 
