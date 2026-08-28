@@ -1,6 +1,6 @@
 # 阶段 2：供应商×实例池并发与生命周期加固（3 个反证审查缺口）
 
-> **状态：** 已完成（Task 1-4 已实现并全量测试通过；待独立审查/验收，真机端到端为用户手工项）
+> **状态：** 已完成（审查两项条件解除于返工 commit fc95663；真机端到端为遗留手工项，待用户验证）
 > **For agentic workers:** 按 Task 顺序执行；每 Task 测完再进下一 Task。
 > **元规范:** `docs/ai-framework/phased-plan-driven.md`
 
@@ -125,10 +125,10 @@
 
 | 审查项 | 结论（✅/⚠️/❌） | 问题清单 |
 |--------|------------------|----------|
-| 正确性（读合并写竞态窗口/原子写平台语义） | 待审查 | |
-| 测试完整性 | 待审查 | |
-| 风格 | 待审查 | |
-| 红线（不做清单/夹带） | 待审查 | |
+| 正确性（读合并写竞态窗口/原子写平台语义） | ⚠️→✅（返工后解除） | 初审发现 2 缺陷：①updateStateFile/Delete 读合并写段无锁（同进程 8 并发实测丢 5）；②writeStateFile rename 无重试（Windows 并发读者 Access denied 静默丢写）。返工 commit fc95663 闭环 |
+| 测试完整性 | ⚠️→✅（返工后解除） | 初审漏测同进程并发；返工补 TestUpdateStateFileConcurrentNoLoss / TestDeleteInterleavedWithToggle / TestWriteStateFileUnderConcurrentReaders |
+| 风格 | ✅ | diff 最小；View 结构体为纯 gofmt 对齐（-w 下消失） |
+| 红线（不做清单/夹带） | ✅ | 逐项核对未触碰；import pluginprovider→core/manager 经 go list -deps 复核无循环依赖 |
 
 **重点反证点（审查者必查）：**
 1. 读合并写仍存在的窗口（读→合并→写之间他人写入仍会被本次 rename 覆盖）是否可接受、是否有更优解不引入锁；
@@ -137,7 +137,7 @@
 4. Delete 清状态文件与 applyStateChanges 的交互（删除进行中其它进程 Toggle 同 id）；
 5. 周期 reap 与插件重启窗口（killCurrent→spawn 之间）的误杀可能。
 
-**结论：** 待审查
+**结论：** ✅ 通过（返工 commit fc95663 后两项条件解除——独立审查子代理复核确认；测试子代理复测：并发回归 -count=5/20 全绿，全量 11 包 ok。已知既有负载型 flake `TestPluginNeedConfigThenReady` 全量偶发、隔离复跑 3/3 PASS，与 2026-08-28 问题 1 验收时同源，另行登记跟踪）
 
 ---
 
