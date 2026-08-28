@@ -139,13 +139,9 @@ func main() {
 	globalAgg = newAggregator()
 	chatRouterVar = newChatRouter(globalAgg)
 	initVendorsSignature()
-	refreshModelCatalog()
-	modelMu.RLock()
-	nLoaded := len(modelsCache)
-	modelMu.RUnlock()
-	if nLoaded > 0 {
-		slog.Info("models loaded", "count", nLoaded)
-	}
+	// 启动期目录刷新放后台协程：同步刷新会对自定义供应商上游直连拉取（60s 上限），
+	// 上游不可达会阻塞本进程监听端口，导致 manager 15s 实例启动等待超时。
+	startInitialCatalogRefresh()
 	startModelRefresh()
 	startCustomProbeLoop() // 自定义源后台活性探测（5 分钟一轮，刷新健康徽标）
 	slog.Info("server starting",
