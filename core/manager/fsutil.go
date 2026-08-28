@@ -10,10 +10,12 @@ import (
 // rename 瞬时失败重试参数：Windows 下目标文件正被并发读取/替换（Go 打开文件的
 // 共享模式不含 FILE_SHARE_DELETE，config watcher 周期读盘即此类读者）时，
 // Rename 替换目标会瞬时报 Access denied，短暂重试即可越过（与根包
-// writeFileAtomicRetry 同款经验）。
+// writeFileAtomicRetry 同款经验）。5×10ms 在 20 写者+多读者并发下实测仍会溢出
+// （-count=50 失败约 20%），故取 10×20ms：单次冲突为亚毫秒级，200ms 预算对
+// 真实节奏（写为秒级低频、读者每 3s 一轮）富余充足。
 const (
-	atomicRenameRetryAttempts = 5
-	atomicRenameRetryDelay    = 10 * time.Millisecond
+	atomicRenameRetryAttempts = 10
+	atomicRenameRetryDelay    = 20 * time.Millisecond
 )
 
 // WriteFileAtomic 原子写文件：同目录唯一临时文件（os.CreateTemp）+ rename 替换。
