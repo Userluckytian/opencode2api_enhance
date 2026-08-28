@@ -147,7 +147,8 @@ func main() {
 	slog.Info("server starting",
 		"port", port,
 		"log_level", logLevel,
-		"models", len(getModelIDs()),
+		// 目录刷新已异步化（startInitialCatalogRefresh）：此处读不到 models 数量，
+		// 实际数量以稍后的 "models loaded" 日志为准，避免恒 0 误导排障。
 		"aliases", len(modelAlias),
 	)
 	if adminPassword != "" {
