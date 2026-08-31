@@ -40,6 +40,11 @@ const (
 // Extra 键同值。原始体保留 tools/options 等完整字段，优于归一化 Messages 重建。
 const keyRawBody = "_oc_raw_body"
 
+// KeyPreferredIndex 续写/会话粘性透传的 key 池下标（int）：core 在流式中断续写
+// 重连时把首次选中的 key 下标经本键回写，withKeys/withKeysStream 优先命中同一
+// key（同请求续写不换 key，避免重复输出/串对话）。-1/缺失 = 无偏好走正常调度。
+const KeyPreferredIndex = "_oc_custom_key_preferred"
+
 // Config 构造参数。
 type Config struct {
 	ID        string // 实例标识（用户自定义，模型前缀即它）
@@ -368,50 +373,84 @@ func (v *Vendor) markOK() {
 // Chat 非流式：原始 OpenAI 请求体 → 上游协议适配 → OpenAI 形态响应。
 // key 池调度：优先挑「并集目录中能提供该模型」的 key（多 key 模型子集不一致时
 // 直达正确 key），失败按状态码标记并换 key 重试（见 withKeys）。
+// 续写/会话粘性：msg.Extra[KeyPreferredIndex] 存在（>=0）时优先命中该 key，
+// 选中后把实际 key 下标写回 Extra，供 core 续写重连透传（同请求不换 key）。
 func (v *Vendor) Chat(ctx context.Context, msg *contract.Message) (*contract.Reply, error) {
 	body, err := v.buildBody(msg, false)
 	if err != nil {
 		return nil, err
 	}
 	upstream := v.upstreamModel(msg.Model)
-	return v.withKeys(upstream, func(key string) (*contract.Reply, error) {
+	stickyIdx := preferredKeyFromExtra(msg)
+	reply, idx, err := v.withKeys(upstream, stickyIdx, func(key string) (*contract.Reply, error) {
 		return v.proto.chat(ctx, v, upstream, key, body)
 	})
+	if idx >= 0 {
+		if msg.Extra == nil {
+			msg.Extra = map[string]any{}
+		}
+		msg.Extra[KeyPreferredIndex] = idx
+	}
+	return reply, err
 }
 
 // ChatStream 流式：返回 OpenAI Chat 形态 SSE（协议层负责原生流转换），同样走 key 池。
+// 粘性语义同 Chat：流式中断续写重连时 core 会把首次选中的 key 下标放回 Extra，
+// 这里优先命中同一 key，避免续写换 key 导致重复输出/串对话。
 func (v *Vendor) ChatStream(ctx context.Context, msg *contract.Message) (*contract.Stream, error) {
 	body, err := v.buildBody(msg, true)
 	if err != nil {
 		return nil, err
 	}
 	upstream := v.upstreamModel(msg.Model)
-	return v.withKeysStream(upstream, func(key string) (*contract.Stream, error) {
+	stickyIdx := preferredKeyFromExtra(msg)
+	stream, idx, err := v.withKeysStream(upstream, stickyIdx, func(key string) (*contract.Stream, error) {
 		return v.proto.chatStream(ctx, v, upstream, key, body)
 	})
+	if idx >= 0 {
+		if msg.Extra == nil {
+			msg.Extra = map[string]any{}
+		}
+		msg.Extra[KeyPreferredIndex] = idx
+	}
+	return stream, err
+}
+
+// preferredKeyFromExtra 读 Extra 里的会话/续写粘性 key 下标（-1 = 无偏好）。
+func preferredKeyFromExtra(msg *contract.Message) int {
+	if msg == nil || msg.Extra == nil {
+		return -1
+	}
+	idx, ok := msg.Extra[KeyPreferredIndex].(int)
+	if !ok {
+		return -1
+	}
+	return idx
 }
 
 // withKeys 非流式调用的 key 池编排：按模型亲和 + 调度挑可用 key，429 冷却
 // （Retry-After）、401/403 禁用并换下一个 key 重试，404（目标模型在并集目录中
 // 但当前 key 不提供）同样换 key 重试；同请求每 key 至多一次；400 等请求级错误
 // 与 key 无关立即返回；全部耗尽返回最后一次结果（交由外层厂商级 failover 接管）。
-func (v *Vendor) withKeys(model string, call func(key string) (*contract.Reply, error)) (*contract.Reply, error) {
+// stickyIdx >= 0 时优先命中该 key（会话粘性/续写同 key）。
+func (v *Vendor) withKeys(model string, stickyIdx int, call func(key string) (*contract.Reply, error)) (*contract.Reply, int, error) {
 	tried := map[int]bool{}
 	var lastReply *contract.Reply
 	var lastErr error
+	lastIdx := -1
 	for {
-		key, idx, ok := v.pool.tryAcquirePrefer(tried, v.preferredKeys(model))
+		key, idx, ok := v.pool.tryAcquirePreferSticky(tried, v.preferredKeys(model), stickyIdx)
 		if !ok {
 			break
 		}
 		tried[idx] = true
 		reply, err := call(key)
-		lastReply, lastErr = reply, err
+		lastReply, lastErr, lastIdx = reply, err, idx
 		if err != nil || reply == nil {
 			continue // 传输错误：不标记，换下一个 key
 		}
 		if reply.Status >= 200 && reply.Status < 300 {
-			return reply, nil
+			return reply, idx, nil
 		}
 		switch {
 		case reply.Status == http.StatusUnauthorized || reply.Status == http.StatusForbidden:
@@ -424,30 +463,32 @@ func (v *Vendor) withKeys(model string, call func(key string) (*contract.Reply, 
 		case reply.Status >= 500 || reply.Status == http.StatusRequestTimeout:
 			// 上游侧问题：不标记 key，仅换 key 重试
 		default:
-			return reply, nil // 请求级错误：换 key 也一样
+			return reply, idx, nil // 请求级错误：换 key 也一样
 		}
 	}
-	return lastReply, lastErr
+	return lastReply, lastIdx, lastErr
 }
 
 // withKeysStream 流式版（Stream 无响应头可读 Retry-After，429 用缺省冷却）。
-func (v *Vendor) withKeysStream(model string, call func(key string) (*contract.Stream, error)) (*contract.Stream, error) {
+// stickyIdx >= 0 时优先命中该 key（续写同 key）。
+func (v *Vendor) withKeysStream(model string, stickyIdx int, call func(key string) (*contract.Stream, error)) (*contract.Stream, int, error) {
 	tried := map[int]bool{}
 	var lastStream *contract.Stream
 	var lastErr error
+	lastIdx := -1
 	for {
-		key, idx, ok := v.pool.tryAcquirePrefer(tried, v.preferredKeys(model))
+		key, idx, ok := v.pool.tryAcquirePreferSticky(tried, v.preferredKeys(model), stickyIdx)
 		if !ok {
 			break
 		}
 		tried[idx] = true
 		stream, err := call(key)
-		lastStream, lastErr = stream, err
+		lastStream, lastErr, lastIdx = stream, err, idx
 		if err != nil || stream == nil {
 			continue
 		}
 		if stream.Status >= 200 && stream.Status < 300 {
-			return stream, nil
+			return stream, idx, nil
 		}
 		switch {
 		case stream.Status == http.StatusUnauthorized || stream.Status == http.StatusForbidden:
@@ -458,10 +499,10 @@ func (v *Vendor) withKeysStream(model string, call func(key string) (*contract.S
 			// 同 withKeys：目标在并集目录中，当前 key 不提供 → 换 key 再试。
 		case stream.Status >= 500 || stream.Status == http.StatusRequestTimeout:
 		default:
-			return stream, nil
+			return stream, idx, nil
 		}
 	}
-	return lastStream, lastErr
+	return lastStream, lastIdx, lastErr
 }
 
 // buildBody 取 Extra 里的原始 OpenAI 请求体，改写 model/stream 后交协议层。

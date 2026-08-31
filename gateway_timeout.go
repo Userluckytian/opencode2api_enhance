@@ -118,6 +118,8 @@ type CallRecord struct {
 	CompletionTok int64       `json:"completion_tokens"`
 	DurationMS    int64       `json:"duration_ms"`
 	ErrMsg        string      `json:"err_msg,omitempty"`
+	// KeyTail 实际使用的 key 末 4 位（自定义源多 key 场景；定位串对话）。
+	KeyTail string `json:"key_tail,omitempty"`
 }
 
 func CallStatusText(rec CallRecord) string {
@@ -606,7 +608,7 @@ func streamWithResume(w http.ResponseWriter, r *http.Request, upstreamBody []byt
 		// 若需要重连（initial 为 nil 或上次超时）
 		if upResp == nil {
 			var err error
-			upResp, _, _, proxyAddr, err = callOpenCodeAPIStream(r.Context(), currentBody, model, auth)
+			upResp, _, _, proxyAddr, err = callOpenCodeAPIStream(r.Context(), currentBody, model, &auth)
 			if err != nil {
 				res.ErrMsg = err.Error()
 				callRec.Events = append(callRec.Events, CallEvent{Type: "connect_error", Node: proxyAddr, Detail: err.Error(), At: time.Now()})

@@ -105,7 +105,7 @@ func chatCompletionsHandler(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		defer releaseStream()
-		upResp, status, _, proxyAddr, err := callOpenCodeAPIStream(callCtx, upstreamBody, req.Model, auth)
+		upResp, status, _, proxyAddr, err := callOpenCodeAPIStream(callCtx, upstreamBody, req.Model, &auth)
 		callRec.Nodes = append(callRec.Nodes, proxyAddr)
 		if err != nil || status < 200 || status >= 300 {
 			callRec.Status = "fail"

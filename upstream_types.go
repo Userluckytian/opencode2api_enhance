@@ -27,6 +27,11 @@ const (
 type UpstreamAuth struct {
 	Token string
 	Mode  AuthRouteMode
+	// PreferredKeyIdx 会话/续写粘性透传的 custom key 池下标（nil = 无偏好）。
+	// 流式中断续写重连时保留首次选中的 key 下标，custom 源 withKeysStream
+	// 优先命中同一 key（同请求续写不换 key，避免重复输出/串对话）。
+	// 指针字段：零值 nil 天然表示"未指定"，避免与合法下标 0 冲突。
+	PreferredKeyIdx *int
 }
 
 func extractUpstreamAuth(r *http.Request) UpstreamAuth {
