@@ -126,8 +126,13 @@ func main() {
 
 	cfg := loadConfig(configPath)
 	applyConfig(cfg)
-	if err := saveConfig(configPath, cfg); err != nil {
-		slog.Warn("failed to save config", "path", configPath, "error", err)
+	// 启动回写收窄（2026-08-28 审查缺口 2）：文件健康时跳过 saveConfig——子进程与
+	// 管理器共用本 main，无条件回写会用启动瞬间解析的旧 providers 覆掉并发落盘的
+	// propagate 补丁；缺失/损坏仍回写（首次创建与自愈路径保留）。
+	if configStartupRewriteNeeded(configPath) {
+		if err := saveConfig(configPath, cfg); err != nil {
+			slog.Warn("failed to save config", "path", configPath, "error", err)
+		}
 	}
 	startConfigWatcher(configPath)
 
@@ -139,19 +144,16 @@ func main() {
 	globalAgg = newAggregator()
 	chatRouterVar = newChatRouter(globalAgg)
 	initVendorsSignature()
-	refreshModelCatalog()
-	modelMu.RLock()
-	nLoaded := len(modelsCache)
-	modelMu.RUnlock()
-	if nLoaded > 0 {
-		slog.Info("models loaded", "count", nLoaded)
-	}
+	// 启动期目录刷新放后台协程：同步刷新会对自定义供应商上游直连拉取（60s 上限），
+	// 上游不可达会阻塞本进程监听端口，导致 manager 15s 实例启动等待超时。
+	startInitialCatalogRefresh()
 	startModelRefresh()
 	startCustomProbeLoop() // 自定义源后台活性探测（5 分钟一轮，刷新健康徽标）
 	slog.Info("server starting",
 		"port", port,
 		"log_level", logLevel,
-		"models", len(getModelIDs()),
+		// 目录刷新已异步化（startInitialCatalogRefresh）：此处读不到 models 数量，
+		// 实际数量以稍后的 "models loaded" 日志为准，避免恒 0 误导排障。
 		"aliases", len(modelAlias),
 	)
 	if adminPassword != "" {

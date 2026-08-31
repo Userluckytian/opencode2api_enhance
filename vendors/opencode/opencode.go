@@ -33,6 +33,11 @@ const (
 	surfaceGo  = "go"
 )
 
+// versionFetchTimeout 版本探测独立预算：npm 仓库经 SOCKS 不可达时，
+// 不得被 HTTP client 总超时（约 300s）拖住目录刷新与首包聊天。
+// 测试可缩短该值；生产默认 5s。
+var versionFetchTimeout = 5 * time.Second
+
 // Extra 键（厂商私有区，见 contract.Message.Extra）：core 只搬运不解释，
 // 通用透传选项（temperature/max_tokens/tools 等）仍走 contract.Message.Options。
 const (
@@ -105,7 +110,10 @@ func New(cfg Config) *Vendor {
 	}
 	// 传输在 New 阶段固化，transport() 仅只读返回——去掉懒初始化对 v.tr 的无锁写
 	// （G4：并发首访时数据竞争）。
-	return &Vendor{cfg: cfg, tr: tr}
+	v := &Vendor{cfg: cfg, tr: tr}
+	// 预热磁盘缓存：启动首拉失败时 ListModels 也能立即给出上一代目录。
+	v.cacheAll = v.loadModelsCache()
+	return v
 }
 
 // ---------------------------------------------------------------------------
@@ -152,7 +160,9 @@ func (v *Vendor) SessionID() string {
 }
 
 func (v *Vendor) fetchOCVersion() string {
-	req, err := http.NewRequest("GET", versionURL, nil)
+	ctx, cancel := context.WithTimeout(context.Background(), versionFetchTimeout)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, versionURL, nil)
 	if err != nil {
 		return versionDef
 	}
@@ -163,6 +173,9 @@ func (v *Vendor) fetchOCVersion() string {
 		return versionDef
 	}
 	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return versionDef
+	}
 	body, _ := io.ReadAll(resp.Body)
 	var info struct {
 		Version string `json:"version"`
@@ -174,28 +187,34 @@ func (v *Vendor) fetchOCVersion() string {
 }
 
 // ListModels 实现 contract.Vendor：拉取 zen + go 两个目录，返回合并列表。
+// 成功则更新内存/磁盘缓存；失败或空目录回退上一代（stale-while-revalidate），
+// 保证进程重启后聚合器首次 Refresh 即可带上 OpenCode 模型。
 func (v *Vendor) ListModels(ctx context.Context) ([]contract.Model, error) {
 	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 	client, _ := v.transport().Client(contract.TierFree, false)
 	var out []contract.Model
+	complete := true
 	for _, ep := range []struct{ url, surface string }{
 		{zenModelsURL, surfaceZen},
 		{goModelsURL, surfaceGo},
 	} {
 		req, err := http.NewRequestWithContext(ctx, "GET", ep.url, nil)
 		if err != nil {
+			complete = false
 			continue
 		}
 		req.Header.Set("Authorization", "Bearer public")
 		req.Header.Set("x-opencode-session", v.sessionID())
 		resp, err := client.Do(req)
 		if err != nil {
+			complete = false
 			continue
 		}
 		body, _ := io.ReadAll(resp.Body)
 		resp.Body.Close()
 		if resp.StatusCode != http.StatusOK {
+			complete = false
 			continue
 		}
 		var cat struct {
@@ -204,6 +223,7 @@ func (v *Vendor) ListModels(ctx context.Context) ([]contract.Model, error) {
 			} `json:"data"`
 		}
 		if json.Unmarshal(body, &cat) != nil {
+			complete = false
 			continue
 		}
 		for _, m := range cat.Data {
@@ -215,6 +235,20 @@ func (v *Vendor) ListModels(ctx context.Context) ([]contract.Model, error) {
 			})
 		}
 	}
+	// 任一端点失败或合并结果为空：优先保留上一代完整缓存，避免 zen 成功、go
+	// 失败时把 go 模型从目录里冲掉。无上一代时，部分目录也比空列表有用。
+	if !complete || len(out) == 0 {
+		if cached := v.fallbackModels(); len(cached) > 0 {
+			return cached, nil
+		}
+		if len(out) == 0 {
+			return out, nil
+		}
+	}
+	v.modelMu.Lock()
+	v.cacheAll = append([]contract.Model(nil), out...)
+	v.modelMu.Unlock()
+	v.saveModelsCache(out)
 	return out, nil
 }
 
@@ -291,7 +325,11 @@ func (v *Vendor) SetSession(ver, sid, pid string) {
 }
 
 // SetCatalog 注入模型目录缓存（core/aggregator 刷新后回填；也供测试）。
+// 空列表不覆盖既有缓存：聊天若早于首次聚合刷新到达，不得把 New 预热的上一代目录冲掉。
 func (v *Vendor) SetCatalog(models []contract.Model) {
+	if len(models) == 0 {
+		return
+	}
 	v.modelMu.Lock()
 	v.cacheAll = append([]contract.Model(nil), models...)
 	v.modelMu.Unlock()
