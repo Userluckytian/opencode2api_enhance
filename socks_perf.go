@@ -473,9 +473,10 @@ func pickWeightedProxy(proxies []Socks5Proxy, start int) Socks5Proxy {
 	now := time.Now()
 
 	type cand struct {
-		proxy Socks5Proxy
-		score int
-		tier  int // 2 = healthy 档，1 = degraded 档
+		proxy  Socks5Proxy
+		score  int
+		tier   int // 2 = healthy 档，1 = degraded 档
+		jitter float64 // [0,3) 同分/同档随机扰动（仅 smart 模式；避免连续选中同一高分节点）
 	}
 	var cands []cand
 	var halfOpen Socks5Proxy
@@ -539,13 +540,20 @@ func pickWeightedProxy(proxies []Socks5Proxy, start int) Socks5Proxy {
 		if score > 100 {
 			score = 100
 		}
+		// 同档分散仅对 smart 模式生效：round_robin 已靠游标在候选间轮转（确定性，
+		// 测试依赖「两请求命中不同代理」）；smart 每请求推进游标 + 分数相近节点
+		// 靠小扰动分散，避免连续请求恒选同一高分节点。
+		j := 0.0
+		if routeMode.Load().(string) == "smart" {
+			j = raceScoreJitter()
+		}
 		switch level {
 		case "down", "flaky":
 			continue
 		case "degraded":
-			cands = append(cands, cand{proxy: proxy, score: score, tier: 1})
+			cands = append(cands, cand{proxy: proxy, score: score, tier: 1, jitter: j})
 		default:
-			cands = append(cands, cand{proxy: proxy, score: score, tier: 2})
+			cands = append(cands, cand{proxy: proxy, score: score, tier: 2, jitter: j})
 		}
 	}
 
@@ -560,7 +568,12 @@ func pickWeightedProxy(proxies []Socks5Proxy, start int) Socks5Proxy {
 			if cands[i].tier != cands[j].tier {
 				return cands[i].tier > cands[j].tier
 			}
-			return cands[i].score > cands[j].score
+			// 同档按 score + [0,3) 扰动降序：分数显著差异仍优先高分（扰动 <3%），
+			// 同分/近分节点间分散——避免同一高分节点被连续选中导致实例扎堆。
+			// 稳定排序（SliceStable）保留 raws 的 start 轮转序：round_robin 模式
+			// 下 jitter=0 且同分时，按 start 偏移在候选间轮转（确定性）。
+			si, sj := float64(cands[i].score)+cands[i].jitter, float64(cands[j].score)+cands[j].jitter
+			return si > sj
 		})
 		chosen := cands[0]
 		if chosen.proxy.Addr != proxies[start].Addr {
