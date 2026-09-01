@@ -1,5 +1,23 @@
 # Changelog
 
+## v1.7.3（2026-08-31）
+
+### 🚀 新功能
+
+- **测试拉取模型支持走本机系统代理**：自定义供应商「测试并获取模型」新增「走本机系统代理」开关（`use_local_proxy`，走 `http.ProxyFromEnvironment`），与「走节点池 via_proxy」区分；仅测试动作生效、不写入配置
+
+### 🐛 修复
+
+- **重启后 OpenCode 模型全部丢失（只剩 windsurf/自定义/插件模型）**：OpenCode 目录磁盘缓存（stale-while-revalidate）——重启后聚合器首次刷新即带上上一代 OpenCode 模型；`fetchOCVersion` 版本探测独立 5s 短超时 + 非 2xx 回退默认版本，不再被慢上游拖住；启动期目录刷新异步化（先监听后刷新），上游不可达不阻塞进程监听
+- **多 key 自定义供应商「串」对话（key1 答一半、key2 不接续、输出重复）**：会话级 key 粘性 + 流式断点续写强制复用原 key（`PreferredKeyIdx` 经 Extra 透传），同一请求续写不再轮询换 key；调用日志增加 key 末位标识便于定位
+- **多实例节点扎堆（10 实例只用 2-3 个）**：smart 路由每请求推进游标轮询健康节点（保留健康/坏池/熔断/超时切换，单节点退化恒命中该节点）；质量加权同档加随机抖动分散，显著分差仍优先高分
+
+### 📌 说明
+
+- 从 `feat/fix-startup-catalog-block` 分支摘取启动修复核心 4 类改动（磁盘缓存/版本超时/异步化/回写收窄），不整支合并
+- 全程经独立测试（big-pickle test-engineer）/代码审查（big-pickle code-stylespector）验收通过，`go test -count=1 ./...` 13 包全绿、`-race` 干净、前端 `npm run build` 通过
+- 记录于 `docs/issue-log/2026-08-31.md`
+
 ## v1.6.0（2026-08-20）
 
 ### 🚀 新功能
