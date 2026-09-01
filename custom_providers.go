@@ -450,8 +450,8 @@ func applyCustomProvidersSave(m *manager.Manager, inputs []customProviderInput) 
 		if strategy == "" {
 			strategy = custom.StrategyRoundRobin
 		}
-		if strategy != custom.StrategyRoundRobin && strategy != custom.StrategyFailover {
-			return nil, fmt.Errorf("源 %s：key 策略需为 round_robin|failover", in.ID)
+		if strategy != custom.StrategyRoundRobin && strategy != custom.StrategyFailover && strategy != custom.StrategyHealth {
+			return nil, fmt.Errorf("源 %s：key 策略需为 round_robin|failover|health", in.ID)
 		}
 		keys := inputKeyList(in)
 		if len(keys) == 0 {
