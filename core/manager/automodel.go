@@ -167,5 +167,5 @@ func patchAutoModelFile(path string, cfg *AutoModelCfg) error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(path, out, 0o644)
+	return WriteFileAtomic(path, out, 0o644)
 }

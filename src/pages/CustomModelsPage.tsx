@@ -198,8 +198,10 @@ export default function CustomModelsPage({ toast }: { toast: (msg: string, ok?: 
       return null
     }
     const keys = f.api_keys.split('\n').map((k) => k.trim()).filter(Boolean)
-    const allowed = f.exposeAll ? undefined : Array.from(f.allowed)
-    if (!f.exposeAll && allowed && allowed.length === 0) {
+    // 测试只验证连通性拉全量清单，白名单校验仅在保存时生效（否则「先测试拉取清单后勾选」会死循环）
+    // 全部暴露须显式发空数组清空旧白名单——键缺失会被后端解释为「保留旧白名单」（编辑时切全部暴露不生效）
+    const allowed = f.exposeAll ? [] : Array.from(f.allowed)
+    if (!forTest && !f.exposeAll && allowed && allowed.length === 0) {
       toast('请至少勾选一个要暴露的模型，或选择「全部暴露」')
       return null
     }

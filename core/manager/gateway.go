@@ -253,7 +253,7 @@ func (g *Gateway) sync(runner Runner) error {
 		changed = string(old) != string(cfg)
 	}
 	if changed {
-		if err := os.WriteFile(cfgPath, cfg, 0o644); err != nil {
+		if err := WriteFileAtomic(cfgPath, cfg, 0o644); err != nil {
 			return err
 		}
 	}

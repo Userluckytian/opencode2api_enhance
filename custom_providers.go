@@ -511,7 +511,7 @@ func applyCustomProvidersSave(m *manager.Manager, inputs []customProviderInput) 
 		if err := m.SyncCustomProviders(configPath, customEntriesForManager(kept)); err != nil {
 			slog.Warn("sync custom providers to manager config failed", "error", err)
 		}
-		// 传播到已存在实例/网关的 runtime 配置：运行中的子进程经 1s 配置监视
+		// 传播到已存在实例/网关的 runtime 配置：运行中的子进程经 3s 配置监视
 		// 热重建厂商（不重启即出现在其 /v1/models），停着的实例保持磁盘一致。
 		if err := m.PropagateCustomProviders(); err != nil {
 			slog.Warn("propagate custom providers to runtime configs failed", "error", err)

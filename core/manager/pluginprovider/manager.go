@@ -24,6 +24,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/6Kmfi6HP/opencode2api/core/manager"
 )
 
 // 插件状态（面板展示）。
@@ -43,6 +45,12 @@ const (
 	defaultRescanInterval = 3 * time.Second  // providers/ 目录扫描间隔
 	defaultModelTimeout   = 5 * time.Second  // 模型数查询超时
 )
+
+// orphanReapInterval watch 扫描循环内周期性孤儿回收的降频间隔（var 仅为测试可
+// 注入短间隔）。进程枚举（listProviderProcesses → PowerShell CIM）成本远高于
+// 目录扫描，不能每轮 scan 都跑；默认 15s 一次足以覆盖「实例被强杀后插件副本
+// 残留」的回收时效（2026-08-28 审查缺口 3）。
+var orphanReapInterval = 15 * time.Second
 
 // Config 插件管理器配置。零值全部回退默认（测试可注入短退避/短超时）。
 type Config struct {
@@ -174,16 +182,24 @@ func (m *Manager) Close() {
 }
 
 // watch 目录 watcher：仿 startConfigWatcher 的 3s ticker，发现新增/移除供应商。
+// 每轮 scan 后按 orphanReapInterval 降频触发 reapOrphans：孤儿回收原先只在 Start
+// 时执行一次，实例被强杀后其插件副本将无限期存活（2026-08-28 审查缺口 3）；
+// reapOrphans 本体逻辑不变（只处理本 providers 目录、宿主存活/持活 pid 豁免）。
 func (m *Manager) watch() {
 	defer m.wg.Done()
 	t := time.NewTicker(m.cfg.RescanInterval)
 	defer t.Stop()
+	lastReap := time.Now() // Start 已 reap 过一次
 	for {
 		select {
 		case <-m.ctx.Done():
 			return
 		case <-t.C:
 			m.scan()
+			if time.Since(lastReap) >= orphanReapInterval {
+				lastReap = time.Now()
+				m.reapOrphans()
+			}
 		}
 	}
 }
@@ -617,23 +633,38 @@ func loadPluginState(path string) map[string]bool {
 	return st.Enabled
 }
 
-// updateStateFile 更新单个插件启停状态并原子写盘（临时文件 + rename），
-// 供其它进程（实例/统一网关子进程）在下一个扫描周期跟随。
+// writeStateFile 把启停状态整体落盘，经 manager.WriteFileAtomic（同目录唯一临时
+// 文件 + rename 原子替换 + 瞬时占用有界重试）：崩溃不留半截 JSON，跨进程读者要么
+// 看到旧文件、要么看到完整新文件。rename 重试的必要性：其它进程每 3s
+// loadPluginState 读盘正是并发读者，Windows 下 rename 撞上会瞬时报 Access denied
+// （fsutil_test.go 并发场景实测复现），重试越过——不导入会有静默丢开关风险。
+// 只负责原子替换，不做合并（合并契约见 updateStateFile）。
+func (m *Manager) writeStateFile(state map[string]bool) error {
+	data, err := json.Marshal(map[string]any{"enabled": state})
+	if err != nil {
+		return err
+	}
+	return manager.WriteFileAtomic(m.cfg.StateFile, data, 0o644)
+}
+
+// updateStateFile 更新单个插件启停状态并原子写盘，供其它进程（实例/统一网关
+// 子进程）在下一个扫描周期跟随。
+//
+// 多进程契约（2026-08-28 审查缺口 1）：主管理器与各实例子进程共享同一状态文件且
+// 均可写（toggle 路由各进程都有），进程内的 m.state 只是启动时的陈旧快照——若以
+// 快照整体写回，会抹掉其它进程并发落盘的开关。因此写盘前必须重读文件为基底、
+// 仅合并本条变更。「读→合并→rename」整段持 stateMu：同进程并发写者（HTTP handler
+// 的 Toggle 与 watch 协程 applyStateChanges→Toggle）无锁并发会互相丢条目（审查
+// 返工缺陷 1，8 goroutine 实测 8 丢 5）；跨进程的毫秒级窗口为已知边界——rename
+// 保证无撕裂、损坏自愈，不引入跨进程文件锁。
 func (m *Manager) updateStateFile(id string, enabled bool) {
 	m.stateMu.Lock()
+	defer m.stateMu.Unlock()
 	m.state[id] = enabled
-	data, err := json.Marshal(map[string]any{"enabled": m.state})
-	m.stateMu.Unlock()
-	if err != nil {
-		return
-	}
-	tmp := m.cfg.StateFile + ".tmp"
-	if err := os.WriteFile(tmp, data, 0o644); err != nil {
-		slog.Debug("plugin state write failed", "path", m.cfg.StateFile, "error", err)
-		return
-	}
-	if err := os.Rename(tmp, m.cfg.StateFile); err != nil {
-		slog.Debug("plugin state rename failed", "path", m.cfg.StateFile, "error", err)
+	base := loadPluginState(m.cfg.StateFile) // 写前重读：以磁盘当前内容为基底
+	base[id] = enabled
+	if err := m.writeStateFile(base); err != nil {
+		slog.Warn("plugin state write failed", "path", m.cfg.StateFile, "error", err)
 	}
 }
 
@@ -945,21 +976,21 @@ func (m *Manager) Rescan() []View {
 
 // View 插件列表项（管理 API 契约，设计文档 §七）。
 type View struct {
-	ID           string   `json:"id"`
-	Name         string   `json:"name"`
-	Version      string   `json:"version"`
-	Status       string   `json:"status"`
-	Models       int      `json:"models"`
-	ModelsAll    []string `json:"models_all,omitempty"`    // 全量模型 ID 清单（暴露勾选弹层用）
-	ExposeAll    bool     `json:"expose_all"`              // 全部暴露（true 时 ExposedModels 无意义）
+	ID            string   `json:"id"`
+	Name          string   `json:"name"`
+	Version       string   `json:"version"`
+	Status        string   `json:"status"`
+	Models        int      `json:"models"`
+	ModelsAll     []string `json:"models_all,omitempty"`     // 全量模型 ID 清单（暴露勾选弹层用）
+	ExposeAll     bool     `json:"expose_all"`               // 全部暴露（true 时 ExposedModels 无意义）
 	ExposedModels []string `json:"exposed_models,omitempty"` // 暴露白名单（ExposeAll=false 时生效）
-	Path         string   `json:"path"`
-	ProviderJSON string   `json:"provider_json"` // provider.json 全文（面板编辑回填）
-	PID          int      `json:"pid,omitempty"`
-	URL          string   `json:"url,omitempty"`
-	LastError    string   `json:"last_error,omitempty"`
-	StartedAt    string   `json:"started_at,omitempty"`
-	RestartCount int      `json:"restart_count"`
+	Path          string   `json:"path"`
+	ProviderJSON  string   `json:"provider_json"` // provider.json 全文（面板编辑回填）
+	PID           int      `json:"pid,omitempty"`
+	URL           string   `json:"url,omitempty"`
+	LastError     string   `json:"last_error,omitempty"`
+	StartedAt     string   `json:"started_at,omitempty"`
+	RestartCount  int      `json:"restart_count"`
 }
 
 // View 查询单个插件视图（不存在返回零值）。
@@ -1006,7 +1037,7 @@ func (m *Manager) viewOf(p *plugin) View {
 		Status: p.status, Models: p.modelCount,
 		ModelsAll: p.modelsAll, ExposeAll: p.man.ExposeAll == nil || *p.man.ExposeAll,
 		ExposedModels: p.man.ExposedModels,
-		Path: p.dir, ProviderJSON: string(p.raw),
+		Path:          p.dir, ProviderJSON: string(p.raw),
 		PID: p.pid, URL: p.url, LastError: p.lastError,
 		StartedAt: started, RestartCount: p.restartCount,
 	}
@@ -1202,6 +1233,18 @@ func (m *Manager) Delete(id string) error {
 		delete(m.plugins, id)
 	}
 	m.mu.Unlock()
+	// 同步清理状态文件条目（2026-08-28 审查缺口 1）：残留的 enabled 条目会在目录
+	// 重建（同名插件重装）后自动启用，且其它进程会继续跟随一个已删除插件的开关。
+	// 与 updateStateFile 同款「写前重读合并」，且整段持 stateMu 进程内串行化
+	// （防与并发 Toggle 交错时丢条目/丢清理，审查返工缺陷 1）。
+	m.stateMu.Lock()
+	delete(m.state, id)
+	base := loadPluginState(m.cfg.StateFile)
+	delete(base, id)
+	if err := m.writeStateFile(base); err != nil {
+		slog.Warn("plugin state cleanup failed", "path", m.cfg.StateFile, "error", err)
+	}
+	m.stateMu.Unlock()
 	m.notifyChange()
 	return err
 }
