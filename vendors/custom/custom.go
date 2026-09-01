@@ -20,6 +20,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"strings"
 	"sync"
@@ -444,7 +445,9 @@ func (v *Vendor) withKeys(model string, stickyIdx int, call func(key string) (*c
 			break
 		}
 		tried[idx] = true
+		start := time.Now()
 		reply, err := call(key)
+		v.pool.recordResult(idx, err == nil && reply != nil && reply.Status >= 200 && reply.Status < 300, time.Since(start))
 		lastReply, lastErr, lastIdx = reply, err, idx
 		if err != nil || reply == nil {
 			continue // 传输错误：不标记，换下一个 key
@@ -482,14 +485,27 @@ func (v *Vendor) withKeysStream(model string, stickyIdx int, call func(key strin
 			break
 		}
 		tried[idx] = true
+		if len(v.ConfiguredKeys()) > 1 {
+			slog.Info("custom-key: acquire stream attempt",
+				"vendor", v.cfg.ID, "model", model,
+				"key_idx", idx, "keys_total", len(v.ConfiguredKeys()),
+				"strategy", v.cfg.KeyStrategy, "sticky_idx", stickyIdx)
+		}
+		start := time.Now()
 		stream, err := call(key)
+		v.pool.recordResult(idx, err == nil && stream != nil && stream.Status >= 200 && stream.Status < 300, time.Since(start))
 		lastStream, lastErr, lastIdx = stream, err, idx
 		if err != nil || stream == nil {
+			slog.Info("custom-key: acquire stream attempt failed (transport)", "vendor", v.cfg.ID, "key_idx", idx, "model", model, "err", err)
 			continue
 		}
 		if stream.Status >= 200 && stream.Status < 300 {
+			slog.Info("custom-key: acquire stream ok", "vendor", v.cfg.ID, "model", model,
+				"key_idx", idx, "sticky_idx", stickyIdx, "status", stream.Status)
 			return stream, idx, nil
 		}
+		slog.Info("custom-key: acquire stream non-2xx, switching", "vendor", v.cfg.ID, "model", model,
+			"key_idx", idx, "status", stream.Status, "sticky_idx", stickyIdx)
 		switch {
 		case stream.Status == http.StatusUnauthorized || stream.Status == http.StatusForbidden:
 			v.pool.disable(idx)

@@ -1,16 +1,19 @@
 // 自定义模型源 key 池：一源多 key 的调度与健康状态。
 //
-// 两种调度（providers[].params.key_strategy，仅作用于自定义源，与实例池 route_mode 无关）：
+// 三种调度（providers[].params.key_strategy，仅作用于自定义源，与实例池 route_mode 无关）：
 //   - round_robin（默认）：可用 key 间均匀轮询
 //   - failover          ：按配置顺序优先（主 key 可用时恒用它，冷却/禁用才降级备用）
+//   - health            ：健康优先——按成功率（EWMA）降序、样本数降序、平均延迟升序挑选，
+//     让表现最好的 key 稳定回答，变差才落到下一个（借鉴 model-gateway 的质量分排序）
 //
 // 健康语义：429/限流 → 冷却（Retry-After，缺省 60s）到期自动回池；
 // 401/403（key 失效）→ 禁用（运行期内不再使用，编辑保存后重建实例即恢复）。
-// 不做 key 用量统计——只有状态，没有计数。
+// 每次请求记录成功/失败与延迟（recordResult），供 health 策略排序；其余策略不依赖计数。
 package custom
 
 import (
 	"net/http"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -21,16 +24,23 @@ import (
 const (
 	StrategyRoundRobin = "round_robin"
 	StrategyFailover   = "failover"
+	StrategyHealth     = "health"
 )
 
 // defaultKeyCooldown 429 缺省冷却时长（无 Retry-After 时）。
 const defaultKeyCooldown = 60 * time.Second
+
+// 健康分数平滑系数（EWMA）：样本越多，单次波动影响越小。
+const healthAlpha = 0.3
 
 // keyState 单个 key 的运行时状态。
 type keyState struct {
 	value        string
 	coolingUntil time.Time
 	disabled     bool // 401/403：key 失效，运行期内禁用
+	samples      int  // 已记录请求次数（health 策略排序用）
+	okRate       float64 // 成功率 EWMA，初始乐观 1.0（无数据视为可用）
+	latEWMA      float64 // 成功请求平均延迟（毫秒）EWMA，仅成功时更新
 }
 
 // available 该 key 当前是否可用（未禁用且不在冷却期）。
@@ -57,12 +67,15 @@ type keyPool struct {
 
 // newKeyPool 构造 key 池。keys 为空 = 无鉴权源（单一空 key，恒可用）。
 func newKeyPool(keys []string, strategy string) *keyPool {
-	if strategy != StrategyFailover {
+	switch strategy {
+	case StrategyFailover:
+	case StrategyHealth:
+	default:
 		strategy = StrategyRoundRobin
 	}
 	pool := &keyPool{strategy: strategy, nowFn: time.Now}
 	if len(keys) == 0 {
-		pool.keys = []*keyState{{value: ""}}
+		pool.keys = []*keyState{{value: "", okRate: 1.0}}
 		return pool
 	}
 	seen := map[string]bool{}
@@ -72,10 +85,10 @@ func newKeyPool(keys []string, strategy string) *keyPool {
 			continue
 		}
 		seen[k] = true
-		pool.keys = append(pool.keys, &keyState{value: k})
+		pool.keys = append(pool.keys, &keyState{value: k, okRate: 1.0})
 	}
 	if len(pool.keys) == 0 {
-		pool.keys = []*keyState{{value: ""}}
+		pool.keys = []*keyState{{value: "", okRate: 1.0}}
 	}
 	return pool
 }
@@ -107,22 +120,29 @@ func (p *keyPool) tryAcquirePreferSticky(tried map[int]bool, preferred []int, st
 		return p.keys[stickyIdx].value, stickyIdx, true
 	}
 	if len(preferred) > 0 {
-		start := 0
-		if p.strategy == StrategyRoundRobin {
-			start = int(p.rr % uint64(len(preferred)))
-		}
-		for off := 0; off < len(preferred); off++ {
-			i := preferred[(start+off)%len(preferred)]
-			if i < 0 || i >= len(p.keys) {
-				continue
+		if p.strategy == StrategyHealth {
+			// 健康优先：在模型亲和子集内按健康分挑选
+			if key, idx, ok := p.pickHealthLocked(tried, preferred, now); ok {
+				return key, idx, true
 			}
-			if tried[i] || !p.keys[i].available(now) {
-				continue
-			}
+		} else {
+			start := 0
 			if p.strategy == StrategyRoundRobin {
-				p.rr++
+				start = int(p.rr % uint64(len(preferred)))
 			}
-			return p.keys[i].value, i, true
+			for off := 0; off < len(preferred); off++ {
+				i := preferred[(start+off)%len(preferred)]
+				if i < 0 || i >= len(p.keys) {
+					continue
+				}
+				if tried[i] || !p.keys[i].available(now) {
+					continue
+				}
+				if p.strategy == StrategyRoundRobin {
+					p.rr++
+				}
+				return p.keys[i].value, i, true
+			}
 		}
 	}
 	return p.tryAcquireLocked(tried, now)
@@ -133,6 +153,9 @@ func (p *keyPool) tryAcquireLocked(tried map[int]bool, now time.Time) (string, i
 	n := len(p.keys)
 	if n == 0 {
 		return "", -1, false
+	}
+	if p.strategy == StrategyHealth {
+		return p.pickHealthLocked(tried, nil, now)
 	}
 	start := 0
 	if p.strategy == StrategyRoundRobin {
@@ -149,6 +172,72 @@ func (p *keyPool) tryAcquireLocked(tried map[int]bool, now time.Time) (string, i
 		return p.keys[i].value, i, true
 	}
 	return "", -1, false
+}
+
+// pickHealthLocked 按健康分挑选可用且未试过的 key（调用方已持 p.mu）：
+// 成功率（EWMA）降序 → 样本数降序（有实证者优先于未测者）→ 平均延迟升序 → 配置序。
+// subset 非空时仅在子集内挑（模型亲和）；nil 表示全池。冷/禁用的 key 不参与。
+func (p *keyPool) pickHealthLocked(tried map[int]bool, subset []int, now time.Time) (string, int, bool) {
+	var cand []int
+	if len(subset) > 0 {
+		for _, i := range subset {
+			if i >= 0 && i < len(p.keys) && !tried[i] && p.keys[i].available(now) {
+				cand = append(cand, i)
+			}
+		}
+	} else {
+		for i, k := range p.keys {
+			if !tried[i] && k.available(now) {
+				cand = append(cand, i)
+			}
+		}
+	}
+	if len(cand) == 0 {
+		return "", -1, false
+	}
+	sort.SliceStable(cand, func(a, b int) bool {
+		ka, kb := p.keys[cand[a]], p.keys[cand[b]]
+		if ka.okRate != kb.okRate {
+			return ka.okRate > kb.okRate
+		}
+		if ka.samples != kb.samples {
+			return ka.samples > kb.samples
+		}
+		if ka.latEWMA != kb.latEWMA {
+			return ka.latEWMA < kb.latEWMA
+		}
+		return cand[a] < cand[b]
+	})
+	idx := cand[0]
+	return p.keys[idx].value, idx, true
+}
+
+// recordResult 记录一次 key 请求的结果与耗时（health 策略排序依据）。
+// ok = 传输成功且 HTTP 2xx；失败不更新延迟（仅更新成功率）。
+func (p *keyPool) recordResult(idx int, ok bool, latency time.Duration) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if idx < 0 || idx >= len(p.keys) {
+		return
+	}
+	k := p.keys[idx]
+	v := 0.0
+	if ok {
+		v = 1.0
+	}
+	if k.samples == 0 {
+		// 首个样本直接落地（不再保留乐观初始值）
+		k.okRate = v
+		if ok {
+			k.latEWMA = float64(latency.Milliseconds())
+		}
+	} else {
+		k.okRate = k.okRate*(1-healthAlpha) + v*healthAlpha
+		if ok {
+			k.latEWMA = k.latEWMA*(1-healthAlpha) + float64(latency.Milliseconds())*healthAlpha
+		}
+	}
+	k.samples++
 }
 
 // cool key 进入冷却（429/限流）。

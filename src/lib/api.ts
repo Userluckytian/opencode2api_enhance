@@ -75,7 +75,7 @@ export type PortCheckResult = {
 // 自定义模型源（第七页「自定义模型」）
 export type CustomProtocol = 'openai' | 'anthropic' | 'gemini' | 'responses'
 
-export type CustomKeyStrategy = 'round_robin' | 'failover'
+export type CustomKeyStrategy = 'round_robin' | 'failover' | 'health'
 
 export type CustomProviderView = {
   id: string
@@ -88,7 +88,7 @@ export type CustomProviderView = {
   api_key: string
   /** 是否已配置 key */
   api_key_set: boolean
-  /** key 调度策略：round_robin 轮询 | failover 错误转移（仅作用于本源） */
+  /** key 调度策略：round_robin 轮询 | failover 错误转移 | health 健康优先（仅作用于本源） */
   key_strategy: CustomKeyStrategy
   via_proxy: boolean
   enabled: boolean

@@ -616,7 +616,8 @@ export default function CustomModelsPage({ toast }: { toast: (msg: string, ok?: 
                     {p.via_proxy && <span className="text-[11px] px-1.5 py-0.5 rounded bg-amber-50 text-amber-700">走节点池</span>}
                     {p.keys_total > 1 && (
                       <span className="text-[11px] px-1.5 py-0.5 rounded bg-zinc-100 text-zinc-600">
-                        {p.keys_total} key{p.key_strategy === 'failover' ? ' · 错误转移' : ' · 轮询'}
+                        {p.keys_total} key
+                        {p.key_strategy === 'failover' ? ' · 错误转移' : p.key_strategy === 'health' ? ' · 健康优先' : ' · 轮询'}
                       </span>
                     )}
                   </div>
@@ -787,7 +788,7 @@ export default function CustomModelsPage({ toast }: { toast: (msg: string, ok?: 
 
             <div className="space-y-2">
               <label className="block text-sm font-medium text-zinc-700">Key 调度策略</label>
-              <div className="grid grid-cols-2 gap-2">
+              <div className="grid grid-cols-3 gap-2">
                 <button
                   type="button"
                   onClick={() => setForm({ ...form, key_strategy: 'round_robin' })}
@@ -812,6 +813,19 @@ export default function CustomModelsPage({ toast }: { toast: (msg: string, ok?: 
                   错误转移
                   <span className={clsx('block text-[11px] mt-0.5', form.key_strategy === 'failover' ? 'text-zinc-300' : 'text-zinc-400')}>
                     主 key 优先，冷却/失效才降级
+                  </span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setForm({ ...form, key_strategy: 'health' })}
+                  className={clsx(
+                    'px-3 py-2 rounded-lg border text-[13px] transition-colors text-left',
+                    form.key_strategy === 'health' ? 'border-zinc-900 bg-zinc-900 text-white' : 'border-zinc-200 text-zinc-600 hover:bg-zinc-50',
+                  )}
+                >
+                  健康优先
+                  <span className={clsx('block text-[11px] mt-0.5', form.key_strategy === 'health' ? 'text-zinc-300' : 'text-zinc-400')}>
+                    成功率最高者稳定回答，变差才降级
                   </span>
                 </button>
               </div>

@@ -12,6 +12,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"strings"
 	"sync"
@@ -220,11 +221,26 @@ func chatViaVendorStream(ctx context.Context, v contract.Vendor, upstreamBody []
 	if auth.PreferredKeyIdx != nil {
 		msg.Extra[custom.KeyPreferredIndex] = *auth.PreferredKeyIdx
 	}
+	// 仅多 key 厂商打日志（避免单 key 厂商刷屏）；ConfiguredKeys 是 custom 具体类型方法，经可选接口断言取。
+	keysTotal := 0
+	if kc, ok := v.(interface{ ConfiguredKeys() []string }); ok {
+		keysTotal = len(kc.ConfiguredKeys())
+	}
+	if keysTotal > 1 {
+		sticky := -1
+		if auth.PreferredKeyIdx != nil {
+			sticky = *auth.PreferredKeyIdx
+		}
+		slog.Info("custom-key: enter chatViaVendorStream (stream)", "vendor", v.ID(), "model", modelID, "keys_total", keysTotal, "sticky_idx_in", sticky)
+	}
 	stream, err := v.ChatStream(ctx, msg)
 	// custom 源选中 key 后写回 Extra：回填到 auth，供 streamWithResume 续写重连透传。
 	// 首次调用（auth 未带偏好）也要回读——首次选中的 key 是续写粘性的起点。
 	if idx, ok := msg.Extra[custom.KeyPreferredIndex].(int); ok && idx >= 0 {
 		auth.PreferredKeyIdx = &idx
+		if keysTotal > 1 {
+			slog.Info("custom-key: after ChatStream selected", "vendor", v.ID(), "model", modelID, "key_idx", idx)
+		}
 	}
 	return stream, err
 }

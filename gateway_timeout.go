@@ -581,6 +581,18 @@ type resumeStreamResult struct {
 //   - initial: 初始上游响应（可能为 nil，此时直接尝试重连）
 //   - keepReasoning: 是否保留 reasoning 内容
 //   - callRec: 调用日志记录（追加事件）
+// isSwitchableStreamError 判断流中上游错误事件是否属于「可切换」故障（5xx/限流/额度）。
+// 可切换 → 中断续写换 key/节点；否则仅结束当前流（转发错误后正常收尾，不续写）。
+func isSwitchableStreamError(status, errMsg string) bool {
+	switching := strings.HasPrefix(status, "5") || strings.Contains(status, "429") ||
+		strings.Contains(strings.ToLower(status), "rate") || strings.Contains(strings.ToLower(status), "quota") ||
+		strings.Contains(status, "额度")
+	// code 缺失/非标准时按文案弱判断（额度用尽/限流文案）
+	lowMsg := strings.ToLower(errMsg)
+	return switching || strings.Contains(lowMsg, "rate") || strings.Contains(lowMsg, "quota") ||
+		strings.Contains(lowMsg, "limit") || strings.Contains(lowMsg, "额度") || strings.Contains(lowMsg, "用尽")
+}
+
 func streamWithResume(w http.ResponseWriter, r *http.Request, upstreamBody []byte, model string, auth UpstreamAuth, initial io.ReadCloser, initialProxyAddr string, keepReasoning bool, callRec *CallRecord) resumeStreamResult {
 	reqID := ""
 	if callRec != nil {
@@ -659,6 +671,11 @@ func streamWithResume(w http.ResponseWriter, r *http.Request, upstreamBody []byt
 		var lastUsage map[string]any
 		interrupted := false
 		clientGone := false // 客户端主动断开：不惩罚节点、不续写
+		sawFinish := false  // 已收到带 finish_reason 的 chunk（回合完整结束标志）
+		// 中断是否可续写。已向客户端吐过内容后，EOF 无 [DONE] / 静默超时不再续写
+		// （续写的「请继续」会诱导模型从零重答，与已吐内容拼成同一条流——双回复混合 bug）；
+		// 硬连接错误（err != io.EOF）仍保留续写（连接中断的真实恢复场景）。
+		resumeable := true
 
 	readLoop:
 		for {
@@ -676,15 +693,16 @@ func streamWithResume(w http.ResponseWriter, r *http.Request, upstreamBody []byt
 					}
 				}
 				if resLine.err != nil {
-					if resLine.err == io.EOF {
-						// 正常 EOF：若见过 [DONE] 视为成功，否则视为中断
-						if !doneSeen {
-							interrupted = true
-							res.ErrMsg = "EOF without [DONE]"
-							callRec.Events = append(callRec.Events, CallEvent{Type: "stream_interrupt", Node: proxyAddr, Detail: "EOF without [DONE]", At: time.Now()})
-						}
-						break readLoop
+				if resLine.err == io.EOF {
+					// 正常 EOF：若见过 [DONE] 视为成功，否则视为中断
+					if !doneSeen {
+						interrupted = true
+						resumeable = false // 上游自己结束了流（无 [DONE]）→ 已吐内容则不再续写
+						res.ErrMsg = "EOF without [DONE]"
+						callRec.Events = append(callRec.Events, CallEvent{Type: "stream_interrupt", Node: proxyAddr, Detail: "EOF without [DONE]", At: time.Now()})
 					}
+					break readLoop
+				}
 					interrupted = true
 					res.ErrMsg = resLine.err.Error()
 					callRec.Events = append(callRec.Events, CallEvent{Type: "stream_error", Node: proxyAddr, Detail: resLine.err.Error(), At: time.Now()})
@@ -704,6 +722,42 @@ func streamWithResume(w http.ResponseWriter, r *http.Request, upstreamBody []byt
 					break readLoop
 				}
 				if !strings.HasPrefix(line, "data: ") {
+					// 上游非标准错误行：无 data: 前缀的裸 {"error":...} JSON（bitdeer 实测：
+					// 流中途发 {"error":{"message":"internal server error",...}} 后直接关流）。
+					// 不识别会被当普通 META 行转发给客户端，随后 EOF 无 [DONE] 又触发续写，
+					// 续写请求让模型从零重答 → 两段完整回复拼在同一条流（双回复混合 bug）。
+					var bareObj map[string]any
+					if json.Unmarshal([]byte(line), &bareObj) == nil {
+						if e, ok := bareObj["error"].(map[string]any); ok {
+							errMsg, _ := e["message"].(string)
+							if errMsg == "" {
+								errMsg, _ = e["type"].(string)
+							}
+							status, _ := e["code"].(string)
+							if isSwitchableStreamError(status, errMsg) {
+								interrupted = true
+								resumeable = true
+								res.ErrMsg = "上游流中途错误: " + errMsg
+								callRec.Events = append(callRec.Events, CallEvent{Type: "stream_error", Node: proxyAddr, Detail: "upstream bare error (switching): " + errMsg, At: time.Now()})
+								break readLoop
+							}
+							// 非切换错误：转发为规范 SSE error 事件后结束本流，不续写
+							sseDebugf("[%s] upstream bare error (end, no resume): %s", reqID, errMsg)
+							if errMsg != "" {
+								if eb, err := json.Marshal(map[string]any{"error": map[string]any{"message": errMsg, "type": "upstream_error"}}); err == nil {
+									w.Write([]byte("data: " + string(eb) + "\n\n"))
+									flushWriter(w)
+								}
+							}
+							w.Write([]byte("data: [DONE]\n\n"))
+							flushWriter(w)
+							doneSeen = true
+							interrupted = false
+							res.ErrMsg = ""
+							callRec.Events = append(callRec.Events, CallEvent{Type: "stream_error", Node: proxyAddr, Detail: "upstream error (end, no resume): " + errMsg, At: time.Now()})
+							break readLoop
+						}
+					}
 					// 非 data 行原样转发（如 event:/id:）
 					sseDebugf("[%s] META>> %q", reqID, resLine.line)
 					// 诊断：首行非空且不像 SSE 格式（无 event:/id:/retry: 前缀），
@@ -737,15 +791,9 @@ func streamWithResume(w http.ResponseWriter, r *http.Request, upstreamBody []byt
 							errMsg, _ = e["type"].(string)
 						}
 						status, _ := e["code"].(string)
-						switching := strings.HasPrefix(status, "5") || strings.Contains(status, "429") ||
-							strings.Contains(strings.ToLower(status), "rate") || strings.Contains(strings.ToLower(status), "quota") ||
-							strings.Contains(status, "额度")
-						// code 缺失/非标准时按文案弱判断（额度用尽/限流文案）
-						lowMsg := strings.ToLower(errMsg)
-						switching = switching || strings.Contains(lowMsg, "rate") || strings.Contains(lowMsg, "quota") ||
-							strings.Contains(lowMsg, "limit") || strings.Contains(lowMsg, "额度") || strings.Contains(lowMsg, "用尽")
-						if switching {
+						if isSwitchableStreamError(status, errMsg) {
 							interrupted = true
+							resumeable = true
 							res.ErrMsg = "上游流中途错误: " + errMsg
 							callRec.Events = append(callRec.Events, CallEvent{Type: "stream_error", Node: proxyAddr, Detail: "upstream SSE error (switching): " + errMsg, At: time.Now()})
 							break readLoop
@@ -754,17 +802,20 @@ func streamWithResume(w http.ResponseWriter, r *http.Request, upstreamBody []byt
 					if u, ok := obj["usage"].(map[string]any); ok {
 						lastUsage = u
 					}
-					if chs, ok := obj["choices"].([]any); ok && len(chs) > 0 {
-						if first, ok := chs[0].(map[string]any); ok {
-							if delta, ok := first["delta"].(map[string]any); ok {
-								if c, ok := delta["content"].(string); ok {
-									accumulated += c
+						if chs, ok := obj["choices"].([]any); ok && len(chs) > 0 {
+							if first, ok := chs[0].(map[string]any); ok {
+								if fr, ok := first["finish_reason"].(string); ok && fr != "" {
+									sawFinish = true
 								}
-								// reasoning_content 不拼入 accumulated：续写时仅把可见内容
-								// 作为 assistant 上下文，避免思维链泄露到续写消息/用户可见内容
+								if delta, ok := first["delta"].(map[string]any); ok {
+									if c, ok := delta["content"].(string); ok {
+										accumulated += c
+									}
+									// reasoning_content 不拼入 accumulated：续写时仅把可见内容
+									// 作为 assistant 上下文，避免思维链泄露到续写消息/用户可见内容
+								}
 							}
 						}
-					}
 				} else {
 					sseDebugf("[%s] !! JSON parse fail on data payload: %q", reqID, dataStr)
 				}
@@ -835,6 +886,8 @@ func streamWithResume(w http.ResponseWriter, r *http.Request, upstreamBody []byt
 					callRec.Events = append(callRec.Events, CallEvent{Type: "ttft_timeout", Node: proxyAddr, Detail: res.ErrMsg, At: time.Now()})
 				} else {
 					res.ErrMsg = fmt.Sprintf("silence timeout (%v)", silence)
+					// 已吐内容后的静默：不再续写（上游可能在思考，也可能已结束；续写易致模型重答拼缝）
+					resumeable = false
 					callRec.Events = append(callRec.Events, CallEvent{Type: "silence_timeout", Node: proxyAddr, Detail: res.ErrMsg, At: time.Now()})
 				}
 				interrupted = true
@@ -889,6 +942,24 @@ func streamWithResume(w http.ResponseWriter, r *http.Request, upstreamBody []byt
 			return res
 		}
 
+		// 已向客户端吐过内容后的不可续写中断（EOF 无 [DONE] / 静默超时 / 上游错误）：
+		// 补发 [DONE] 正常收尾，不再续写。续写重连的「请继续从中断处接着写」会让模型
+		// 从零重答，与已吐内容拼成同一条流（双回复混合 bug，bitdeer 多 key 实测）。
+		// 对齐 model-gateway：干净 EOF/流结束即视为本次回复结束。
+		if !resumeable && len(accumulated) > 0 {
+			if !doneSeen {
+				w.Write([]byte("data: [DONE]\n\n"))
+				flushWriter(w)
+			}
+			slog.Info("stream-resume: suppressed",
+				"reason", res.ErrMsg, "model", model, "node", proxyAddr,
+				"accumulated_chars", len(accumulated), "saw_finish_reason", sawFinish)
+			res.OK = true
+			res.ErrMsg = ""
+			res.DoneAt = time.Now()
+			return res
+		}
+
 		// 中断：记录切换事件，续写重试
 		res.Switched = true
 		attempt++
@@ -906,6 +977,15 @@ func streamWithResume(w http.ResponseWriter, r *http.Request, upstreamBody []byt
 			return res
 		}
 		callRec.Events = append(callRec.Events, CallEvent{Type: "switch", Node: proxyAddr, Detail: fmt.Sprintf("switching (resume, accumulated=%d chars)", len(accumulated)), At: time.Now()})
+		accumTail := accumulated
+		if len(accumTail) > 150 {
+			accumTail = "…" + accumTail[len(accumTail)-150:]
+		}
+		slog.Info("stream-resume: switching",
+			"attempt", attempt, "reason", res.ErrMsg,
+			"model", model, "node", proxyAddr,
+			"accumulated_chars", len(accumulated), "saw_finish_reason", sawFinish,
+			"accumulated_tail", accumTail)
 		// 续写 body：原 messages + assistant(已吐内容) + user(请继续)
 		if len(accumulated) > 0 {
 			var bodyMap map[string]any

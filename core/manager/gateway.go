@@ -194,7 +194,8 @@ func (g *Gateway) startChild(runner Runner) error {
 			"-gateway",
 			// P2: 注入实例池质量文件路径，子进程路由按质量分加权/熔断（空 = 无质量约束）。
 			"-pool-quality", filepath.Join(g.m.Paths().RuntimeDir, "pool_quality.json"),
-			"-log-level", "warn",
+			// 网关日志级别：info 级包含 key 选择/流中断续写等诊断埋点（warn 会过滤掉）。
+			"-log-level", "info",
 		},
 		Dir:      dir,
 		LogOut:   filepath.Join(dir, "logs", "opencode2api.out.log"),
