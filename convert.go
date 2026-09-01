@@ -275,6 +275,10 @@ func convertStreamChunkFromObj(raw map[string]any, keepReasoning bool) (string, 
 	var usage map[string]any
 	if u, ok := raw["usage"].(map[string]any); ok {
 		usage = u
+		// 清洗 usage 内 null 字段（同引用：raw["usage"] 一并生效）。
+		// NVIDIA 等上游会发 {"prompt_tokens_details":{"audio_tokens":null,...}}，
+		// 严格客户端（Grok 的 serde）把整数字段当必填解析 → invalid type: null, expected u32。
+		cleanUsageNulls(u)
 	}
 
 	choices, ok := raw["choices"].([]any)
@@ -325,6 +329,23 @@ func convertStreamChunkFromObj(raw map[string]any, keepReasoning bool) (string, 
 		return "", usage
 	}
 	return string(converted), usage
+}
+
+// cleanUsageNulls 递归删除 usage 内值为 null 的字段。null 在 usage 中语义为「不适用」，
+// 删除字段等价于可选客户端见到的缺省，同时避免严格客户端把整数字段当必填解析报错。
+func cleanUsageNulls(u map[string]any) {
+	for k, v := range u {
+		if v == nil {
+			delete(u, k)
+			continue
+		}
+		if m, ok := v.(map[string]any); ok {
+			cleanUsageNulls(m)
+			if len(m) == 0 {
+				delete(u, k)
+			}
+		}
+	}
 }
 
 func convertResponse(data []byte, keepReasoning bool) ([]byte, error) {
