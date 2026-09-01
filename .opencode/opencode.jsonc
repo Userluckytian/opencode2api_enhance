@@ -1,5 +1,10 @@
 {
   "$schema": "https://opencode.ai/config.json",
   "plugin": ["superpowers@git+https://github.com/obra/superpowers.git"],
-  "subagent_depth": 2
+  "subagent_depth": 2,
+  "agent": {
+    "general": {
+      "model": "oc-local-40080/big-pickle"
+    }
+  }
 }

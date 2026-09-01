@@ -1,6 +1,7 @@
 ---
 description: 项目自检：架构合理性、代码规范、模块完整性、升级建议
 mode: subagent
+model: oc-local-40080/big-pickle
 permission:
   edit: deny
   bash: allow
