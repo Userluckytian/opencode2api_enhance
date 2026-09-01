@@ -92,9 +92,20 @@ func (p *keyPool) tryAcquire(tried map[int]bool) (string, int, bool) {
 // 的 key」）里挑可用且未试过的 key，子集无可挑时退回全池普通调度。
 // round_robin 在子集内同样轮询；failover 在子集内保持粘主。
 func (p *keyPool) tryAcquirePrefer(tried map[int]bool, preferred []int) (string, int, bool) {
+	return p.tryAcquirePreferSticky(tried, preferred, -1)
+}
+
+// tryAcquirePreferSticky 在 tryAcquirePrefer 基础上支持会话粘性：stickyIdx >= 0
+// 时优先命中该 key（续写同 key / 会话级粘性），不可用或已试过再回退 preferred
+// 子集与全池普通调度。命中 sticky 不推进 round_robin 游标——同一会话的续写
+// 重连稳定落在同一 key，避免重复输出/串对话。
+func (p *keyPool) tryAcquirePreferSticky(tried map[int]bool, preferred []int, stickyIdx int) (string, int, bool) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	now := p.nowFn()
+	if stickyIdx >= 0 && stickyIdx < len(p.keys) && !tried[stickyIdx] && p.keys[stickyIdx].available(now) {
+		return p.keys[stickyIdx].value, stickyIdx, true
+	}
 	if len(preferred) > 0 {
 		start := 0
 		if p.strategy == StrategyRoundRobin {

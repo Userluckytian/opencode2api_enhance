@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/6Kmfi6HP/opencode2api/core/contract"
+	"github.com/6Kmfi6HP/opencode2api/vendors/custom"
 	"github.com/6Kmfi6HP/opencode2api/vendors/opencode"
 )
 
@@ -187,11 +188,14 @@ func chatViaVendor(ctx context.Context, v contract.Vendor, upstreamBody []byte, 
 }
 
 // chatViaVendorStream 构造单个厂商的流式上游调用。
-func chatViaVendorStream(ctx context.Context, v contract.Vendor, upstreamBody []byte, modelID string, auth UpstreamAuth) (*contract.Stream, error) {
+// auth 指针透传：续写/会话粘性场景，把外部带进来的 PreferredKeyIdx 写入
+// msg.Extra[custom.KeyPreferredIndex]，custom 源选中 key 后写回，供下次重连
+// 继续命中同一 key（同请求续写不换 key）。
+func chatViaVendorStream(ctx context.Context, v contract.Vendor, upstreamBody []byte, modelID string, auth *UpstreamAuth) (*contract.Stream, error) {
 	if oc, ok := v.(*opencode.Vendor); ok && oc == mainCodeVendor() {
 		syncVendorState(oc)
 		// opencode 上游一律无 key（免费档）：不转发客户端 key（同 chatViaVendor）。
-		auth = UpstreamAuth{Mode: AuthRoutePublic}
+		auth = &UpstreamAuth{Mode: AuthRoutePublic}
 	} else {
 		seedVendorCatalog(v)
 	}
@@ -213,7 +217,16 @@ func chatViaVendorStream(ctx context.Context, v contract.Vendor, upstreamBody []
 			opencode.KeyMaxRetries: maxRouteRetries(),
 		},
 	}
-	return v.ChatStream(ctx, msg)
+	if auth.PreferredKeyIdx != nil {
+		msg.Extra[custom.KeyPreferredIndex] = *auth.PreferredKeyIdx
+	}
+	stream, err := v.ChatStream(ctx, msg)
+	// custom 源选中 key 后写回 Extra：回填到 auth，供 streamWithResume 续写重连透传。
+	// 首次调用（auth 未带偏好）也要回读——首次选中的 key 是续写粘性的起点。
+	if idx, ok := msg.Extra[custom.KeyPreferredIndex].(int); ok && idx >= 0 {
+		auth.PreferredKeyIdx = &idx
+	}
+	return stream, err
 }
 
 // rawBodyToContractMessages 从 OpenAI Chat 形态请求体提取归一化消息。
@@ -337,7 +350,7 @@ func callOpenCodeAPIOnce(ctx context.Context, upstreamBody []byte, modelID strin
 // callOpenCodeAPIStream 流式上游调用（适配层；路由 + 厂商级 failover + auto 模型降级链）。
 // auto 降级只发生在返回客户端之前（厂商循环层），流中续写（streamWithResume）沿用
 // 同一模型重试——流已对外吐字节后换模型会破坏对话连贯性。
-func callOpenCodeAPIStream(ctx context.Context, upstreamBody []byte, modelID string, auth UpstreamAuth) (io.ReadCloser, int, http.Header, string, error) {
+func callOpenCodeAPIStream(ctx context.Context, upstreamBody []byte, modelID string, auth *UpstreamAuth) (io.ReadCloser, int, http.Header, string, error) {
 	dec, _ := ctx.Value(autoCtxKey{}).(*autoDecision)
 	for switched := 0; ; switched++ {
 		if dec != nil {
@@ -358,7 +371,7 @@ func callOpenCodeAPIStream(ctx context.Context, upstreamBody []byte, modelID str
 }
 
 // callOpenCodeAPIStreamOnce 流式单模型尝试（原路由 + 厂商级 failover 循环）。
-func callOpenCodeAPIStreamOnce(ctx context.Context, upstreamBody []byte, modelID string, auth UpstreamAuth) (io.ReadCloser, int, http.Header, string, error) {
+func callOpenCodeAPIStreamOnce(ctx context.Context, upstreamBody []byte, modelID string, auth *UpstreamAuth) (io.ReadCloser, int, http.Header, string, error) {
 	cands := chatCandidates(modelID)
 
 	var lastStream *contract.Stream

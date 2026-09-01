@@ -1,6 +1,7 @@
 ---
 description: 专项负责测试编写、运行、覆盖率分析，遵循 TDD 红-绿-重构循环
 mode: subagent
+model: oc-local-40080/big-pickle
 permission:
   edit: allow
   bash: allow

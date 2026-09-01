@@ -121,6 +121,8 @@ export type CustomProviderInput = {
   api_key?: string
   key_strategy?: CustomKeyStrategy
   via_proxy?: boolean
+  /** 仅「测试并获取模型」生效：走本机系统代理（http.ProxyFromEnvironment），不写入配置 */
+  use_local_proxy?: boolean
   enabled?: boolean
 }
 

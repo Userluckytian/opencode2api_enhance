@@ -396,13 +396,19 @@ func getHTTPClientWithProxy() (*http.Client, string) {
 		if len(socks5Proxies) == 0 {
 			return httpClient, ""
 		}
-		if routeMode.Load().(string) == "round_robin" {
+		mode := routeMode.Load().(string)
+		if mode == "round_robin" {
 			// round_robin：每次请求推进游标
 			start := int(atomic.AddUint32(&socks5RRIndex, 1) % uint32(len(socks5Proxies)))
 			proxy = pickHealthyProxy(socks5Proxies, start)
+		} else if mode == "smart" {
+			// smart（默认）：每请求推进游标轮询健康节点——多实例并发时不扎堆单一节点，
+			// 保留健康跳过/坏池/熔断/超时切换完整逻辑（pickHealthyProxy 附加层）。
+			// 单节点健康时退化恒命中该节点（pickHealthyProxy 的 len<=1 前置）。
+			start := int(atomic.AddUint32(&socks5RRIndex, 1) % uint32(len(socks5Proxies)))
+			proxy = pickHealthyProxy(socks5Proxies, start)
 		} else {
-			// failover / smart（默认）：成功不动游标，失败（冷却）才切下一个健康代理
-			// smart 额外启用健康计数/坏池/超时切换（附加层，与游标逻辑无关）
+			// failover：成功不动游标，失败（冷却）才切下一个健康代理
 			start := int(atomic.LoadUint32(&socks5RRIndex) % uint32(len(socks5Proxies)))
 			proxy = pickHealthyProxy(socks5Proxies, start)
 			// 游标推进到实际选中的代理（若起始代理冷却被跳过则切换）

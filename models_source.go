@@ -358,6 +358,24 @@ var (
 	catalogRefreshMinGap = 10 * time.Second
 )
 
+// startInitialCatalogRefresh 启动期目录刷新异步化（先监听后刷新）。
+// 背景实例子进程与主管理器共用同一 main()：配置自定义供应商后，同步刷新会对其
+// 上游直连发起真实 HTTP 拉取（60s ctx 上限），上游不可达时进程迟迟不监听——
+// manager 实例启动 15s 就绪等待必超时（2026-08-28 实例池全部 15s 启动失败事故）。
+// 目录未就绪期间 /v1/models 走 refreshModelCatalogIfDue 冷启动防惊群路径
+// （10s 最小间隔），custom 厂商另有磁盘缓存兜底首请求，异步化不引入语义缺口。
+func startInitialCatalogRefresh() {
+	go func() {
+		refreshModelCatalog()
+		modelMu.RLock()
+		nLoaded := len(modelsCache)
+		modelMu.RUnlock()
+		if nLoaded > 0 {
+			slog.Info("models loaded", "count", nLoaded)
+		}
+	}()
+}
+
 // refreshModelCatalog 拉取各厂商目录并写入既有缓存（同步，启动/厂商重建/定时共用）。
 // 无条件刷新：调用方语义是"现在就要最新目录"（如自定义源增删改后的重建）。
 func refreshModelCatalog() {

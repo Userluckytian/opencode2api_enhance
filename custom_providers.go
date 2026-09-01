@@ -219,8 +219,35 @@ type customProviderInput struct {
 	KeyStrategy   string   `json:"key_strategy"`   // round_robin（默认）| failover
 	AllowedModels []string `json:"allowed_models"` // 暴露白名单（空 = 全部暴露）
 	ViaProxy      bool     `json:"via_proxy"`
-	Enabled       *bool    `json:"enabled"`
+	// UseLocalProxy 测试专用：测试拉取模型走本机系统代理（http.ProxyFromEnvironment），
+	// 不叠加节点池（via_proxy）；默认 false = 直连或按 via_proxy 走节点池。
+	UseLocalProxy bool `json:"use_local_proxy"`
+	Enabled       *bool `json:"enabled"`
 }
+
+// localProxyTransport 测试专用的 Transport：经本机系统代理（默认 http.ProxyFromEnvironment，
+// 读 HTTP_PROXY/HTTPS_PROXY/NO_PROXY）出站，不经过节点池。仅测试「测试并获取模型」
+// 使用；生产出站仍走 via_proxy（节点池）或直连。
+//
+// localProxyFunc 独立变量（默认 http.ProxyFromEnvironment）：http.ProxyFromEnvironment
+// 内部用 sync.Once 缓存进程级环境快照，测试里 t.Setenv 无法刷新该缓存——独立变量让
+// 单测可确定性注入代理地址，验证「use_local_proxy 走系统代理」路径。
+var localProxyFunc = http.ProxyFromEnvironment
+
+type localProxyTransport struct{}
+
+// Client 实现 contract.Transport：返回使用系统代理的 HTTP 客户端（无出口地址，
+// 不参与节点池健康/统计）。
+func (localProxyTransport) Client(_ contract.Tier, streaming bool) (*http.Client, string) {
+	tr := &http.Transport{Proxy: localProxyFunc}
+	if streaming {
+		return &http.Client{Transport: tr}, ""
+	}
+	return &http.Client{Transport: tr, Timeout: 60 * time.Second}, ""
+}
+
+// Mark 实现 contract.Transport（本地系统代理不参与节点池健康维护）。
+func (localProxyTransport) Mark(string, int, error) {}
 
 // customProvidersView 聚合目录中该源模型数。
 func customModelCounts() map[string]int {
@@ -551,12 +578,18 @@ func customProvidersTestHandler() http.HandlerFunc {
 		allOK := true
 		var firstOKModels []string
 		for _, key := range keys {
-			v, err := custom.New(custom.Config{
+			cfg := custom.Config{
 				ID: in.ID, Name: in.Name, BaseURL: in.BaseURL,
 				APIKey: key, Protocol: in.Protocol, ViaProxy: in.ViaProxy,
 				// 连通测试必须真实触达上游：禁用目录缓存（防不可达时拿旧缓存误报成功）。
 				NoModelCache: true,
-			})
+			}
+			if in.UseLocalProxy {
+				// 走本机系统代理（http.ProxyFromEnvironment），不叠加节点池。
+				cfg.Transport = localProxyTransport{}
+				cfg.ViaProxy = false
+			}
+			v, err := custom.New(cfg)
 			if err != nil {
 				allOK = false
 				results = append(results, keyResult{KeyTail: keyTail(key), Error: err.Error()})

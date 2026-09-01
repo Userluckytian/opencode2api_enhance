@@ -1,6 +1,7 @@
 ---
 description: 阶段验收：对照计划验收表、复跑测试/构建、红线与密钥、给出通过结论
 mode: subagent
+model: oc-local-40080/big-pickle
 permission:
   edit: deny
   bash: allow

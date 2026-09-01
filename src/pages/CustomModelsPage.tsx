@@ -13,6 +13,8 @@ type FormState = {
   api_keys: string
   key_strategy: CustomKeyStrategy
   via_proxy: boolean
+  /** 仅「测试并获取模型」生效：走本机系统代理（不落盘、不进配置） */
+  use_local_proxy: boolean
   enabled: boolean
   /** 全量模型清单（上游 ID；来自视图或测试结果） */
   allModels: string[]
@@ -32,6 +34,7 @@ const emptyForm = (): FormState => ({
   api_keys: '',
   key_strategy: 'round_robin',
   via_proxy: false,
+  use_local_proxy: false,
   enabled: true,
   allModels: [],
   exposeAll: true,
@@ -173,6 +176,7 @@ export default function CustomModelsPage({ toast }: { toast: (msg: string, ok?: 
       api_keys: (p.api_keys && p.api_keys.length > 0 ? p.api_keys : p.api_key ? [p.api_key] : []).join('\n'), // 回填已存 keys
       key_strategy: p.key_strategy ?? 'round_robin',
       via_proxy: p.via_proxy,
+      use_local_proxy: false,
       enabled: p.enabled,
       allModels: p.models_all ?? [],
       exposeAll: !p.allowed_models || p.allowed_models.length === 0,
@@ -208,6 +212,7 @@ export default function CustomModelsPage({ toast }: { toast: (msg: string, ok?: 
       key_strategy: f.key_strategy,
       allowed_models: allowed,
       via_proxy: f.via_proxy,
+      use_local_proxy: forTest ? f.use_local_proxy : undefined, // 仅测试动作透传（保存不落盘）
       enabled: f.enabled,
     }
   }
@@ -823,6 +828,20 @@ export default function CustomModelsPage({ toast }: { toast: (msg: string, ok?: 
               </label>
               <span className="text-sm text-zinc-700">出站走节点池代理</span>
               <span className="text-zinc-500 text-xs">（默认直连；供应商有地区限制时开启）</span>
+            </div>
+
+            <div className="flex items-center space-x-3">
+              <label className="relative inline-flex items-center cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={form.use_local_proxy}
+                  onChange={(e) => setForm({ ...form, use_local_proxy: e.target.checked })}
+                  className="sr-only peer"
+                />
+                <div className="w-11 h-6 bg-zinc-200 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-zinc-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-zinc-900"></div>
+              </label>
+              <span className="text-sm text-zinc-700">测试走本机系统代理</span>
+              <span className="text-zinc-500 text-xs">（仅「测试并获取模型」时经系统代理拉取；与上方节点池二选一，不写入配置）</span>
             </div>
 
             {/* 暴露模型白名单 */}

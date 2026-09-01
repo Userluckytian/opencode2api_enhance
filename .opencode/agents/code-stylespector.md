@@ -1,6 +1,7 @@
 ---
 description: 静态检查代码是否符合 opencode2api_enhance 编码规范，输出违规清单和修复建议
 mode: subagent
+model: oc-local-40080/big-pickle
 permission:
   edit: deny
   bash: allow
