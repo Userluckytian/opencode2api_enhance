@@ -12,6 +12,8 @@ type FormState = {
   /** 多 key，一行一个（textarea 原文） */
   api_keys: string
   key_strategy: CustomKeyStrategy
+  /** 401/403 失效冷却时长（秒）：0=永久禁用；>0 到期自动回池重试 */
+  key_403_cooldown: number
   via_proxy: boolean
   /** 仅「测试并获取模型」生效：走本机系统代理（不落盘、不进配置） */
   use_local_proxy: boolean
@@ -33,6 +35,7 @@ const emptyForm = (): FormState => ({
   base_url: '',
   api_keys: '',
   key_strategy: 'round_robin',
+  key_403_cooldown: 600, // 默认：401/403 冷却 600s 后自动恢复
   via_proxy: false,
   use_local_proxy: false,
   enabled: true,
@@ -123,6 +126,7 @@ export default function CustomModelsPage({ toast }: { toast: (msg: string, ok?: 
   const [confirmDelete, setConfirmDelete] = useState<string | null>(null)
   const [confirmClear, setConfirmClear] = useState(false)
   const [clearing, setClearing] = useState(false)
+  const [resetKeysId, setResetKeysId] = useState<string | null>(null)
 
   // 双标签：默认展示自定义供应商 tab（插件列表仍在 useEffect 预加载，切过去即有数据）
   const [tab, setTab] = useState<'plugins' | 'custom'>('custom')
@@ -175,6 +179,8 @@ export default function CustomModelsPage({ toast }: { toast: (msg: string, ok?: 
       base_url: p.base_url,
       api_keys: (p.api_keys && p.api_keys.length > 0 ? p.api_keys : p.api_key ? [p.api_key] : []).join('\n'), // 回填已存 keys
       key_strategy: p.key_strategy ?? 'round_robin',
+      // 尊重实际存储值：旧配置无该键=0（永久禁用）原样回填，仅新建默认 600（自动恢复）。
+      key_403_cooldown: p.key_403_cooldown >= 0 ? p.key_403_cooldown : 600,
       via_proxy: p.via_proxy,
       use_local_proxy: false,
       enabled: p.enabled,
@@ -212,6 +218,7 @@ export default function CustomModelsPage({ toast }: { toast: (msg: string, ok?: 
       base_url: f.base_url.trim(),
       api_keys: keys.length > 0 ? keys : undefined, // 整体留空 = 保留原 keys
       key_strategy: f.key_strategy,
+      key_403_cooldown: f.key_403_cooldown,
       allowed_models: allowed,
       via_proxy: f.via_proxy,
       use_local_proxy: forTest ? f.use_local_proxy : undefined, // 仅测试动作透传（保存不落盘）
@@ -257,6 +264,21 @@ export default function CustomModelsPage({ toast }: { toast: (msg: string, ok?: 
     }
   }
 
+  // 恢复全部 Key：清除该源 key 池的全部运行态（禁用/限流冷却/403 冷却/熔断），立即回到全可用
+  const doResetKeys = async (id: string) => {
+    if (resetKeysId) return
+    setResetKeysId(id)
+    try {
+      const r = await api.customProvidersResetKeys(id)
+      toast(`已恢复全部 Key（可用 ${r.keys_available}/${r.keys_total}）`, true)
+      await reload()
+    } catch (e) {
+      toast(`恢复失败：${String(e)}`, false)
+    } finally {
+      setResetKeysId(null)
+    }
+  }
+
   // 清空全部自定义源（含本地模型缓存）；与设置页「数据清理」互不影响
   const doClearAll = async () => {
     setClearing(true)
@@ -299,6 +321,7 @@ export default function CustomModelsPage({ toast }: { toast: (msg: string, ok?: 
           base_url: p.base_url,
           api_keys: p.api_keys && p.api_keys.length > 0 ? p.api_keys : undefined,
           key_strategy: p.key_strategy,
+          key_403_cooldown: p.key_403_cooldown,
           via_proxy: p.via_proxy,
           enabled: p.enabled,
         }))
@@ -341,6 +364,7 @@ export default function CustomModelsPage({ toast }: { toast: (msg: string, ok?: 
       base_url: p.base_url,
       api_keys: p.api_keys && p.api_keys.length > 0 ? p.api_keys : undefined,
       key_strategy: p.key_strategy,
+      key_403_cooldown: p.key_403_cooldown,
       via_proxy: p.via_proxy,
       enabled: p.enabled,
       // 带上当前白名单（空 = 该源本就是全部暴露，序列化后键省略、后端不误伤）
@@ -629,7 +653,9 @@ export default function CustomModelsPage({ toast }: { toast: (msg: string, ok?: 
                     {p.keys_total > 1 && (
                       <>
                         {' '}（可用 {p.keys_available}
-                        {p.keys_cooling > 0 && <span className="text-amber-600"> · 冷却 {p.keys_cooling}</span>}
+                        {p.keys_cooling > 0 && <span className="text-amber-600"> · 限流冷却 {p.keys_cooling}</span>}
+                        {p.keys_auth_cooling > 0 && <span className="text-orange-500"> · 403冷却 {p.keys_auth_cooling}</span>}
+                        {p.keys_circuit_open > 0 && <span className="text-purple-600"> · 熔断 {p.keys_circuit_open}</span>}
                         {p.keys_disabled > 0 && <span className="text-red-500"> · 禁用 {p.keys_disabled}</span>}）
                       </>
                     )}
@@ -650,6 +676,19 @@ export default function CustomModelsPage({ toast }: { toast: (msg: string, ok?: 
                     <Activity size={12} />
                     {p.last_error ? '异常' : p.last_success ? `活跃 ${fmtTime(p.last_success)}` : '探测'}
                   </button>
+                  {/* 恢复全部 Key：清除该源全部 key 运行态（禁用/限流冷却/403 冷却/熔断） */}
+                  {(p.keys_disabled > 0 || p.keys_auth_cooling > 0 || p.keys_circuit_open > 0) && (
+                    <button
+                      type="button"
+                      onClick={() => void doResetKeys(p.id)}
+                      disabled={saving || !!resetKeysId}
+                      className="flex items-center gap-1 px-2 py-1 rounded-lg text-[11px] font-medium bg-orange-50 text-orange-600 hover:bg-orange-100 disabled:opacity-50"
+                      title="立即恢复全部 Key（清除禁用 / 限流冷却 / 403 冷却 / 熔断），从全新状态重试"
+                    >
+                      <RefreshCw size={12} className={resetKeysId === p.id ? 'animate-spin' : ''} />
+                      {resetKeysId === p.id ? '恢复中' : '恢复全部 Key'}
+                    </button>
+                  )}
                   {/* 启停 */}
                   <button
                     type="button"
@@ -829,7 +868,41 @@ export default function CustomModelsPage({ toast }: { toast: (msg: string, ok?: 
                   </span>
                 </button>
               </div>
-              <p className="text-zinc-500 text-xs">仅作用于本自定义源，与实例池的路由模式互不影响；429 冷却（Retry-After）、401/403 禁用后自动换 key</p>
+              <p className="text-zinc-500 text-xs">仅作用于本自定义源，与实例池的路由模式互不影响；429 冷却（Retry-After）、401/403 按下方策略处理</p>
+            </div>
+
+            {/* 401/403 失效恢复 */}
+            <div className="rounded-lg border border-zinc-200 bg-zinc-50/60 p-3 space-y-2">
+              <div className="flex items-center justify-between">
+                <label className="text-sm font-medium text-zinc-700">401/403 失效恢复</label>
+                <label className="flex items-center gap-1.5 text-xs text-zinc-600 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={form.key_403_cooldown > 0}
+                    onChange={(e) => setForm({ ...form, key_403_cooldown: e.target.checked ? 600 : 0 })}
+                    className="accent-zinc-900"
+                  />
+                  到期自动恢复
+                </label>
+              </div>
+              {form.key_403_cooldown > 0 ? (
+                <div className="flex items-center gap-2">
+                  <span className="text-xs text-zinc-500 shrink-0">冷却</span>
+                  <input
+                    type="number"
+                    min={1}
+                    max={86400}
+                    value={form.key_403_cooldown}
+                    onChange={(e) => setForm({ ...form, key_403_cooldown: Math.max(1, Number(e.target.value) || 600) })}
+                    className="w-24 px-2 py-1.5 border rounded-lg text-[13px]"
+                  />
+                  <span className="text-xs text-zinc-500">秒后自动重试</span>
+                  <span className="ml-auto text-[11px] text-zinc-400">到期自动回池，订阅/风控恢复后无需人工介入</span>
+                </div>
+              ) : (
+                <p className="text-xs text-zinc-500">永久禁用：key 失效后不再使用，直到编辑保存或手动「恢复全部 Key」</p>
+              )}
+              <p className="text-[11px] text-zinc-400">多 key 时仅失效 key 被标记，其余正常服务；真失效的 key 到期重试仍 401/403 会再次标记并重新冷却，不会反复刷上游</p>
             </div>
 
             <div className="flex items-center space-x-3">

@@ -7,7 +7,9 @@
 //     让表现最好的 key 稳定回答，变差才落到下一个（借鉴 model-gateway 的质量分排序）
 //
 // 健康语义：429/限流 → 冷却（Retry-After，缺省 60s）到期自动回池；
-// 401/403（key 失效）→ 禁用（运行期内不再使用，编辑保存后重建实例即恢复）。
+// 401/403（key 失效）→ 按 key_403_cooldown 冷却（缺省 600s）到期自动回池重试；
+// key_403_cooldown=0 时退化为旧行为：永久禁用（运行期内不再使用，
+// 编辑保存重建或手动「恢复全部 Key」后解除）。
 // 每次请求记录成功/失败与延迟（recordResult），供 health 策略排序；其余策略不依赖计数。
 package custom
 
@@ -30,6 +32,10 @@ const (
 // defaultKeyCooldown 429 缺省冷却时长（无 Retry-After 时）。
 const defaultKeyCooldown = 60 * time.Second
 
+// defaultKeyAuthCooldown 401/403 缺省冷却时长（key_403_cooldown 未配置时）。
+// 与旧「永久禁用」不同：到期自动回池重试，订阅/风控恢复后无需人工介入。
+const defaultKeyAuthCooldown = 600 * time.Second
+
 // circuitOpenThreshold 连续失败熔断阈值（对齐 model-gateway：连续 3 次失败即熔断）。
 const circuitOpenThreshold = 3
 
@@ -43,7 +49,8 @@ const healthAlpha = 0.3
 type keyState struct {
 	value        string
 	coolingUntil time.Time
-	disabled     bool // 401/403：key 失效，运行期内禁用
+	disabled     bool // key_403_cooldown=0 时 401/403 → 永久禁用（运行期内不再使用）
+	authCoolingUntil time.Time // 401/403 冷却到期时间（key_403_cooldown>0 时使用）
 	consecFails  int  // 连续失败次数（熔断：达阈值进入 circuitUntil 冷却）
 	circuitUntil time.Time
 	samples      int  // 已记录请求次数（health 策略排序用）
@@ -51,17 +58,19 @@ type keyState struct {
 	latEWMA      float64 // 成功请求平均延迟（毫秒）EWMA，仅成功时更新
 }
 
-// available 该 key 当前是否可用（未禁用、不在冷却/熔断期）。
+// available 该 key 当前是否可用（未禁用、不在限流冷却/401-403冷却/熔断期）。
 func (k *keyState) available(now time.Time) bool {
-	return !k.disabled && !now.Before(k.coolingUntil) && !now.Before(k.circuitUntil)
+	return !k.disabled && !now.Before(k.coolingUntil) && !now.Before(k.authCoolingUntil) && !now.Before(k.circuitUntil)
 }
 
 // KeyPoolStatus key 健康计数（供 UI 展示；状态快照，非用量统计）。
 type KeyPoolStatus struct {
 	Total     int `json:"total"`
 	Available int `json:"available"`
-	Cooling   int `json:"cooling"`
-	Disabled  int `json:"disabled"`
+	Cooling   int `json:"cooling"`        // 429/限流冷却中
+	AuthCooling int `json:"auth_cooling"` // 401/403 冷却中（到期自动恢复）
+	CircuitOpen int `json:"circuit_open"` // 连续失败熔断中（阈值后自动重试）
+	Disabled  int `json:"disabled"`       // key_403_cooldown=0 时被永久禁用
 }
 
 // keyPool 一源一池。
@@ -71,17 +80,24 @@ type keyPool struct {
 	strategy string
 	rr       uint64 // round_robin 游标
 	nowFn    func() time.Time
+	// key403Cooldown 401/403 冷却时长；0 = 退化为永久禁用（旧行为）。
+	key403Cooldown time.Duration
 }
 
 // newKeyPool 构造 key 池。keys 为空 = 无鉴权源（单一空 key，恒可用）。
 func newKeyPool(keys []string, strategy string) *keyPool {
+	return newKeyPoolCooldown(keys, strategy, 0)
+}
+
+// newKeyPoolCooldown 构造 key 池并指定 401/403 冷却时长（>0 冷却自动恢复；0 = 永久禁用）。
+func newKeyPoolCooldown(keys []string, strategy string, key403Cooldown time.Duration) *keyPool {
 	switch strategy {
 	case StrategyFailover:
 	case StrategyHealth:
 	default:
 		strategy = StrategyRoundRobin
 	}
-	pool := &keyPool{strategy: strategy, nowFn: time.Now}
+	pool := &keyPool{strategy: strategy, nowFn: time.Now, key403Cooldown: key403Cooldown}
 	if len(keys) == 0 {
 		pool.keys = []*keyState{{value: "", okRate: 1.0}}
 		return pool
@@ -258,7 +274,7 @@ func (p *keyPool) recordResult(idx int, ok bool, latency time.Duration) {
 	}
 }
 
-// cool key 进入冷却（429/限流）。
+// cool key 进入限流冷却（429/限流）。
 func (p *keyPool) cool(idx int, d time.Duration) {
 	if d <= 0 {
 		d = defaultKeyCooldown
@@ -271,7 +287,24 @@ func (p *keyPool) cool(idx int, d time.Duration) {
 	p.keys[idx].coolingUntil = p.nowFn().Add(d)
 }
 
-// disable key 禁用（401/403 失效）。
+// authCool key 进入 401/403 冷却（到期自动回池重试）。
+func (p *keyPool) authCool(idx int, d time.Duration) {
+	if d <= 0 {
+		d = defaultKeyAuthCooldown
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if idx < 0 || idx >= len(p.keys) {
+		return
+	}
+	p.keys[idx].authCoolingUntil = p.nowFn().Add(d)
+	// 401/403 冷却期间 key 不可用，其它限流/熔断标记一并清掉，避免状态叠加混乱。
+	p.keys[idx].coolingUntil = time.Time{}
+	p.keys[idx].consecFails = 0
+	p.keys[idx].circuitUntil = time.Time{}
+}
+
+// disable key 永久禁用（key_403_cooldown=0 时 401/403 → 禁用；编辑保存/手动恢复后解除）。
 func (p *keyPool) disable(idx int) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -281,7 +314,31 @@ func (p *keyPool) disable(idx int) {
 	p.keys[idx].disabled = true
 }
 
-// status 健康计数快照。
+// authFail 401/403 失效处理：按 key403Cooldown 分流——
+// >0 进冷却（到期自动回池重试）；=0 永久禁用（旧行为）。
+func (p *keyPool) authFail(idx int) {
+	if p.key403Cooldown > 0 {
+		p.authCool(idx, p.key403Cooldown)
+	} else {
+		p.disable(idx)
+	}
+}
+
+// reset 清除全部 key 的运行态（禁用/限流冷却/403 冷却/熔断）——手动「恢复全部 Key」
+// 与厂商重建时调用，让 key 池回到全可用。不触碰 key 配置与健康分数（保留实证）。
+func (p *keyPool) reset() {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	for _, k := range p.keys {
+		k.disabled = false
+		k.coolingUntil = time.Time{}
+		k.authCoolingUntil = time.Time{}
+		k.consecFails = 0
+		k.circuitUntil = time.Time{}
+	}
+}
+
+// status 健康计数快照（429 限流冷却 / 401-403 冷却 / 连续失败熔断 分开统计）。
 func (p *keyPool) status() KeyPoolStatus {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -293,11 +350,29 @@ func (p *keyPool) status() KeyPoolStatus {
 			st.Disabled++
 		case k.available(now):
 			st.Available++
+		case now.Before(k.authCoolingUntil):
+			st.AuthCooling++
+		case now.Before(k.circuitUntil):
+			st.CircuitOpen++
 		default:
 			st.Cooling++
 		}
 	}
 	return st
+}
+
+// countAuthCooling 当前 401/403 冷却中的 key 数（手动恢复按钮是否需要高亮等 UI 用）。
+func (p *keyPool) countAuthCooling() int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	now := p.nowFn()
+	n := 0
+	for _, k := range p.keys {
+		if now.Before(k.authCoolingUntil) {
+			n++
+		}
+	}
+	return n
 }
 
 // parseRetryAfter 解析 Retry-After 响应头（秒数或 HTTP 日期；日期兜底返回 0=用缺省）。

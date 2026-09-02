@@ -57,7 +57,10 @@ type Config struct {
 	// APIKeys 多 key（轮询/错误转移调度）；APIKey 为单 key 兼容字段，两者合并去重。
 	APIKeys     []string
 	APIKey      string
-	KeyStrategy string // round_robin（默认）| failover
+	KeyStrategy string // round_robin（默认）| failover | health
+	// Key403Cooldown 401/403 失效冷却时长；0 = 永久禁用（旧行为）。
+	// >0 时到期自动回池重试（订阅/风控恢复后无需人工介入）。
+	Key403Cooldown time.Duration
 	// AllowedModels 暴露白名单（上游模型 ID；空 = 全部暴露）。目录/缓存保存全量，
 	// 仅在 ListModels 返回时过滤——编辑界面始终能拿到全量清单。
 	AllowedModels []string
@@ -112,7 +115,7 @@ func New(cfg Config) (*Vendor, error) {
 	if k := strings.TrimSpace(cfg.APIKey); k != "" {
 		keys = append(keys, k)
 	}
-	v := &Vendor{cfg: cfg, proto: p, pool: newKeyPool(keys, cfg.KeyStrategy)}
+	v := &Vendor{cfg: cfg, proto: p, pool: newKeyPoolCooldown(keys, cfg.KeyStrategy, cfg.Key403Cooldown)}
 	// 预热磁盘缓存：启动首拉失败时 ListModels 也能立即给出上次目录（stale-while-revalidate）。
 	if !cfg.NoModelCache {
 		v.models = v.loadModelsCache()
@@ -186,8 +189,10 @@ func (v *Vendor) probeKeys() {
 		}
 		start := time.Now()
 		reply, err := v.proto.chat(ctx, v, model, key, rawBody)
-		if err == nil && reply != nil && reply.Status == http.StatusNotFound {
-			continue // 该 key 不提供此模型，与健康无关
+		if err == nil && reply != nil && (reply.Status == http.StatusNotFound || reply.Status == http.StatusForbidden) {
+			// 该 key 不提供此探测模型（404）或无权限访问它（403）——均与 key 健康无关，
+			// 不记账，避免订阅差异/权限子集被误判为「key 坏」。
+			continue
 		}
 		ok := err == nil && reply != nil && reply.Status >= 200 && reply.Status < 300
 		v.pool.recordResult(idx, ok, time.Since(start))
@@ -237,6 +242,13 @@ func (v *Vendor) PoolStatus() KeyPoolStatus { return v.pool.status() }
 // ConfiguredKeys 配置内的全部 key 明文（测试端点逐 key 连通验证用）。
 func (v *Vendor) ConfiguredKeys() []string { return v.pool.keysSnapshot() }
 
+// ResetKeys 清除全部 key 的运行态（禁用/冷却/熔断），让 key 池回到全可用。
+// 手动「恢复全部 Key」时调用；不触碰 key 配置与健康分数（保留实证供 health 排序）。
+func (v *Vendor) ResetKeys() { v.pool.reset() }
+
+// CountAuthCooling 当前 401/403 冷却中的 key 数（UI 展示恢复按钮状态用）。
+func (v *Vendor) CountAuthCooling() int { return v.pool.countAuthCooling() }
+
 // ListModels 拉取上游目录并加前缀。失败（含空列表，防上游抖动清空）时回退
 // 内存缓存 → 磁盘缓存；成功则更新两级缓存并写盘（stale-while-revalidate：
 // 进程重启后无需等上游，首个 /v1/models 即含自定义模型）。
@@ -258,18 +270,18 @@ func (v *Vendor) ListModels(ctx context.Context) ([]contract.Model, error) {
 		}
 		tried[idx] = true
 		perKey, err := v.proto.listModels(ctx, v, key)
-		if err != nil {
-			lastErr = err
-			if se, ok := err.(*keyStatusError); ok {
-				switch se.status {
-				case http.StatusUnauthorized, http.StatusForbidden:
-					v.pool.disable(idx)
-				case http.StatusTooManyRequests:
-					v.pool.cool(idx, se.retryAfter)
+			if err != nil {
+				lastErr = err
+				if se, ok := err.(*keyStatusError); ok {
+					switch se.status {
+					case http.StatusUnauthorized, http.StatusForbidden:
+						v.pool.authFail(idx)
+					case http.StatusTooManyRequests:
+						v.pool.cool(idx, se.retryAfter)
+					}
 				}
+				continue // 单 key 失败不阻断并集；全部失败走缓存兜底
 			}
-			continue // 单 key 失败不阻断并集；全部失败走缓存兜底
-		}
 		someOK = true
 		for _, id := range perKey {
 			if id == "" {
@@ -426,7 +438,9 @@ func (v *Vendor) ErrSemantics() contract.ErrRules {
 	}
 }
 
-// Auth 自定义源用配置 key，认证头在协议层构造；入站 key 不透传。
+// Auth 遗留接口：仅返回配置首 key，多 key 时不代表池内调度结果。
+// 全仓库无调用点（出站认证在协议层用 key 池选中的 key 构造，见 withKeys/withKeysStream）；
+// 保留仅因实现 contract.Vendor 接口。勿在鉴权路径复用此方法。
 func (v *Vendor) Auth(*http.Request) string { return "Bearer " + v.cfg.APIKey }
 
 // Health 实现 contract.Vendor。
@@ -524,11 +538,13 @@ func (v *Vendor) withKeys(model string, stickyIdx int, call func(key string) (*c
 	var lastReply *contract.Reply
 	var lastErr error
 	lastIdx := -1
+	attempted := false
 	for {
 		key, idx, ok := v.pool.tryAcquirePreferSticky(tried, v.preferredKeys(model), stickyIdx)
 		if !ok {
 			break
 		}
+		attempted = true
 		tried[idx] = true
 		start := time.Now()
 		reply, err := call(key)
@@ -542,7 +558,7 @@ func (v *Vendor) withKeys(model string, stickyIdx int, call func(key string) (*c
 		}
 		switch {
 		case reply.Status == http.StatusUnauthorized || reply.Status == http.StatusForbidden:
-			v.pool.disable(idx)
+			v.pool.authFail(idx)
 		case reply.Status == http.StatusTooManyRequests:
 			v.pool.cool(idx, parseRetryAfter(reply.Headers.Get("Retry-After")))
 		case reply.Status == http.StatusNotFound && v.hasModel(model):
@@ -554,6 +570,11 @@ func (v *Vendor) withKeys(model string, stickyIdx int, call func(key string) (*c
 			return reply, idx, nil // 请求级错误：换 key 也一样
 		}
 	}
+	if !attempted {
+		// 一个 key 都没试（全池冷却/禁用/熔断中）→ 给明确错误，让 core 层
+		// 透传真实原因，而不是裸 502 无任何信息。
+		return nil, -1, fmt.Errorf("custom %s: 所有 key 均不可用（401/403 冷却或禁用中）", v.cfg.ID)
+	}
 	return lastReply, lastIdx, lastErr
 }
 
@@ -564,11 +585,13 @@ func (v *Vendor) withKeysStream(model string, stickyIdx int, call func(key strin
 	var lastStream *contract.Stream
 	var lastErr error
 	lastIdx := -1
+	attempted := false
 	for {
 		key, idx, ok := v.pool.tryAcquirePreferSticky(tried, v.preferredKeys(model), stickyIdx)
 		if !ok {
 			break
 		}
+		attempted = true
 		tried[idx] = true
 		if len(v.ConfiguredKeys()) > 1 {
 			slog.Info("custom-key: acquire stream attempt",
@@ -599,7 +622,7 @@ func (v *Vendor) withKeysStream(model string, stickyIdx int, call func(key strin
 			"key_idx", idx, "status", stream.Status, "sticky_idx", stickyIdx)
 		switch {
 		case stream.Status == http.StatusUnauthorized || stream.Status == http.StatusForbidden:
-			v.pool.disable(idx)
+			v.pool.authFail(idx)
 		case stream.Status == http.StatusTooManyRequests:
 			v.pool.cool(idx, 0)
 		case stream.Status == http.StatusNotFound && v.hasModel(model):
@@ -608,6 +631,9 @@ func (v *Vendor) withKeysStream(model string, stickyIdx int, call func(key strin
 		default:
 			return stream, idx, nil
 		}
+	}
+	if !attempted {
+		return nil, -1, fmt.Errorf("custom %s: 所有 key 均不可用（401/403 冷却或禁用中）", v.cfg.ID)
 	}
 	return lastStream, lastIdx, lastErr
 }

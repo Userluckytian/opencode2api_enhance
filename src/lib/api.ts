@@ -90,6 +90,8 @@ export type CustomProviderView = {
   api_key_set: boolean
   /** key 调度策略：round_robin 轮询 | failover 错误转移 | health 健康优先（仅作用于本源） */
   key_strategy: CustomKeyStrategy
+  /** 401/403 失效冷却时长（秒）：0=永久禁用；>0 到期自动回池重试 */
+  key_403_cooldown: number
   via_proxy: boolean
   enabled: boolean
   /** 聚合目录中该源模型数（实时，经白名单过滤） */
@@ -104,6 +106,10 @@ export type CustomProviderView = {
   keys_total: number
   keys_available: number
   keys_cooling: number
+  /** 401/403 冷却中（到期自动恢复） */
+  keys_auth_cooling: number
+  /** 连续失败熔断中（阈值后自动重试） */
+  keys_circuit_open: number
   keys_disabled: number
   last_error?: string
 }
@@ -120,6 +126,8 @@ export type CustomProviderInput = {
   /** 单 key 兼容输入 */
   api_key?: string
   key_strategy?: CustomKeyStrategy
+  /** 401/403 失效冷却时长（秒）：0=永久禁用；>0 到期自动回池重试 */
+  key_403_cooldown?: number
   via_proxy?: boolean
   /** 仅「测试并获取模型」生效：走本机系统代理（http.ProxyFromEnvironment），不写入配置 */
   use_local_proxy?: boolean
@@ -655,6 +663,9 @@ export const api = {
   /** 活性探测：真实拉一次上游目录，刷新健康并返回结果 */
   customProvidersProbe: (id: string) =>
     req<CustomProbeResult>('POST', '/custom-providers/probe', { id }),
+  /** 手动恢复该源全部 Key（清除禁用/冷却/熔断运行态，立即回到全可用） */
+  customProvidersResetKeys: (id: string) =>
+    req<{ id: string; status: string; keys_total: number; keys_available: number; keys_cooling: number; keys_auth_cooling: number; keys_circuit_open: number; keys_disabled: number }>('POST', '/custom-providers/reset-keys', { id }),
   /** 清空全部自定义源（含目录磁盘缓存）；内建源与其它数据不受影响 */
   customProvidersClear: () =>
     req<{ status: string; cleared: boolean; providers: CustomProviderView[] }>('POST', '/custom-providers/clear'),

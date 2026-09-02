@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"net/url"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -194,6 +195,8 @@ type customProviderView struct {
 	APIKey        string   `json:"api_key"`  // 首 key（旧 UI 兼容）
 	APIKeySet     bool     `json:"api_key_set"`
 	KeyStrategy   string   `json:"key_strategy"` // round_robin | failover
+	// Key403Cooldown 401/403 失效冷却时长（秒）；0 = 永久禁用（旧行为）；>0 到期自动回池重试。
+	Key403Cooldown int     `json:"key_403_cooldown"`
 	ViaProxy      bool     `json:"via_proxy"`
 	Enabled       bool     `json:"enabled"`
 	Models        int      `json:"models"`                 // 聚合目录中该源模型数（实时，经白名单过滤）
@@ -203,7 +206,9 @@ type customProviderView struct {
 	// key 健康计数（运行时快照；无活实例时全 0）
 	KeysTotal     int    `json:"keys_total"`
 	KeysAvailable int    `json:"keys_available"`
-	KeysCooling   int    `json:"keys_cooling"`
+	KeysCooling   int    `json:"keys_cooling"`   // 429/限流冷却中
+	KeysAuthCooling int  `json:"keys_auth_cooling"` // 401/403 冷却中（到期自动恢复）
+	KeysCircuitOpen int  `json:"keys_circuit_open"` // 连续失败熔断中
 	KeysDisabled  int    `json:"keys_disabled"`
 	LastError     string `json:"last_error,omitempty"`
 }
@@ -217,6 +222,8 @@ type customProviderInput struct {
 	APIKey        string   `json:"api_key"`        // 单 key 兼容输入
 	APIKeys       []string `json:"api_keys"`       // 多 key（优先于 api_key）
 	KeyStrategy   string   `json:"key_strategy"`   // round_robin（默认）| failover | health
+	// Key403Cooldown 401/403 失效冷却时长（秒）；0 = 永久禁用（旧行为）；>0 到期自动回池重试。
+	Key403Cooldown int     `json:"key_403_cooldown"`
 	AllowedModels []string `json:"allowed_models"` // 暴露白名单（空 = 全部暴露）
 	ViaProxy      bool     `json:"via_proxy"`
 	// UseLocalProxy 测试专用：测试拉取模型走本机系统代理（http.ProxyFromEnvironment），
@@ -303,6 +310,10 @@ func customProviderViews() []customProviderView {
 		if strategy != custom.StrategyFailover && strategy != custom.StrategyHealth {
 			strategy = custom.StrategyRoundRobin
 		}
+		key403 := intParamAny(p[custom.ParamKey403Cooldown])
+		if key403 < 0 {
+			key403 = 0
+		}
 		kh := vendorKeyHealth(pc.ID)
 		allowed, _ := p[custom.ParamAllowedModels].([]any)
 		allowedIDs := make([]string, 0, len(allowed))
@@ -314,12 +325,13 @@ func customProviderViews() []customProviderView {
 		views = append(views, customProviderView{
 			ID: pc.ID, Name: pc.Name, Protocol: proto, BaseURL: baseURL,
 			APIKeys: keys, APIKey: firstKey, APIKeySet: len(keys) > 0,
-			KeyStrategy: strategy,
+			KeyStrategy: strategy, Key403Cooldown: key403,
 			ViaProxy:    via, Enabled: enabled,
 			Models: counts[pc.ID], LastError: vendorLastErr(pc.ID),
 			ModelsAll: vendorFullModels(pc.ID), AllowedModels: allowedIDs,
 			LastSuccess: vendorLastSuccess(pc.ID),
-			KeysTotal:   kh.Total, KeysAvailable: kh.Available, KeysCooling: kh.Cooling, KeysDisabled: kh.Disabled,
+			KeysTotal:   kh.Total, KeysAvailable: kh.Available, KeysCooling: kh.Cooling,
+			KeysAuthCooling: kh.AuthCooling, KeysCircuitOpen: kh.CircuitOpen, KeysDisabled: kh.Disabled,
 		})
 	}
 	return views
@@ -464,11 +476,16 @@ func applyCustomProvidersSave(m *manager.Manager, inputs []customProviderInput) 
 			}
 		}
 		enabled := in.Enabled == nil || *in.Enabled
+		key403 := in.Key403Cooldown
+		if key403 < 0 {
+			key403 = 0
+		}
 		params := map[string]any{
-			custom.ParamBaseURL:     in.BaseURL,
-			custom.ParamProtocol:    in.Protocol,
-			custom.ParamKeyStrategy: strategy,
-			custom.ParamViaProxy:    in.ViaProxy,
+			custom.ParamBaseURL:        in.BaseURL,
+			custom.ParamProtocol:       in.Protocol,
+			custom.ParamKeyStrategy:    strategy,
+			custom.ParamViaProxy:       in.ViaProxy,
+			custom.ParamKey403Cooldown: key403,
 		}
 		if len(keys) > 0 {
 			params[custom.ParamAPIKeys] = keys
@@ -688,6 +705,28 @@ func customAllowedListFromParams(p map[string]any) []string {
 	return out
 }
 
+// intParamAny 读 params 里的整数参数：config.json 经 JSON 反序列化整数为 float64，
+// 内存直传可能是 int/int64/float64/json.Number，逐类型兼容；非法/缺失返回 0。
+func intParamAny(v any) int {
+	switch n := v.(type) {
+	case int:
+		return n
+	case int64:
+		return int(n)
+	case float64:
+		return int(n)
+	case json.Number:
+		if i, err := n.Int64(); err == nil {
+			return int(i)
+		}
+	case string:
+		if i, err := strconv.Atoi(n); err == nil {
+			return i
+		}
+	}
+	return 0
+}
+
 // inputKeyList 取输入里的 key 列表（api_keys 优先，兼容单 api_key；去空去重）。
 func inputKeyList(in customProviderInput) []string {
 	var out []string
@@ -782,6 +821,48 @@ func customProvidersProbeHandler() http.HandlerFunc {
 		writeAdminJSON(w, map[string]any{
 			"id": req.ID, "ok": ok, "latency_ms": latency,
 			"error": errStr, "last_success": cv.Health().LastSuccess,
+		})
+	}
+}
+
+// customProvidersResetKeysHandler POST：手动恢复全部 Key {"id":"src1"}——
+// 清除该源全部 key 的运行态（禁用/限流冷却/403 冷却/熔断），让 key 池立即回到全可用。
+// 适用于「403 冷却中不想等」或「key_403_cooldown=0 被永久禁用想立即解除」的场景。
+func customProvidersResetKeysHandler() http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		var req struct {
+			ID string `json:"id"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.ID == "" {
+			writeAdminErr(w, http.StatusBadRequest, "请求体需为 {\"id\":\"源ID\"}")
+			return
+		}
+		if globalAgg == nil {
+			writeAdminErr(w, http.StatusServiceUnavailable, "聚合器未装配")
+			return
+		}
+		var cv *custom.Vendor
+		for _, v := range globalAgg.Vendors() {
+			if c, ok := v.(*custom.Vendor); ok && c.ID() == req.ID {
+				cv = c
+				break
+			}
+		}
+		if cv == nil {
+			writeAdminErr(w, http.StatusNotFound, "源 "+req.ID+" 未启用或未装配（停用状态请先启用）")
+			return
+		}
+		cv.ResetKeys()
+		st := cv.PoolStatus()
+		writeAdminJSON(w, map[string]any{
+			"id": req.ID, "status": "ok",
+			"keys_total": st.Total, "keys_available": st.Available,
+			"keys_cooling": st.Cooling, "keys_auth_cooling": st.AuthCooling,
+			"keys_circuit_open": st.CircuitOpen, "keys_disabled": st.Disabled,
 		})
 	}
 }

@@ -294,6 +294,7 @@ func registerHTTPRoutes(mux *http.ServeMux, managerInst *manager.Manager, plugin
 	mux.HandleFunc("/api/admin/custom-providers/save", loggingMiddleware(requireAuth(customProvidersSaveHandler(managerInst))))
 	mux.HandleFunc("/api/admin/custom-providers/test", loggingMiddleware(requireAuth(customProvidersTestHandler())))
 	mux.HandleFunc("/api/admin/custom-providers/probe", loggingMiddleware(requireAuth(customProvidersProbeHandler())))
+	mux.HandleFunc("/api/admin/custom-providers/reset-keys", loggingMiddleware(requireAuth(customProvidersResetKeysHandler())))
 	mux.HandleFunc("/api/admin/custom-providers/clear", loggingMiddleware(requireAuth(customProvidersClearHandler(managerInst))))
 	// R1 插件式供应商（第七页「自定义模型」插件 tab）：列表 / 配置保存 / 启停 / 删除 / 手动重扫。
 	if pluginMgr != nil {

@@ -3,6 +3,10 @@
 package custom
 
 import (
+	"encoding/json"
+	"strconv"
+	"time"
+
 	"github.com/6Kmfi6HP/opencode2api/core/contract"
 	"github.com/6Kmfi6HP/opencode2api/vendors/opencode"
 )
@@ -16,20 +20,23 @@ const (
 	ParamAllowedModels = "allowed_models" // 暴露白名单（上游模型 ID；空 = 全部暴露）
 	ParamProtocol      = "protocol"
 	ParamViaProxy      = "via_proxy"
+	// ParamKey403Cooldown 401/403 失效冷却时长（秒）：>0 到期自动回池重试；0 = 永久禁用（旧行为）。
+	ParamKey403Cooldown = "key_403_cooldown"
 )
 
 func init() {
 	contract.Register("custom", func(spec contract.ProviderSpec) (contract.Vendor, error) {
 		cfg := Config{
-			ID:            spec.ID,
-			Name:          spec.Name,
-			BaseURL:       strParam(spec.Params, ParamBaseURL),
-			APIKey:        strParam(spec.Params, ParamAPIKey),
-			APIKeys:       strSliceParam(spec.Params, ParamAPIKeys),
-			KeyStrategy:   strParam(spec.Params, ParamKeyStrategy),
-			AllowedModels: strSliceParam(spec.Params, ParamAllowedModels),
-			Protocol:      strParam(spec.Params, ParamProtocol),
-			ViaProxy:      boolParam(spec.Params, ParamViaProxy),
+			ID:              spec.ID,
+			Name:            spec.Name,
+			BaseURL:         strParam(spec.Params, ParamBaseURL),
+			APIKey:          strParam(spec.Params, ParamAPIKey),
+			APIKeys:         strSliceParam(spec.Params, ParamAPIKeys),
+			KeyStrategy:     strParam(spec.Params, ParamKeyStrategy),
+			AllowedModels:   strSliceParam(spec.Params, ParamAllowedModels),
+			Protocol:        strParam(spec.Params, ParamProtocol),
+			ViaProxy:        boolParam(spec.Params, ParamViaProxy),
+			Key403Cooldown:  time.Duration(intParam(spec.Params, ParamKey403Cooldown, 0)) * time.Second,
 		}
 		if tr, ok := spec.Params[opencode.ParamTransport].(contract.Transport); ok && tr != nil {
 			cfg.Transport = tr
@@ -46,6 +53,28 @@ func strParam(p map[string]any, key string) string {
 func boolParam(p map[string]any, key string) bool {
 	b, _ := p[key].(bool)
 	return b
+}
+
+// intParam 读整数参数（兼容 JSON 反序列化的 float64/json.Number 与内存直传的 int），
+// 非法/缺失返回 fallback。
+func intParam(p map[string]any, key string, fallback int) int {
+	switch n := p[key].(type) {
+	case int:
+		return n
+	case int64:
+		return int(n)
+	case float64:
+		return int(n)
+	case json.Number:
+		if i, err := n.Int64(); err == nil {
+			return int(i)
+		}
+	case string:
+		if i, err := strconv.Atoi(n); err == nil {
+			return i
+		}
+	}
+	return fallback
 }
 
 // strSliceParam 读字符串数组参数（兼容 JSON 反序列化的 []any 与内存直传的 []string）。
