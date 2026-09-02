@@ -307,7 +307,7 @@ export default function CustomModelsPage({ toast }: { toast: (msg: string, ok?: 
       setForm(null)
       setModelSearch('')
       setTestResult(null)
-      toast(`已保存：模型名前缀 ${input.id}/，立即生效`, true)
+      toast(`已保存：模型名前缀 ${input.id}/，网关约 3 秒内热生效；未生效请重启网关`, true)
     } catch (e) {
       console.error('保存失败', e)
       toast(`保存失败：${String(e)}`, false)
@@ -322,7 +322,7 @@ export default function CustomModelsPage({ toast }: { toast: (msg: string, ok?: 
     try {
       const r = await api.customProvidersSave(providers)
       setList(r.providers ?? [])
-      toast(okMsg, true)
+      toast(`${okMsg}（网关约 3 秒内热生效；未生效请重启网关）`, true)
     } catch (e) {
       console.error('保存失败', e)
       toast(`保存失败：${String(e)}`, false)

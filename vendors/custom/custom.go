@@ -117,7 +117,92 @@ func New(cfg Config) (*Vendor, error) {
 	if !cfg.NoModelCache {
 		v.models = v.loadModelsCache()
 	}
+	v.startHealthProbe()
 	return v, nil
+}
+
+// ---------------------------------------------------------------------------
+// 健康优先（health 策略）辅助：流中途失败回传 + 后台探测（对齐 model-gateway）
+// ---------------------------------------------------------------------------
+
+// keyFailStream 包装成功流：网关判定流中途失败（限流/断流/EOF 无 [DONE]/超时）时
+// 回调 key 池记一次失败——让 health 策略能感知「2xx 但实际失败」的 key。
+type keyFailStream struct {
+	io.ReadCloser
+	onFail func()
+}
+
+func (s *keyFailStream) Read(p []byte) (int, error) { return s.ReadCloser.Read(p) }
+func (s *keyFailStream) Close() error               { return s.ReadCloser.Close() }
+func (s *keyFailStream) NotifyStreamFailure() {
+	if s.onFail != nil {
+		s.onFail()
+	}
+}
+
+// healthProbeInterval 后台健康探测间隔（对齐 model-gateway 的 300s 轮询）。
+const healthProbeInterval = 5 * time.Minute
+
+// startHealthProbe 后台健康探测：仅 health 策略 + 多 key 时启用。
+// 每 5 分钟对每个可用 key 发一个最小请求（max_tokens=1），主动发现
+// 「没有真实流量也确认不了」的坏 key；真实流量照常实时记账。
+func (v *Vendor) startHealthProbe() {
+	if v.cfg.KeyStrategy != StrategyHealth {
+		return
+	}
+	if len(v.pool.keysSnapshot()) < 2 {
+		return
+	}
+	go func() {
+		ticker := time.NewTicker(healthProbeInterval)
+		defer ticker.Stop()
+		for range ticker.C {
+			v.probeKeys()
+		}
+	}()
+}
+
+// probeKeys 对每个可用 key 发最小探测请求并记账（404=模型子集不同，不计入，避免误伤）。
+func (v *Vendor) probeKeys() {
+	model := v.probeModel()
+	if model == "" {
+		return
+	}
+	rawBody, err := json.Marshal(map[string]any{
+		"model":     model,
+		"messages":  []any{map[string]any{"role": "user", "content": "hi"}},
+		"max_tokens": 1,
+		"stream":     false,
+	})
+	if err != nil {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	for _, idx := range v.pool.availableIdxs() {
+		key := v.pool.keyAt(idx)
+		if key == "" {
+			continue
+		}
+		start := time.Now()
+		reply, err := v.proto.chat(ctx, v, model, key, rawBody)
+		if err == nil && reply != nil && reply.Status == http.StatusNotFound {
+			continue // 该 key 不提供此模型，与健康无关
+		}
+		ok := err == nil && reply != nil && reply.Status >= 200 && reply.Status < 300
+		v.pool.recordResult(idx, ok, time.Since(start))
+	}
+}
+
+// probeModel 探测用的模型：优先白名单首项，其次最近目录首项。
+func (v *Vendor) probeModel() string {
+	if len(v.cfg.AllowedModels) > 0 {
+		return v.cfg.AllowedModels[0]
+	}
+	if len(v.models) > 0 {
+		return v.models[0].ID
+	}
+	return ""
 }
 
 // ---------------------------------------------------------------------------
@@ -502,6 +587,12 @@ func (v *Vendor) withKeysStream(model string, stickyIdx int, call func(key strin
 		if stream.Status >= 200 && stream.Status < 300 {
 			slog.Info("custom-key: acquire stream ok", "vendor", v.cfg.ID, "model", model,
 				"key_idx", idx, "sticky_idx", stickyIdx, "status", stream.Status)
+			// 流中途失败回传 key 池（health 策略用）：限流/断流/EOF 无 [DONE] 也能拉低健康分。
+			if v.cfg.KeyStrategy == StrategyHealth {
+				stream.ReadCloser = &keyFailStream{ReadCloser: stream.ReadCloser, onFail: func() {
+					v.pool.recordResult(idx, false, 0)
+				}}
+			}
 			return stream, idx, nil
 		}
 		slog.Info("custom-key: acquire stream non-2xx, switching", "vendor", v.cfg.ID, "model", model,

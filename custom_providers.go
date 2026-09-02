@@ -216,7 +216,7 @@ type customProviderInput struct {
 	BaseURL       string   `json:"base_url"`
 	APIKey        string   `json:"api_key"`        // 单 key 兼容输入
 	APIKeys       []string `json:"api_keys"`       // 多 key（优先于 api_key）
-	KeyStrategy   string   `json:"key_strategy"`   // round_robin（默认）| failover
+	KeyStrategy   string   `json:"key_strategy"`   // round_robin（默认）| failover | health
 	AllowedModels []string `json:"allowed_models"` // 暴露白名单（空 = 全部暴露）
 	ViaProxy      bool     `json:"via_proxy"`
 	// UseLocalProxy 测试专用：测试拉取模型走本机系统代理（http.ProxyFromEnvironment），
@@ -300,7 +300,7 @@ func customProviderViews() []customProviderView {
 			firstKey = keys[0]
 		}
 		strategy, _ := p[custom.ParamKeyStrategy].(string)
-		if strategy != custom.StrategyFailover {
+		if strategy != custom.StrategyFailover && strategy != custom.StrategyHealth {
 			strategy = custom.StrategyRoundRobin
 		}
 		kh := vendorKeyHealth(pc.ID)

@@ -309,3 +309,27 @@ func (p *keyPool) keysSnapshot() []string {
 	}
 	return out
 }
+
+// availableIdxs 返回当前可用（未禁用、不在冷却期）的 key 下标（后台健康探测用）。
+func (p *keyPool) availableIdxs() []int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	now := p.nowFn()
+	var out []int
+	for i, k := range p.keys {
+		if k.available(now) {
+			out = append(out, i)
+		}
+	}
+	return out
+}
+
+// keyAt 返回下标 idx 的 key 明文（越界返回空串）。
+func (p *keyPool) keyAt(idx int) string {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if idx < 0 || idx >= len(p.keys) {
+		return ""
+	}
+	return p.keys[idx].value
+}

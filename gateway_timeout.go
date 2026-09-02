@@ -911,6 +911,14 @@ func streamWithResume(w http.ResponseWriter, r *http.Request, upstreamBody []byt
 		upResp.Close()
 		<-readDone
 
+		// 流中途失败（限流/断流/EOF 无 [DONE]/超时）回传厂商：自定义供应商的
+		// key 池据此把「2xx 但实际失败」计入健康，health 策略能感知。客户端主动断开不算 key 的错。
+		if interrupted && !clientGone {
+			if nf, ok := upResp.(interface{ NotifyStreamFailure() }); ok {
+				nf.NotifyStreamFailure()
+			}
+		}
+
 		if lastUsage != nil {
 			// token 统计修正（切换场景）：
 			//   - prompt_tokens 取首次（原始输入），后续节点因续写追加了 assistant 上下文，
