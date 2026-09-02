@@ -1,5 +1,20 @@
 # Changelog
 
+## v1.7.4-beta.1（2026-09-02，测试预发布）
+
+> 测试分支 `test/key-health-resume-fix`。验证通过后再合入 main 打正式 `v1.7.4`。
+
+### 🚀 新功能
+
+- **自定义源 key 健康优先策略**：`key_strategy: health`，后台探测 + 流失败计入健康；保存后热生效
+- **key 连续失败熔断**：连续 3 次失败冷却 30s，`round_robin` / `failover` / `health` 各策略通用
+
+### 🐛 修复
+
+- **流续写双回复**：会话级 key 粘性，续写强制复用原 key，不再换 key 导致重复输出
+- **health 策略校验与回显**：保存放行 `round_robin|failover|health`；面板不再把 health 强转成其他策略
+- **usage 内 null 字段**：清洗后兼容严格客户端（Grok serde `u32` 解析）
+
 ## v1.7.3（2026-08-31）
 
 ### 🚀 新功能
