@@ -30,6 +30,12 @@ const (
 // defaultKeyCooldown 429 缺省冷却时长（无 Retry-After 时）。
 const defaultKeyCooldown = 60 * time.Second
 
+// circuitOpenThreshold 连续失败熔断阈值（对齐 model-gateway：连续 3 次失败即熔断）。
+const circuitOpenThreshold = 3
+
+// circuitCooldown 熔断冷却时长：到期自动重试，再次连续失败会重新熔断。
+const circuitCooldown = 30 * time.Second
+
 // 健康分数平滑系数（EWMA）：样本越多，单次波动影响越小。
 const healthAlpha = 0.3
 
@@ -38,14 +44,16 @@ type keyState struct {
 	value        string
 	coolingUntil time.Time
 	disabled     bool // 401/403：key 失效，运行期内禁用
+	consecFails  int  // 连续失败次数（熔断：达阈值进入 circuitUntil 冷却）
+	circuitUntil time.Time
 	samples      int  // 已记录请求次数（health 策略排序用）
 	okRate       float64 // 成功率 EWMA，初始乐观 1.0（无数据视为可用）
 	latEWMA      float64 // 成功请求平均延迟（毫秒）EWMA，仅成功时更新
 }
 
-// available 该 key 当前是否可用（未禁用且不在冷却期）。
+// available 该 key 当前是否可用（未禁用、不在冷却/熔断期）。
 func (k *keyState) available(now time.Time) bool {
-	return !k.disabled && !now.Before(k.coolingUntil)
+	return !k.disabled && !now.Before(k.coolingUntil) && !now.Before(k.circuitUntil)
 }
 
 // KeyPoolStatus key 健康计数（供 UI 展示；状态快照，非用量统计）。
@@ -238,6 +246,16 @@ func (p *keyPool) recordResult(idx int, ok bool, latency time.Duration) {
 		}
 	}
 	k.samples++
+	// 连续失败熔断：成功清零；连续失败达阈值 → 进入熔断冷却（到期自动重试）。
+	// 各策略（round_robin/failover/health）都受益：坏 key 不再被反复选中。
+	if ok {
+		k.consecFails = 0
+	} else {
+		k.consecFails++
+		if k.consecFails >= circuitOpenThreshold {
+			k.circuitUntil = p.nowFn().Add(circuitCooldown)
+		}
+	}
 }
 
 // cool key 进入冷却（429/限流）。
