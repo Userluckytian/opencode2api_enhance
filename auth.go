@@ -134,6 +134,7 @@ func recordAuthFailure(r *http.Request, reason string) {
 		Path:   r.URL.Path,
 		Status: "fail",
 		ErrMsg: "鉴权失败：" + reason,
+		ServingPort: port,
 		Events: []CallEvent{{Type: "auth_failed", Detail: reason, At: time.Now()}},
 	}
 	if rec.ReqID == "" {

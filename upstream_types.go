@@ -34,6 +34,15 @@ type UpstreamAuth struct {
 	PreferredKeyIdx *int
 }
 
+// tierOfAuth maps auth route mode to a call-log tier string.
+// AuthRoutePublic (free/open) -> "free"; otherwise "paid" (matches opencode authT.tier).
+func tierOfAuth(a UpstreamAuth) string {
+	if a.Mode == AuthRoutePublic {
+		return "free"
+	}
+	return "paid"
+}
+
 func extractUpstreamAuth(r *http.Request) UpstreamAuth {
 	auth := r.Header.Get("Authorization")
 	if !strings.HasPrefix(auth, "Bearer ") {

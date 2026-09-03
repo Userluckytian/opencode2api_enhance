@@ -740,8 +740,10 @@ func responsesHandler(w http.ResponseWriter, r *http.Request) {
 		Path:      r.URL.Path,
 		Model:     respReq.Model,
 		Stream:    respReq.Stream,
-		RouteMode: routeMode.Load().(string),
-		Status:    "ok",
+		RouteMode:  routeMode.Load().(string),
+		Tier:       tierOfAuth(auth),
+		ServingPort: port,
+		Status:     "ok",
 	}
 	if callRec.ReqID == "" {
 		callRec.ReqID = "req_" + randomString(12)

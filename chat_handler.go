@@ -49,8 +49,10 @@ func chatCompletionsHandler(w http.ResponseWriter, r *http.Request) {
 		Path:      r.URL.Path,
 		Model:     req.Model,
 		Stream:    req.Stream,
-		RouteMode: routeMode.Load().(string),
-		Status:    "ok",
+		RouteMode:  routeMode.Load().(string),
+		Tier:       tierOfAuth(auth),
+		ServingPort: port,
+		Status:     "ok",
 	}
 	if callRec.ReqID == "" {
 		callRec.ReqID = "req_" + randomString(12)

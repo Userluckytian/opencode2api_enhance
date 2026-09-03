@@ -43,6 +43,12 @@ type CallLogRecord struct {
 	ErrMsg           string         `json:"err_msg,omitempty"`
 	// Source 来源标注："" = 统一网关；否则为实例名（独享实例 call_log.jsonl 聚合）。
 	Source string `json:"source,omitempty"`
+	// Tier request layer: free/paid (same as main package CallRecord).
+	Tier string `json:"tier,omitempty"`
+	// ViaProxy custom source uses node pool proxy.
+	ViaProxy bool `json:"via_proxy,omitempty"`
+	// ServingPort actual ingress port.
+	ServingPort string `json:"serving_port,omitempty"`
 }
 
 // StatusText 状态前缀（前端着色用）。

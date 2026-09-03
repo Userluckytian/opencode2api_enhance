@@ -176,7 +176,7 @@ const LogRow = memo(function LogRow({
       {issue && isExpanded && (
         <div className="border-t border-zinc-100 px-4 py-3 bg-zinc-50/60">
           <div className="text-xs text-zinc-500 mb-2 font-mono break-all">
-            req_id: {rec.req_id} · {rec.path || '/v1/chat/completions'} · stream: {rec.stream ? '是' : '否'} · 路由: {rec.route_mode || '-'}
+            req_id: {rec.req_id} · {rec.path || '/v1/chat/completions'} · stream: {rec.stream ? '是' : '否'} · 路由: {rec.route_mode || '-'} · 层: {rec.tier || '-'} · 直连: {rec.nodes?.[0] === '直连' ? '是' : '否'}{rec.serving_port ? ` · 端口: ${rec.serving_port}` : ''}
             {rec.source && <span className="text-indigo-600"> · 来源: {rec.source}</span>}
             {rec.err_msg && <span className="text-red-600" title={rec.err_msg}> · 错误: {rec.err_msg}</span>}
           </div>

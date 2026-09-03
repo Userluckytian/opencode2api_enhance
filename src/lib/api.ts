@@ -317,6 +317,9 @@ export type CallLogRecord = {
   err_msg?: string
   /** 来源标注：空 = 统一网关；否则为独享实例名（S4 聚合读取） */
   source?: string
+  tier?: "free" | "paid"
+  via_proxy?: boolean
+  serving_port?: string
 }
 
 // ─── 统一网关（实例池） ─────────────────────────────────────────────

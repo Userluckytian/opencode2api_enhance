@@ -50,8 +50,10 @@ func claudeMessagesHandler(w http.ResponseWriter, r *http.Request) {
 		Path:      r.URL.Path,
 		Model:     claudeReq.Model,
 		Stream:    claudeReq.Stream,
-		RouteMode: routeMode.Load().(string),
-		Status:    "ok",
+		RouteMode:  routeMode.Load().(string),
+		Tier:       tierOfAuth(auth),
+		ServingPort: port,
+		Status:     "ok",
 	}
 	if callRec.ReqID == "" {
 		callRec.ReqID = "req_" + randomString(12)

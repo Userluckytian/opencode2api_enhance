@@ -120,6 +120,12 @@ type CallRecord struct {
 	ErrMsg        string      `json:"err_msg,omitempty"`
 	// KeyTail 实际使用的 key 末 4 位（自定义源多 key 场景；定位串对话）。
 	KeyTail string `json:"key_tail,omitempty"`
+	// Tier request layer: free (pool) / paid (direct).
+	Tier string `json:"tier,omitempty"`
+	// ViaProxy custom source uses node pool proxy.
+	ViaProxy bool `json:"via_proxy,omitempty"`
+	// ServingPort actual ingress port of this request.
+	ServingPort string `json:"serving_port,omitempty"`
 }
 
 func CallStatusText(rec CallRecord) string {
