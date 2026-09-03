@@ -122,10 +122,10 @@ type CallRecord struct {
 	KeyTail string `json:"key_tail,omitempty"`
 	// Tier request layer: free (pool) / paid (direct).
 	Tier string `json:"tier,omitempty"`
-	// ViaProxy custom source uses node pool proxy.
-	ViaProxy bool `json:"via_proxy,omitempty"`
 	// ServingPort actual ingress port of this request.
 	ServingPort string `json:"serving_port,omitempty"`
+	// RouteVerdict 路由结论：proxied / direct_by_design / direct_config_missing / direct_unexpected；空 = 旧记录或无法判定。
+	RouteVerdict string `json:"route_verdict,omitempty"`
 }
 
 func CallStatusText(rec CallRecord) string {
@@ -512,6 +512,12 @@ func initCallLog() {
 func recordCall(rec CallRecord) {
 	if !callLogEnabled {
 		return
+	}
+	// 路由结论必须在下方「空节点兜底成『直连』」之前判定：Nodes 一旦被改写成
+	// 「直连」字符串，就再也分不出「本来就没有节点」与「节点名恰好叫直连」。
+	// 调用方已显式给值时不覆盖（留出未来更精确判定的入口）。
+	if rec.RouteVerdict == "" {
+		rec.RouteVerdict = routeVerdict(rec.Nodes, rec.Tier, socksProxyConfigured())
 	}
 	direct := "直连"
 	for i := range rec.Nodes {

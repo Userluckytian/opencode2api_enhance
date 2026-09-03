@@ -101,18 +101,48 @@ const eventClass = (type: string): string => {
   }
 }
 
+/**
+ * 路由判定：后端在调用日志上写入的 route_verdict 字符串枚举（omitempty）。
+ * 前端只做「枚举 → 展现」映射，不再靠 nodes[0] === '直连' 比对中文字面量猜语义，
+ * 也不依赖从未被写入的死字段 via_proxy。
+ * 旧记录不含该键 → routeVerdictTag 返回 null → UI 降级为 '-'（不报错、不上告警色）。
+ */
+type LogRecord = CallLogRecord & { route_verdict?: string }
+
+type RouteVerdictTag = { label: string; color: string }
+
+/** route_verdict 枚举 → 标签文案与配色（沿用本项目小标签风格：bg-*-50/100 + text-*-700） */
+const ROUTE_VERDICT_TAGS: Record<string, RouteVerdictTag> = {
+  // 真实走了代理节点：中性标签，不加告警色
+  proxied: { label: '走代理节点', color: 'bg-zinc-100 text-zinc-600' },
+  // 付费层恒直连，设计如此
+  direct_by_design: { label: '设计直连（付费层）', color: 'bg-green-50 text-green-700' },
+  // 免费层应走代理但 SOCKS 未配置 → 事故，红色告警
+  direct_config_missing: { label: '配置丢失·已回退直连', color: 'bg-red-100 text-red-700' },
+  // 免费层、SOCKS 有配置但节点仍空 → 灰色异常
+  direct_unexpected: { label: '异常直连', color: 'bg-zinc-200 text-zinc-700' },
+}
+
+/** 取路由判定标签；空值 / 缺失 / 未知枚举 → null（调用方降级为 '-'） */
+const routeVerdictTag = (rec: LogRecord): RouteVerdictTag | null => {
+  const v = rec.route_verdict
+  if (!v) return null
+  return ROUTE_VERDICT_TAGS[v] ?? null
+}
+
 /** 单条日志行（memo 化：展开/翻页/筛选切换时只重渲染变化的行） */
 const LogRow = memo(function LogRow({
   rec,
   isExpanded,
   onToggle,
 }: {
-  rec: CallLogRecord
+  rec: LogRecord
   isExpanded: boolean
   onToggle: (id: string) => void
 }) {
   const issue = hasIssue(rec)
   const nodes = rec.nodes ?? []
+  const verdict = routeVerdictTag(rec)
   return (
     <div
       className={clsx(
@@ -141,6 +171,14 @@ const LogRow = memo(function LogRow({
         {isRateLimited(rec) && (
           <span className="shrink-0 text-[11px] text-zinc-50 bg-zinc-800 rounded-md px-2 py-0.5">
             额度用尽
+          </span>
+        )}
+        {rec.route_verdict === 'direct_config_missing' && verdict && (
+          <span
+            className="shrink-0 text-[11px] rounded-md px-2 py-0.5 bg-red-100 text-red-700"
+            title="免费层本应走代理节点，但 SOCKS 未配置，本次已回退直连"
+          >
+            {verdict.label}
           </span>
         )}
         {issue && (
@@ -176,7 +214,15 @@ const LogRow = memo(function LogRow({
       {issue && isExpanded && (
         <div className="border-t border-zinc-100 px-4 py-3 bg-zinc-50/60">
           <div className="text-xs text-zinc-500 mb-2 font-mono break-all">
-            req_id: {rec.req_id} · {rec.path || '/v1/chat/completions'} · stream: {rec.stream ? '是' : '否'} · 路由: {rec.route_mode || '-'} · 层: {rec.tier || '-'} · 直连: {rec.nodes?.[0] === '直连' ? '是' : '否'}{rec.serving_port ? ` · 端口: ${rec.serving_port}` : ''}
+            req_id: {rec.req_id} · {rec.path || '/v1/chat/completions'} · stream: {rec.stream ? '是' : '否'} · 路由: {rec.route_mode || '-'} · 层: {rec.tier || '-'} · 路由判定:{' '}
+            {verdict ? (
+              <span className={clsx('text-[11px] px-1.5 py-0.5 rounded font-sans align-middle', verdict.color)}>
+                {verdict.label}
+              </span>
+            ) : (
+              '-'
+            )}
+            {rec.serving_port ? ` · 端口: ${rec.serving_port}` : ''}
             {rec.source && <span className="text-indigo-600"> · 来源: {rec.source}</span>}
             {rec.err_msg && <span className="text-red-600" title={rec.err_msg}> · 错误: {rec.err_msg}</span>}
           </div>
@@ -217,7 +263,7 @@ export default function LogsPage({
 }: {
   toast: (msg: string, ok?: boolean) => void
 }) {
-  const [logs, setLogs] = useState<CallLogRecord[]>([])
+  const [logs, setLogs] = useState<LogRecord[]>([])
   const [error, setError] = useState<string | null>(null)
   const [refreshing, setRefreshing] = useState(false)
   // P2 audit: 清空日志忙态（spinner + 禁用）
@@ -551,6 +597,30 @@ type NodeStat = {
   issueCount: number
 }
 
+/** 层分组键：free / paid / unknown（旧记录 tier 为空，单列一组，不静默并入 free 或 paid） */
+type TierKey = 'free' | 'paid' | 'unknown'
+
+type TierStat = {
+  tier: TierKey
+  requests: number
+  /** 最终失败（复用本页失败判定：status !== 'ok'） */
+  failed: number
+  /** 成功但中途有异常/切换事件（复用 hasIssue） */
+  issueCount: number
+  totalMs: number
+  /** route_verdict === 'direct_config_missing' 的次数（配置丢失回退直连） */
+  configMissing: number
+}
+
+const TIER_LABELS: Record<TierKey, string> = {
+  free: 'free · 免费层（通常走代理池）',
+  paid: 'paid · 付费层（恒直连）',
+  unknown: '未知（旧记录无 tier）',
+}
+
+/** tier 归一化：只有 'free' / 'paid' 有效，其余（空/缺失/未知值）归入 unknown */
+const tierKey = (t?: string): TierKey => (t === 'free' ? 'free' : t === 'paid' ? 'paid' : 'unknown')
+
 const fmtPct = (n: number) => `${(n * 100).toFixed(0)}%`
 
 /** 时段分析视图：按小时聚合请求数/平均耗时/失败率/异常次数（纯 CSS 条形图） */
@@ -639,7 +709,27 @@ function HourAnalysisView({ logs }: { logs: CallLogRecord[] }) {
 }
 
 /** 节点分析视图：按节点聚合请求数/成功率/平均耗时/异常次数（排序表 + 成功率条） */
-function NodeAnalysisView({ logs }: { logs: CallLogRecord[] }) {
+function NodeAnalysisView({ logs }: { logs: LogRecord[] }) {
+  // 按 tier 分组统计（free / paid / 未知）：请求数、失败数、异常切换、平均耗时、配置丢失回退次数
+  const tiers = useMemo(() => {
+    const order: TierKey[] = ['free', 'paid', 'unknown']
+    const m = new Map<TierKey, TierStat>(
+      order.map((k) => [
+        k,
+        { tier: k, requests: 0, failed: 0, issueCount: 0, totalMs: 0, configMissing: 0 },
+      ]),
+    )
+    for (const l of logs) {
+      const s = m.get(tierKey(l.tier))!
+      s.requests++
+      if (l.status !== 'ok') s.failed++
+      else if (hasIssue(l)) s.issueCount++
+      s.totalMs += l.duration_ms ?? 0
+      if (l.route_verdict === 'direct_config_missing') s.configMissing++
+    }
+    return order.map((k) => m.get(k)!).filter((s) => s.requests > 0)
+  }, [logs])
+
   const nodes = useMemo(() => {
     const m = new Map<string, NodeStat>()
     for (const l of logs) {
@@ -659,7 +749,55 @@ function NodeAnalysisView({ logs }: { logs: CallLogRecord[] }) {
   }, [logs])
 
   return (
-    <div className="bg-white rounded-2xl border border-zinc-200 p-5">
+    <div className="space-y-4">
+      {/* 按层分组统计：free / paid / 未知（空 tier 不并入任何有效层，避免统计说谎） */}
+      <div className="bg-white rounded-2xl border border-zinc-200 p-5">
+        <div className="text-[14px] font-semibold text-zinc-900 mb-1">按层分组</div>
+        <div className="text-[12px] text-zinc-400 mb-4">
+          按 tier 分组：免费层通常走代理池，付费层恒直连；旧记录无 tier 字段，单列「未知」组
+        </div>
+        {tiers.length === 0 ? (
+          <div className="py-8 text-center text-zinc-400 text-sm">暂无日志数据</div>
+        ) : (
+          <table className="w-full text-[13px]">
+            <thead>
+              <tr className="text-left text-[12px] text-zinc-500 border-b border-zinc-100">
+                <th className="py-2 pr-3 font-medium">层</th>
+                <th className="py-2 pr-3 font-medium text-right">请求数</th>
+                <th className="py-2 pr-3 font-medium text-right">失败数</th>
+                <th className="py-2 pr-3 font-medium text-right">失败率</th>
+                <th className="py-2 pr-3 font-medium text-right">异常/切换</th>
+                <th className="py-2 pr-3 font-medium text-right">平均耗时</th>
+                <th className="py-2 font-medium text-right">配置丢失回退</th>
+              </tr>
+            </thead>
+            <tbody>
+              {tiers.map((t) => (
+                <tr key={t.tier} className="border-b border-zinc-50">
+                  <td className="py-2 pr-3 text-zinc-800">{TIER_LABELS[t.tier]}</td>
+                  <td className="py-2 pr-3 text-right tabular-nums text-zinc-600">{t.requests}</td>
+                  <td className={clsx('py-2 pr-3 text-right tabular-nums', t.failed > 0 ? 'text-red-600' : 'text-zinc-600')}>
+                    {t.failed}
+                  </td>
+                  <td className="py-2 pr-3 text-right tabular-nums text-zinc-600">
+                    {fmtPct(t.requests > 0 ? t.failed / t.requests : 0)}
+                  </td>
+                  <td className="py-2 pr-3 text-right tabular-nums text-zinc-600">{t.issueCount}</td>
+                  <td className="py-2 pr-3 text-right tabular-nums text-zinc-600">
+                    {fmtDur(t.requests > 0 ? Math.round(t.totalMs / t.requests) : 0)}
+                  </td>
+                  <td className={clsx('py-2 text-right tabular-nums', t.configMissing > 0 ? 'text-red-600' : 'text-zinc-600')}>
+                    {t.configMissing}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
+      </div>
+
+      {/* 节点维度（原有表格） */}
+      <div className="bg-white rounded-2xl border border-zinc-200 p-5">
       <div className="text-[14px] font-semibold text-zinc-900 mb-1">节点分析</div>
       <div className="text-[12px] text-zinc-400 mb-4">
         按最终出口节点聚合，评估各节点请求量、成功率与稳定性（数据来自保留期内的调用日志）
@@ -703,6 +841,7 @@ function NodeAnalysisView({ logs }: { logs: CallLogRecord[] }) {
           </tbody>
         </table>
       )}
+      </div>
     </div>
   )
 }

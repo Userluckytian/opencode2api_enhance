@@ -55,7 +55,7 @@
 | 阶段 | 名称 | 主要交付 | 依赖 | 来源 |
 |------|------|---------|------|------|
 | **0** | 仓库卫生与构建可观测 | 统一 fetch refspec；启动打印分支/commit/版本 | 无 | 维护者 A |
-| **1** | 路由决策可解释 | `CallRecord` 补 `tier`/`via_proxy`/`serving_port`；日志页区分直连语义 | 无 | 同事 B（字段部分）|
+| **1** | 路由决策可解释 | `CallRecord` 补 `tier`/`route_verdict`/`serving_port`；日志页区分直连语义 | 无 | 同事 B（字段部分）|
 | **2** | 统一归因日志 + 聚合读取 | slog 加 `role/node/tier/provider/port/trace_id`；`/api/logs` 聚合端点 | 阶段 1 字段 | 同事 F |
 | **3** | 分布式 Trace ID | 复用 `req_id` 跨进程透传（env+header），自研进程链路打通 | 阶段 2 的 `trace_id` 字段 | 同事 A |
 | **4** | 诊断端点 + doctor | `GET /api/diag` + `opencode2api doctor` 体检报告 | 阶段 1、2 | 同事 C |
@@ -145,29 +145,38 @@
 
 **开发任务**
 1. **在 `CallRecord`（`gateway_timeout.go:107`）与 `CallLogRecord`（`core/manager/calllog.go:30`）两个结构体各增加三个字段**（带 `omitempty`），且二者字段须保持一致。  （✅ 已完成，commit `9f52ff1`）
-2. `recordCall` 调用处补充 tier/via_proxy/serving_port 取值逻辑（注意 `CallRecord` 已有 `RouteMode`，勿重复）。  （✅ 已完成：`tierOfAuth()` helper + 三 handler 填 `Tier`/`ServingPort` + `auth.go` 填 `ServingPort`）
-3. 前端渲染三类标签与颜色；节点分析视图按 `tier` 分组统计。  （⏳ **部分完成**：已加 meta 行「层/直连/端口」；**三类标签 + 节点分析按 tier 分组尚未实现**）
+2. `recordCall` 调用处补充 tier/serving_port 取值逻辑（注意 `CallRecord` 已有 `RouteMode`，勿重复）。  （✅ 已完成：`tierOfAuth()` helper + 三 handler 填 `Tier`/`ServingPort` + `auth.go` 填 `ServingPort`）
+3. 前端渲染三类标签与颜色；节点分析视图按 `tier` 分组统计。  （✅ 已完成 2026-09-03：`LogsPage.tsx` 按 `route_verdict` 枚举映射四类标签；其中 `direct_config_missing` 的红色告警徒章上提到折叠行头（因成功记录在本页不可展开，仅放展开区会永远看不见）；新增「按层分组」表统计 free/paid/未知 的请求数·失败数·失败率·异常切换·平均耗时·配置丢失回退次数）
 4. **保持 `call_log.jsonl` 向后兼容**（仅新增字段，旧记录缺字段时前端降级处理）。  （✅ 字段 `omitempty`，前端 `rec.tier || '-'`/可选链降级）
-5. `recordCall` 时额外记录「该进程 socks 代理是否配置」（`active_socks5`/`socks5_proxies` 是否非空），供前端可靠判定"配置丢失"（比单纯看 `route_mode` 更可靠）。  （⏳ 未实现）
+5. `recordCall` 时额外记录「该进程 socks 代理是否配置」（`active_socks5`/`socks5_proxies` 是否非空），供前端可靠判定"配置丢失"（比单纯看 `route_mode` 更可靠）。  （✅ 已完成 2026-09-03：新增 `socks_state.go` 的 `socksProxyConfigured()`，在 `socks5Mu.RLock()` 下仅读 `active_socks5` 与 `socks5_proxies`，**刻意不读 `route_mode`**——它由 `socks.go:218` init 写入默认 `smart` 恒非空，用它判会永远误判为「已配置」）
+6. **新增 `route_verdict` 字符串枚举字段**（`proxied` / `direct_by_design` / `direct_config_missing` / `direct_unexpected`，空 = 旧记录或无法判定），两个镜像结构体各加一份；判定在 `recordCall` 中、**空节点兜底成「直连」字符串之前**完成（一旦 `Nodes` 被改写就再也分不清「本来没有节点」与「节点名恰好叫直连」）。判定本体是 `socks_state.go` 的纯函数 `routeVerdict(nodes, tier, socksConfigured)`，无锁无全局状态、可单测。**用字符串枚举而非 bool，正是 `via_proxy` 的教训。**  （✅ 已完成 2026-09-03）
+7. **新增字段一致性回归测试** `calllog_fields_test.go`：反射比对 `CallRecord` 与 `manager.CallLogRecord` 的 json tag 集合，不一致即 fail，错误信息分列「仅存在于写入侧」与「仅存在于读取侧」；读取侧独有的 `source` 用显式白名单承载并附理由。  （✅ 已完成 2026-09-03，且**首次运行即拓到存量缺陷**，见下方备注）
 
 **测试任务**
 - 用付费模型（如付费 opencode key / `ViaProxy=false` 自定义源）发请求 → 日志 `tier=paid` 且显示「设计直连」标签。  （🔶 付费层直连已能体现；标签文案为 meta「直连:是」）
 - 用免费模型且 socks 三键齐全 → 日志显示具体节点。
-- 用免费模型但**故意移除** socks 三键（`active_socks5`/`socks5_proxies`/`route_mode`）→ 日志标记「配置丢失·已回退直连」且面板标红。 （⏳ 未实现）
+- 用免费模型但**故意移除** socks 三键（`active_socks5`/`socks5_proxies`/`route_mode`）→ 日志标记「配置丢失·已回退直连」且面板标红。 （🔶 判定逻辑已实现并由 `TestRouteVerdictTable`/`TestSocksProxyConfigured` 单测覆盖；**真机端到端未验证**——本轮禁止启动服务以避免与本机生产实例抢端口，留待联调）
 - 旧 `call_log.jsonl`（无新字段）导入后前端不报错。  （✅ 字段带 omitempty，可选链降级）
 
 **审查检查项**
 - 新字段不影响现有 `Nodes`/`Events` 的语义与渲染。  （✅）
-- 错误/超时路径（非 2xx、`upstream_error`、`capacity`）也正确填充 tier/via_proxy。  （✅ tier 用 `tierOfAuth(auth)`，错误路径同 callRec）
+- 错误/超时路径（非 2xx、`upstream_error`、`capacity`）也正确填充 tier/route_verdict。  （✅ 2026-09-03 复核：tier 用 `tierOfAuth(auth)`，错误路径同 callRec；`route_verdict` 在 `recordCall` 统一判定，错误路径同样覆盖）
+  - **⚠️ 历史勘误**：本项原写「也正确填充 tier/via_proxy」并标 ✅，该 ✅ **为误标** —— `via_proxy` 自始至终零写入点（`docs/issue-log/2026-09-03.md:63` 已承认「仅作预留字段」，但本正文勾选未同步）。叠加 `bool` + `omitempty` 会使 `false` 被省略、前端恒收 `undefined`。该字段已于 2026-09-03 从 `CallRecord`、`CallLogRecord`、`src/lib/api.ts` 三处删除，由 `route_verdict` 取代。
 - 无新外部依赖。  （✅）
 
 **验证标准**
-- [ ] 上述三个场景标签均正确 → pass，否则 fail。  （**未验证通过**：三字段/付费层/兼容已合入；「配置丢失·免费层」判定未实现 → 按部门顺延）
+- [x] 上述三个场景标签均正确 → pass，否则 fail。  （✅ 2026-09-03 已通过：四类枚举判定由 `TestRouteVerdictTable` 8 个子用例逐条覆盖（含 tier 为空 / 未知值留空两例）；`TestSocksProxyConfigured` 验证只看两键不看 `route_mode`；前端四类标签 + 空值降级为 `-` 经 `npm run build` 类型校验）
 - [x] 旧日志文件兼容 → pass，否则 fail。  （✅ 已通过：`TestRecordCallEndToEnd` 与前端可选链降级验证）
 
 **失败顺延**：若「配置丢失自动标红」的判定在复杂部署形态（如本就未配代理的本地实例 vs 实例池应配代理却丢失）下仍有歧义，将该判定细化项顺延阶段 2 开头，基础三字段与付费层标签先合入。
 
 > **本阶段备注（2026-09-03）**：基础三字段 + `tierOfAuth` + 三 handler 填 `Tier`/`ServingPort` + `auth.go` 填 `ServingPort` + 前端 meta 行「层/直连/端口」已合入（commit `9f52ff1`，`go build`/`go vet`/calllog 测试/`npm run build` 全绿）。「配置丢失自动标红」判定（socks 三键判空 + 前端三类标签 + `recordCall` 记录 socks 配置 + 节点分析按 tier 分组）**尚未实现**，按 §5 阶段 1「失败顺延」条款顺延至阶段 2 开头优先处理。
+
+> **阶段 1 收尾（2026-09-03 第二轮，AI 编排并行子代理执行）**：上轮顺延项已全部补齐并合入 —— 删除死字段 `via_proxy`（三处：`CallRecord` / `CallLogRecord` / `src/lib/api.ts`）；新增字符串枚举 `route_verdict` 与 `socks_state.go` 判定；前端四类标签 + 「按层分组」统计；新增字段一致性回归测试。**顺延项已清零，阶段 1 完成判定不再依赖顺延。**
+>
+> **本轮新发现的存量缺陷（由新增的一致性测试首次运行即拓到）**：`key_tail` 只存在于写入侧 `CallRecord`（`gateway_timeout.go:121`），读取侧 `CallLogRecord` 缺失，即使写入也会在聚合读取时被静默丢弃。更严重的是**写入侧也零赋值点**：`docs/issue-log/2026-08-31.md:100` 与「阶段——key/并发/代理」计划声明「`CallRecord` 增加 `KeyTail` 字段（key 末 4 位），便于定位串对话」并已标完成，实际只加了结构体字段、从未接线——**与 `via_proxy` 同病**。本轮已补齐读取侧字段使镜像一致（`omitempty` 保证写入侧落地前 UI 不出现幻影数据），**写入侧接线列为独立待办，本阶段不隐式扩大范围**，见 `docs/issue-log/2026-09-03.md`。
+>
+> **验证证据（2026-09-03，分包执行）**：`go build ./...` exit 0；`go vet ./...` exit 0；`go test -count=1 .` **ok 55.886s**；`go test -count=1 ./core/...` ok（`core/manager` 34.7s、`pluginprovider` 51.3s）；`go test -count=1 ./vendors/...` ok（5 包）；`npm run build` exit 0（`tsc -b` 无报错）。**环境约束记录**：`go test ./...` 单次执行必然超过工具 120s 上限（三大包串行累加 ≈142s），本仓库须**分包跑**，此为工具限制而非测试失败；后续 CI 应直接采用分包矩阵。
 
 ---
 
@@ -386,7 +395,8 @@
 | 术语 | 含义 |
 |------|------|
 | **tier** | 请求层级：`TierFree`（免费层，通常走代理池）/ `TierPaid`（付费层，恒直连）。取值机制因厂商而异：opencode 对话请求 `authT.tier()`（`vendors/opencode/chat.go:46-50`），其元数据拉取硬编码 `TierFree`（`vendors/opencode/opencode.go:170/195`）；custom `tier()`（`vendors/custom/custom.go`，**行号随分支变**：main ~`:129` / test ~`:220`，以 `grep` 为准）；remote 硬编码 `TierPaid`（`vendors/remote/remote.go:253`，不走 `tier()`）。 |
-| **via_proxy** | 自定义源是否走节点池代理（`ViaProxy=true`→TierFree）。默认 false→直连。 |
+| **via_proxy** | **（自定义源配置项，仍有效）** 自定义源是否走节点池代理（`ViaProxy=true`→TierFree）。默认 false→直连。见 `docs/CONFIGURATION.md` / `docs/ROUTING.md`。**注意：与调用日志无关** —— 调用日志中的同名字段曾为预留死字段（零写入点），已于 2026-09-03 删除，两者勿混用。 |
+| **route_verdict** | 调用日志的路由结论枚举，由后端 `recordCall` 判定后落盘：`proxied`（真实走了代理节点）/ `direct_by_design`（付费层恒直连，正常）/ `direct_config_missing`（免费层应走代理但 SOCKS 未配置已回退直连，**事故**）/ `direct_unexpected`（免费层、SOCKS 有配置但节点仍空）；空 = 旧记录或无法判定。前端只做枚举→标签+颜色映射，**不得用 `nodes[0]` 字符串比对重算**。 |
 | **serving_port** | 本次请求实际进入的端口（实例端口/统一网关/管理端口）。 |
 | **SOCKS 三键** | `active_socks5`（实例级出站）/ `socks5_proxies`（网关级聚合）/ `route_mode`（路由策略）。免费层是否真走代理池，**取决于 `active_socks5`/`socks5_proxies` 是否为空**，与 `route_mode` 字符串无直接等价关系。`route_mode` 默认 `"smart"`、允许 `{smart, failover, round_robin}`（`config.go:116`、`admin_ops.go:768`、`socks.go:218`）。 |
 | **trace_id** | 跨进程请求标识，复用现有 `req_id`（`logging.go`）扩展而来。 |

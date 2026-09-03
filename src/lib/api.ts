@@ -301,6 +301,17 @@ export type CallLogEvent = {
   at?: string
 }
 
+/**
+ * 路由结论枚举——由后端 recordCall 判定并写入，前端只做「枚举 → 标签/颜色」映射，
+ * 勿在前端用 nodes[0] 等字符串比对重算（旧实现的脆弱点）。
+ * 空 / 缺失 = 旧记录或无法判定，必须降级展现，不得当作告警。
+ */
+export type RouteVerdict =
+  | "proxied"
+  | "direct_by_design"
+  | "direct_config_missing"
+  | "direct_unexpected"
+
 export type CallLogRecord = {
   req_id: string
   ts: string
@@ -318,8 +329,10 @@ export type CallLogRecord = {
   /** 来源标注：空 = 统一网关；否则为独享实例名（S4 聚合读取） */
   source?: string
   tier?: "free" | "paid"
-  via_proxy?: boolean
+  route_verdict?: RouteVerdict
   serving_port?: string
+  /** 实际使用的 key 末 4 位；写入侧尚未接线，当前恒为空 */
+  key_tail?: string
 }
 
 // ─── 统一网关（实例池） ─────────────────────────────────────────────

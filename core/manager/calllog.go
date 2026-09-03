@@ -45,10 +45,14 @@ type CallLogRecord struct {
 	Source string `json:"source,omitempty"`
 	// Tier request layer: free/paid (same as main package CallRecord).
 	Tier string `json:"tier,omitempty"`
-	// ViaProxy custom source uses node pool proxy.
-	ViaProxy bool `json:"via_proxy,omitempty"`
 	// ServingPort actual ingress port.
 	ServingPort string `json:"serving_port,omitempty"`
+	// RouteVerdict 路由结论：proxied / direct_by_design / direct_config_missing / direct_unexpected；空 = 旧记录或无法判定。
+	RouteVerdict string `json:"route_verdict,omitempty"`
+	// KeyTail 实际使用的 key 末 4 位（自定义源多 key 场景；定位串对话）。
+	// 注意：写入侧 CallRecord 已声明该 tag 但至今零赋值点，故当前恒为空；
+	// 补齐写入侧接线是独立待办，见 docs/issue-log/2026-09-03.md。
+	KeyTail string `json:"key_tail,omitempty"`
 }
 
 // StatusText 状态前缀（前端着色用）。
