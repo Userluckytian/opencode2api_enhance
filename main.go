@@ -89,10 +89,11 @@ var (
 	version = "v1.7.0"
 	commit  = "none"
 	date    = "unknown"
+	branch  = "unknown"
 )
 
 func versionString() string {
-	return fmt.Sprintf("opencode2api %s (commit=%s, date=%s)", version, commit, date)
+	return fmt.Sprintf("opencode2api %s (branch=%s, commit=%s, built=%s)", version, branch, commit, date)
 }
 
 func main() {

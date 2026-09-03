@@ -2,7 +2,8 @@ APP := opencode2api
 VERSION ?= dev
 COMMIT ?= $(shell git rev-parse --short HEAD 2>/dev/null || echo none)
 DATE ?= $(shell date -u +%Y-%m-%dT%H:%M:%SZ)
-LDFLAGS := -s -w -X main.version=$(VERSION) -X main.commit=$(COMMIT) -X main.date=$(DATE)
+BRANCH ?= $(shell git rev-parse --abbrev-ref HEAD 2>/dev/null || echo none)
+LDFLAGS := -s -w -X main.version=$(VERSION) -X main.commit=$(COMMIT) -X main.date=$(DATE) -X main.branch=$(BRANCH)
 
 .PHONY: fmt test vet build release-snapshot clean
 
