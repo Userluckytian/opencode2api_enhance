@@ -1,5 +1,27 @@
 # Changelog
 
+## v1.7.4-beta.3（2026-09-05，测试预发布）
+
+> 合入 `feat/debug-observability` 调试与可观测性机制（阶段1-8）。验证通过后再合入 main 打正式 `v1.7.4`。
+
+### 🚀 新功能
+
+- **调用记录可观测字段**：`CallRecord`/`CallLogRecord` 补 `tier`/`serving_port`/`route_verdict`；版本打印注入 branch/commit/built
+- **路由结论判定**：`route_verdict` 字符串枚举（proxied / direct_by_design / direct_config_missing / direct_unexpected），在空节点兜底成「直连」前判定，日志可区分「设计直连」vs「配置丢失直连」；前端四类标签 + 按层分组统计
+- **统一归因日志（阶段2）**：动态日志级别热切换（`-debug-subsystem` + `POST /api/admin/debug`）+ role/node/tier/provider/port/trace_id 归因字段
+- **分布式 Trace（阶段3）**：`X-Trace-ID` 跨进程传播，网关/实例/探针子进程透传 `OPENCODE2API_TRACE`
+- **诊断端点 + doctor（阶段4）**：`/api/diag` + `opencode2api doctor` 体检报告
+- **失败现场打包（阶段5）**：关键失败自动落脱敏 postmortem bundle（trace_id/路由决策/配置快照），异步不阻塞主请求
+- **配置溯源（阶段6）**：配置写入带 writer/时间戳/脱敏快照；`/api/config/history` + `/api/config/effective`（一致性 + 键级 diff）
+- **失败原因计数器（阶段7）**：节点 × 原因（429/401/503/connect/timeout）二维计数 + `/api/admin/fail-stats` + 统计页卡片
+- **复现重放（阶段8）**：`debug_replay` 子命令——从现场包生成脱敏 fixture 并重放（带同一 X-Trace-ID 便于日志对照）
+- **预内容静默超时**：子代理/工具调用长思考场景（已连接未吐正文）默认 30s，避免误杀成 0 token 空回复
+
+### 🔧 内部/规范
+
+- `architecture.md` / `coding-standards.md` / `.opencode/agents` 修正错误技术栈污染（Go 1.22 纯标准库 + React 19 + Tauri 2 + Tailwind 4）
+- `npm run build` / `go test` 通过；真机端到端（真实上游 503 / Rust 壳写者接线 / 端到端重放）待验证
+
 ## v1.7.4-beta.2（2026-09-02，测试预发布）
 
 > 测试分支 `test/key-health-resume-fix`。验证通过后再合入 main 打正式 `v1.7.4`。
