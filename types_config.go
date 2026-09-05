@@ -22,6 +22,10 @@ type AppConfig struct {
 	TTFTMaxMS    int `json:"timeout_ttft_max_ms,omitempty"`
 	SilenceMinMS int `json:"timeout_silence_min_ms,omitempty"`
 	SilenceMaxMS int `json:"timeout_silence_max_ms,omitempty"`
+	// PreContentSilenceMinMS/MaxMS 预内容静默宽容区间（毫秒；默认见 DefaultPreContentSilence）。
+	// 已连接但未吐可见内容（子代理/工具调用长思考）时的静默超时，默认 30s。
+	PreContentSilenceMinMS int `json:"timeout_precontent_silence_min_ms,omitempty"`
+	PreContentSilenceMaxMS int `json:"timeout_precontent_silence_max_ms,omitempty"`
 	ProbeMin     int `json:"failover_probe_min,omitempty"`
 	ProbeMax     int `json:"failover_probe_max,omitempty"`
 	// 调用日志保留上限（条）

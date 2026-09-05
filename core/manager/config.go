@@ -26,6 +26,8 @@ type Config struct {
 	TimeoutTTFTMaxMS    int64  `json:"timeout_ttft_max_ms,omitempty"`
 	TimeoutSilenceMinMS int64  `json:"timeout_silence_min_ms,omitempty"`
 	TimeoutSilenceMaxMS int64  `json:"timeout_silence_max_ms,omitempty"`
+	PreContentSilenceMinMS int64 `json:"timeout_precontent_silence_min_ms,omitempty"`
+	PreContentSilenceMaxMS int64 `json:"timeout_precontent_silence_max_ms,omitempty"`
 	FailoverProbeMin    int64  `json:"failover_probe_min,omitempty"`
 	FailoverProbeMax    int64  `json:"failover_probe_max,omitempty"`
 	CallLogMax          int64  `json:"call_log_max,omitempty"`
@@ -256,6 +258,10 @@ func (m *Manager) ConfigGet(key string) (string, error) {
 		return strconv.FormatInt(cfg.TimeoutSilenceMinMS, 10), nil
 	case "timeout_silence_max_ms":
 		return strconv.FormatInt(cfg.TimeoutSilenceMaxMS, 10), nil
+	case "timeout_precontent_silence_min_ms":
+		return strconv.FormatInt(cfg.PreContentSilenceMinMS, 10), nil
+	case "timeout_precontent_silence_max_ms":
+		return strconv.FormatInt(cfg.PreContentSilenceMaxMS, 10), nil
 	case "failover_probe_min":
 		return strconv.FormatInt(cfg.FailoverProbeMin, 10), nil
 	case "failover_probe_max":
@@ -394,6 +400,18 @@ func (m *Manager) ConfigSet(key, value string) error {
 			return err
 		}
 		cfg.TimeoutSilenceMaxMS = v
+	case "timeout_precontent_silence_min_ms":
+		v, err := parseInt()
+		if err != nil {
+			return err
+		}
+		cfg.PreContentSilenceMinMS = v
+	case "timeout_precontent_silence_max_ms":
+		v, err := parseInt()
+		if err != nil {
+			return err
+		}
+		cfg.PreContentSilenceMaxMS = v
 	case "failover_probe_min":
 		v, err := parseInt()
 		if err != nil {
@@ -709,6 +727,8 @@ type ConfigView struct {
 	TimeoutTTFTMaxMS        int64   `json:"timeout_ttft_max_ms"`
 	TimeoutSilenceMinMS     int64   `json:"timeout_silence_min_ms"`
 	TimeoutSilenceMaxMS     int64   `json:"timeout_silence_max_ms"`
+	PreContentSilenceMinMS  int64   `json:"timeout_precontent_silence_min_ms"`
+	PreContentSilenceMaxMS  int64   `json:"timeout_precontent_silence_max_ms"`
 	FailoverProbeMin        int64   `json:"failover_probe_min"`
 	FailoverProbeMax        int64   `json:"failover_probe_max"`
 	CallLogMax              int64   `json:"call_log_max"`
@@ -767,6 +787,8 @@ func (m *Manager) ConfigViewOf() ConfigView {
 		TimeoutTTFTMaxMS:        def(cfg.TimeoutTTFTMaxMS, 10000),
 		TimeoutSilenceMinMS:     def(cfg.TimeoutSilenceMinMS, 5000),
 		TimeoutSilenceMaxMS:     def(cfg.TimeoutSilenceMaxMS, 5000),
+		PreContentSilenceMinMS:  def(cfg.PreContentSilenceMinMS, 30000),
+		PreContentSilenceMaxMS:  def(cfg.PreContentSilenceMaxMS, 30000),
 		FailoverProbeMin:        def(cfg.FailoverProbeMin, 2),
 		FailoverProbeMax:        def(cfg.FailoverProbeMax, 3),
 		CallLogMax:              def(cfg.CallLogMax, 5000),

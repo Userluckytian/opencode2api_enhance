@@ -145,6 +145,8 @@ func (m *Manager) buildRouterCfg(singboxPorts []uint16, portNames map[uint16]str
 	applyIf("timeout_ttft_max_ms", appCfg.TimeoutTTFTMaxMS)
 	applyIf("timeout_silence_min_ms", appCfg.TimeoutSilenceMinMS)
 	applyIf("timeout_silence_max_ms", appCfg.TimeoutSilenceMaxMS)
+	applyIf("timeout_precontent_silence_min_ms", appCfg.PreContentSilenceMinMS)
+	applyIf("timeout_precontent_silence_max_ms", appCfg.PreContentSilenceMaxMS)
 	applyIf("failover_probe_min", appCfg.FailoverProbeMin)
 	applyIf("failover_probe_max", appCfg.FailoverProbeMax)
 	applyIf("call_log_max", appCfg.CallLogMax)

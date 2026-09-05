@@ -197,6 +197,7 @@ func (g *Gateway) startChild(runner Runner) error {
 			// 网关日志级别：info 级包含 key 选择/流中断续写等诊断埋点（warn 会过滤掉）。
 			"-log-level", "info",
 		},
+		Env:      append([]string{"OPCODE2API_ROLE=gateway"}, traceEnvKV()...), // 阶段 2：自报角色；阶段 3：透传 OPENCODE2API_TRACE
 		Dir:      dir,
 		LogOut:   filepath.Join(dir, "logs", "opencode2api.out.log"),
 		LogErr:   filepath.Join(dir, "logs", "opencode2api.err.log"),

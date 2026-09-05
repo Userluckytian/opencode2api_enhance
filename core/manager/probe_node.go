@@ -173,6 +173,7 @@ func (m *Manager) spawnProbeOpen(runner Runner, dir string, ocCfg []byte, apiPor
 	return runner.Start(ExecSpec{
 		Bin:      m.binPath("opencode2api"),
 		Args:     []string{"-port", itoa(apiPort), "-config", filepath.Join(dir, "opencode2api.json"), "-password", password},
+		Env:      append([]string{"OPCODE2API_ROLE=probe"}, traceEnvKV()...), // 阶段 2：自报角色；阶段 3：透传 OPENCODE2API_TRACE
 		Dir:      dir,
 		LogOut:   filepath.Join(dir, "logs", "opencode2api.out.log"),
 		LogErr:   filepath.Join(dir, "logs", "opencode2api.err.log"),

@@ -251,6 +251,8 @@ export type ConfigView = {
   timeout_ttft_max_ms: number
   timeout_silence_min_ms: number
   timeout_silence_max_ms: number
+  timeout_precontent_silence_min_ms: number
+  timeout_precontent_silence_max_ms: number
   failover_probe_min: number
   failover_probe_max: number
   call_log_max: number
@@ -501,6 +503,9 @@ export type DayStats = {
   by_node: GatewayNodeStat[]
 }
 
+/** 失败原因计数器（阶段7）：节点 → 原因 → 次数 */
+export type FailCounts = Record<string, Record<string, number>>
+
 // ─── 订阅（main 功能迁移 M1） ─────────────────────────────────────────────
 
 export type SubscribeNode = {
@@ -746,6 +751,8 @@ export const api = {
 
   // Token 统计（按实例）
   getStats: () => req<StatsSummary>('GET', '/stats'),
+  /** 失败原因计数（阶段7：节点 × 原因，内存态·重启清零） */
+  failStats: () => req<{ fail_counts: FailCounts }>('GET', '/fail-stats'),
   /** 按天统计（date=YYYY-MM-DD，空=全量；按统一网关 + 独享实例调用日志聚合） */
   statsByDay: (date?: string) => req<DayStats>('GET', '/stats/by-day', undefined, { date: date ?? undefined }),
   /** 重置全部 Token 统计（clearDeleted=同时清除已删除节点历史统计） */

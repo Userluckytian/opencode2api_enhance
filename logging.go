@@ -46,7 +46,7 @@ func initLogger() *slog.Logger {
 	}
 
 	handler := slog.NewTextHandler(w, &slog.HandlerOptions{
-		Level: lvl,
+		Level: slog.LevelDebug, // 分级下沉到 contextHandler（支持子系统 debug 热切换）
 		ReplaceAttr: func(groups []string, a slog.Attr) slog.Attr {
 			if a.Key == slog.TimeKey {
 				return slog.String("time", a.Value.Time().Format("2006-01-02T15:04:05.000Z07:00"))
@@ -58,7 +58,7 @@ func initLogger() *slog.Logger {
 		},
 	})
 
-	logger := slog.New(handler)
+	logger := slog.New(newContextHandler(handler, lvl))
 	slog.SetDefault(logger)
 	return logger
 }
@@ -68,6 +68,11 @@ func loggingMiddleware(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		reqID := randomString(12)
 		ctx := context.WithValue(r.Context(), reqIDKey, reqID)
+		// 阶段 3：种入 trace_id——入站 X-Trace-ID 复用、否则 env、否则复用 req_id；
+		// 回写响应头，便于客户端与下游进程串联同一条链路。
+		traceID := resolveTraceID(r.Header.Get(traceHeader), reqID)
+		ctx = withTraceID(ctx, traceID)
+		w.Header().Set(traceHeader, traceID)
 		r = r.WithContext(ctx)
 
 		slog.DebugContext(ctx, "request started",

@@ -53,6 +53,8 @@ type CallLogRecord struct {
 	// 注意：写入侧 CallRecord 已声明该 tag 但至今零赋值点，故当前恒为空；
 	// 补齐写入侧接线是独立待办，见 docs/issue-log/2026-09-03.md。
 	KeyTail string `json:"key_tail,omitempty"`
+	// TraceID 分布式追踪 ID（阶段3），与 main 包 CallRecord.TraceID 镜像；omitempty 保持旧记录兼容。
+	TraceID string `json:"trace_id,omitempty"`
 }
 
 // StatusText 状态前缀（前端着色用）。

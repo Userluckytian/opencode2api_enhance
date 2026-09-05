@@ -97,6 +97,15 @@ func versionString() string {
 }
 
 func main() {
+	// 阶段 4：doctor 子命令拦截（早于 flag 定义，避免与服务端标志集冲突）。
+	if len(os.Args) > 1 && os.Args[1] == "doctor" {
+		os.Exit(runDoctor(os.Args[2:]))
+	}
+	// 阶段 8：debug_replay 子命令拦截（复现重放，同样早于 flag 定义）。
+	if len(os.Args) > 1 && os.Args[1] == "debug_replay" {
+		os.Exit(runReplay(os.Args[2:]))
+	}
+
 	var showVersion bool
 	flag.StringVar(&port, "port", "8000", "服务端口")
 	flag.StringVar(&configPath, "config", "config.json", "配置文件路径")
@@ -104,6 +113,7 @@ func main() {
 	// 需要开启时显式传 -password <密码>（同时作为 /v1 API 密钥）。
 	flag.StringVar(&adminPassword, "password", "", "管理面板密码（默认空 = 不启用登录验证；设置后需经 /login 登录）")
 	flag.BoolVar(&debugMode, "debug", false, "启用调试日志")
+	flag.StringVar(&debugSubsystemFlag, "debug-subsystem", "", "启动即开启 debug 的子系统列表（逗号分隔；运行时热切换见 POST /api/admin/debug）")
 	flag.BoolVar(&gatewayMode, "gateway", false, "统一网关模式（记录节点级统计）")
 	flag.BoolVar(&callLogFlag, "call-log", false, "启用调用日志写盘（实例子进程注入；-gateway 自动启用）")
 	flag.StringVar(&poolQualityPath, "pool-quality", "", "实例池质量文件路径（网关子进程注入；空 = 无质量约束）")
@@ -118,7 +128,10 @@ func main() {
 	// 请求路径零读盘，质量刷新改由后台 ticker 驱动。
 	startPoolQualityRefresher()
 
+	// 阶段 2：先定本进程角色（供 slog contextHandler 注入 role 字段），再初始化日志。
+	setProcessRole(resolveProcessRole())
 	initLogger()
+	applyDebugSubsystemFlag()
 
 	if showVersion {
 		fmt.Println(versionString())
@@ -255,6 +268,17 @@ func registerHTTPRoutes(mux *http.ServeMux, managerInst *manager.Manager, plugin
 	// 调用日志过滤与聚合（main 分支功能迁移 M4）。
 	mux.HandleFunc("/api/admin/call-log/filtered", loggingMiddleware(requireAuth(managerInst.CallLogFilteredHandler())))
 	mux.HandleFunc("/api/admin/call-log/aggregate", loggingMiddleware(requireAuth(managerInst.CallLogAggregateHandler())))
+	// 阶段 2（统一归因日志）：聚合读取各进程 slog 输出（runtime/*/logs/），需管理鉴权。
+	mux.HandleFunc("/api/logs", loggingMiddleware(requireAuth(managerInst.LogsHandler())))
+	// 阶段 4：诊断端点——聚合实例/端口/SOCKS/残留/配置健康，管理鉴权复用 requireAuth。
+	mux.HandleFunc("/api/diag", loggingMiddleware(requireAuth(diagHandler(managerInst))))
+	// 阶段 2：运行时热切换子系统 debug 级别（无需重启）。
+	mux.HandleFunc("/api/admin/debug", loggingMiddleware(requireAuth(debugSwitchHandler)))
+	// 阶段 6：配置溯源——写入方/时间/历史快照 + 当前生效配置与一致性 diff。
+	mux.HandleFunc("/api/config/history", loggingMiddleware(requireAuth(configHistoryHandler)))
+	mux.HandleFunc("/api/config/effective", loggingMiddleware(requireAuth(configEffectiveHandler)))
+	// 阶段 7：失败原因计数器——节点 × 原因二维计数查询端点。
+	mux.HandleFunc("/api/admin/fail-stats", loggingMiddleware(requireAuth(failStatsHandler)))
 	mux.HandleFunc("/api/admin/binaries", loggingMiddleware(apiKeyAuthMiddleware(managerInst.BinariesHandler())))
 	mux.HandleFunc("/api/admin/instances", loggingMiddleware(requireAuth(managerInst.InstancesHandler())))
 	// P4-5：装配运行依赖（进程执行器 / 网关 / 扫描），HTTP 管理面用同一份核心。

@@ -16,9 +16,9 @@
 |------|------|------|
 | **0** | 仓库卫生与构建可观测 | ✅ 完成（commit `5de4630`） |
 | **1** | 路由决策可解释 | 🔶 部分：三字段+tier/端口+付费层标签+旧日志兼容已合入（commit `9f52ff1`）；**配置丢失判定/节点分析按 tier 分组未完成 → 顺延阶段 2 开头** |
-| **2** | 统一归因日志 + 聚合读取 | ⏳ 待开发 |
-| **3** | 分布式 Trace ID | ⏳ 待开发 |
-| **4** | 诊断端点 + doctor | ⏳ 待开发 |
+| **2** | 统一归因日志 + 聚合读取 | 🔶 部分：机制层已实现+单测全绿（role/字段注入、/api/logs 聚合、-debug-subsystem 热切换）；四类 role 可分/过滤/热切换的真机端到端验证待做（本机禁起服务） |
+| **3** | 分布式 Trace ID | 🔶 部分：入站种 trace_id（复用/生成）+响应头 X-Trace-ID、call_log 补 trace_id（与 req_id 对齐）、子进程 OPENCODE2API_TRACE 透传链均已实现+单测全绿；真机跨进程 E2E 待做（本机禁起服务），第三方进程段断链为已知局限 |
+| **4** | 诊断端点 + doctor | 🔶 部分：`GET /api/diag`（管理鉴权复用 requireAuth）+ `opencode2api doctor` 子命令已实现，共用纯函数 `buildDiagReport` 健康核心（端口冲突/SOCKS/实例·节点/sing-box/孤儿/门禁密钥·仅末4位/配置完整性 七项检查）；`go build`/`go vet` 全绿、单测已写未跑（本阶段策略）；真机 `/api/diag` 全绿与 doctor 端到端待联调 |
 | **5** | 失败现场打包 | ⏳ 待开发 |
 | **6** | 配置溯源 | ⏳ 待开发 |
 | **7** | 失败原因计数器 | ⏳ 待开发 |
@@ -207,6 +207,8 @@
 **验证标准**
 - [ ] 四类 role 日志可分；聚合端点过滤正确；热切换生效 → pass，否则 fail。
 
+> **本阶段备注（2026-09-04）**：机制层已实现并单测通过（`go build`/`go vet` 全绿；main 包 4 项 + core/manager 5 项新单测全 PASS）。① 新增 `logging_dynamic.go` 的 `contextHandler`，为每条 slog 自动注入 `role`/`trace_id`（预留留空）/`node`/`tier`/`provider`/`port`（从 context 取，port 全局兼底）；`logging.go` 仅改两行（基准级别改 `slog.LevelVar` + handler 包一层）。② 四类进程经 `OPCODE2API_ROLE` 环境变量自报 role（管理器默认 manager；gateway.go/instance.go/probe_node.go 分别注入 gateway/instance/probe，为此给 `ExecSpec` 加 `Env` 字段）——**刻意用环境变量而非新增 CLI flag**，避免滚动升级期旧二进制遇未知 flag 解析失败起不来。③ `GET /api/logs?process=&role=&since=&limit=`（`core/manager/logs.go`，requireAuth 鉴权）聚合读 `runtime/*/logs/`，对大量小文件做末尾窗口(4MB)+单文件回溯上限(4000行)+总量上限(1万)+最多400文件的节流。④ `-debug <subsystem>` 因 `-debug` 已是既有 bool flag（被 sseDebugf 占用）**不可重载**，改为新增 `-debug-subsystem` 启动标志 + `POST /api/admin/debug?subsystem=&enabled=` 运行时热切换（不重启，requireAuth）。**未勾选原因**：`trace_id` 实值、真实调用点的 subsystem 打点、以及「四类 role 可分/热切换生效」的真机端到端联调需启动生产服务，本机禁止起服务，故标 🔶 待真机验证；第三方子进程(sing-box)的 role 注入按本节「失败顺延」顺延阶段 3。
+
 **失败顺延**：若第三方子进程（sing-box/opencode 实例）无法注入 `role`（非自研），将其日志以「尽力附带」方式处理，该局限项顺延阶段 3 记录，本阶段先保证自研进程全覆盖。
 
 ---
@@ -237,11 +239,13 @@
 - 不向第三方上游泄露内部 `trace_id`（仅内部进程间）。
 
 **验证标准**
-- [ ] 自研进程链路 trace_id 贯通且唯一 → pass。
-- [ ] `call_log.ReqID` 与 trace_id 对齐 → pass。
+- [ ] 自研进程链路 trace_id 贯通且唯一 → pass。 （🔶 2026-09-04：ingress（loggingMiddleware）种 trace_id——入站 X-Trace-ID 复用、否则 env、否则复用 req_id——并回写响应头；子进程经 OPENCODE2API_TRACE 透传（gateway/instance/probe spawn）；单测全绿。**真机跨进程 E2E 待联调**，本机禁起服务）
+- [x] `call_log.ReqID` 与 trace_id 对齐 → pass。 （✅ 2026-09-04：CallRecord/CallLogRecord 同构新增 trace_id（omitempty，旧记录兼容）；handler 中 TraceID 取 getTraceID(ctx)（=req_id），为空时回退 ReqID，保证与 req_id 对齐；TestCallRecordTraceIDJSONRoundtrip + TestCallRecordCallLogRecordJSONTagsMatch 全绿）
 - 注：**第三方子进程（sing-box/opencode 实例）段断链为已知局限，不计入 fail**（在文档 §7 标注）。
 
 **失败顺延**：若部分自研子进程透传因进程模型差异难以一致，将「该子进程透传」项顺延阶段 4 开头，先保证管理器↔网关主链路贯通。
+
+> **本阶段备注（2026-09-04）**：机制层已实现并单测通过（`go build ./...`/`go vet ./...` 全绿；main 包 4 项 + core/manager 1 项新单测全 PASS；main 包定向回归 28.6s ok、core/... 全绿）。① **入站种 trace**：`logging.go` 的 `loggingMiddleware` 新增 `resolveTraceID(header, reqID)`（优先级：入站 `X-Trace-ID` > 环境变量 `OPENCODE2API_TRACE` > 复用 `req_id`），写入 context（阶段 2 的 `contextHandler` 自动把 `trace_id` 打进每条 slog）并回写响应头 `X-Trace-ID`。② **call_log 对齐**：`CallRecord`/`CallLogRecord` 同构新增 `trace_id`（omitempty，旧记录兼容，字段一致性测试转绿）；三业务 handler（chat/claude/responses）与 `auth.go` 鉴权失败路径均填 `TraceID: getTraceID(ctx)`，空则回退 `ReqID`，保证 `call_log.ReqID` 与 `trace_id` 对齐。③ **跨进程透传**：`core/manager/process.go` 新增 `traceEnvKV()`，网关/实例/探针 spawn（gateway.go/instance.go/probe_node.go）经 `append(..., traceEnvKV()...)` 把 `OPENCODE2API_TRACE` 透传给自研子进程，形成进程树 trace 链。④ **关键架构结论**：热请求路径**不存在**内部 Go→Go HTTP 跳（handler→callOpenCodeAPI→chatViaVendor→rootTransport 直达第三方上游），故**刻意不在出站注入 `X-Trace-ID`**——否则会把内部 trace 泄露给第三方（违反审查项）；内部自研 Go→Go 调用仅存于后台运维路径（fetchGatewayModels/探针/插件），无请求 ctx，不在本阶段热链路范围。⑤ **未引入任何新依赖**（不用 OpenTelemetry/Jaeger）。**🔶 真机跨进程 E2E 待联调**：需启动生产服务（本机禁起，避免与生产实例/sing-box 抢端口）；第三方子进程（sing-box/opencode 实例）不认 `X-Trace-ID`、段断链为**已知局限**（§7，不计入 fail）。
 
 ---
 
@@ -269,9 +273,11 @@
 - 报告生成不阻塞主请求路径（异步/快照）。
 
 **验证标准**
-- [ ] 正常全绿；异常项可被检出并标注 → pass，否则 fail。
+- [ ] 正常全绿；异常项可被检出并标注 → pass，否则 fail。 （🔶 2026-09-04：分项检查逻辑已由 `diag_test.go` 表驱动用例覆盖（端口冲突/route_mode 非法/轮询空池/实例 Error/运行态缺 PID/sing-box 缺失/孤儿/门禁密钥掉码/配置缺失·损坏），但按本阶段测试策略**单测已写未跑**；真机 `/api/diag` 全绿与人为注入 WARN 的 doctor 端到端待联调）
 
 **失败顺延**：若「配置文件完整性/备份」校验规则复杂，将其细化项顺延阶段 6，本阶段先交付端口/SOCKS/孤儿/健康四项。
+
+> **本阶段备注（2026-09-04）**：诊断核心已实现（`go build ./...`/`go vet ./...` 全绿；单测按本阶段策略**已写未跑**，交由全阶段完成后统一跑测）。① 新增 `diag.go`（package main）：纯函数 `buildDiagReport(DiagSnapshot) DiagReport` 为共享健康核心（无副作用、可单测），聚合七项——端口占用（配置层冲突检测）、SOCKS（route_mode 合法性 + 轮询空池退化）、实例/节点健康（Error→红、运行态缺 PID→黄）、sing-box（可执行文件就位 + 运行态缺 sing-box PID）、残留/孤儿进程（>0→黄）、门禁密钥（**只报是否设置 + 末 4 位，绝不泄露明文**）、配置文件完整性（缺失→黄、JSON 损坏→红）；总状态取各项最坏。② HTTP 包装 `diagHandler`（`GET /api/diag`，非 GET 返回 405，`application/json`）经 `registerHTTPRoutes` 注册为 `loggingMiddleware(requireAuth(...))`，**复用管理鉴权**。③ CLI 包装 `opencode2api doctor`（在 `main()` 最前拦截 `os.Args[1]=="doctor"`，早于 flag 定义避免与服务端标志集冲突）：`runDoctor` 用独立 FlagSet（`-config`/`-data-dir`/`-json`），载入配置后打印人类可读报告，**退出码 0=健康/1=告警/2=错误**。④ 采集 `collectDiagSnapshot` 全程只读：`Gateway().Port()` 仅读端口不拉子进程、`ScanOrphans()` 只枚举不杀、`diagProbeConfig`/`diagProbeSingbox` 只读探查；**不启动/不杀任何进程、不改 call_log、零新增依赖**。⑤ 顺延：真实端口监听占用探测（需绑定端口，属副作用）与「配置文件备份一致性」校验按计划顺延，本阶段先交付七项。
 
 ---
 
@@ -299,7 +305,7 @@
 - 写 bundle 失败不影响主流程（失败不阻塞请求）。
 
 **验证标准**
-- [ ] 失败自动落 bundle 且脱敏、含 trace_id 与配置快照 → pass，否则 fail。
+- [x] 失败自动落 bundle 且脱敏、含 trace_id 与配置快照 → pass。 （✅ 2026-09-05：`postmortem.go` 实现，`recordCall` 失败分支异步落盘；单测 `postmortem_test.go` 5 项全 PASS——落盘/脱敏(admin_key→***、socks5_proxies→[redacted])/trace_id/配置快照/保留上限/文件名安全化。🔶 真实上游 503 端到端触发待真机）
 
 **失败顺延**：若「启动 15s 超时」场景难以在测试环境稳定复现，将该场景的 bundle 触发顺延阶段 8 的 replay 配合验证，其余场景先合入。
 
@@ -387,6 +393,20 @@
 - [ ] 代表性失败可被重放复现且 trace 可追溯 → pass，否则 fail。
 
 **失败顺延**：若重放对「第三方上游」依赖导致环境不可控，将「端到端重放」降级为「本地链路重放」，该降级项记录为最终遗留，计划收尾时单独评估。
+
+---
+
+## 5.9 阶段 5-8 实现进展（2026-09-05）
+
+> 用户要求推进实现。四阶段代码 + 单测已落地，全部纯标准库、无新依赖；`go build ./...` / `go vet ./...` 干净；可观测性相关 19 项单测单独跑全 PASS。真机端到端项待用户环境验证。
+> ⚠️ 全量 `go test ./...` 并发跑时，`pluginprovider` 包若干测试（TestPluginToggle / TestPluginHTTPHandlers / TestRepeatedToggleNoLeak / TestPluginVendorsAssembly）偶发「等待插件子进程 running 超时」——这些测试 spawn 真实子进程、失败点每次不同、单独跑均 PASS，系**既有环境 flaky**，与本次可观测性改动无关（未触碰插件进程管理）。
+
+| 阶段 | 交付 | 单测 | 状态 |
+|------|------|------|------|
+| 5 失败现场打包 | `postmortem.go`：失败异步落脱敏 bundle（trace_id/路由决策/配置快照）+ 保留上限；`recordCall` 接入 | `postmortem_test.go` 5 项 PASS | ✅ 机制层完成 / 🔶 真实 503 端到端待真机 |
+| 6 配置溯源 | `config_trace.go`：快照(writer/ts/sha/脱敏)+限100条+`/api/config/history`+`/api/config/effective`(一致性+diff)；`saveConfigWithWriter` 已接 **go-manager + custom-propagate** 两写者（Rust 壳写者按失败顺延） | `config_trace_test.go` 6 项 PASS | ✅ Go 侧写者完成 / 🔶 真机一致性待验 |
+| 7 失败原因计数器 | `fail_counter.go`：节点×原因(429/401/503/connect/timeout)二维计数+`/api/admin/fail-stats`；`recordCall` 接入；**统计页 `FailStatsCard` UI**（StatsPage.tsx + api.ts） | `fail_counter_test.go` 4 项 PASS + 前端 `npm run build` 通过 | ✅ 数据结构+接口+UI 完成 |
+| 8 复现重放 | `replay.go`：fixture+`BundleToFixture`+`ReplayRequest`(带 X-Trace-ID)+`debug_replay` 子命令（含 `-from-bundle` 一键生成 fixture） | `replay_test.go` 9 项 PASS | ✅ 本地链路重放+生成完成 / 🔶 端到端重放降级为本地（顺延） |
 
 ---
 

@@ -102,12 +102,13 @@ const eventClass = (type: string): string => {
 }
 
 /**
- * 路由判定：后端在调用日志上写入的 route_verdict 字符串枚举（omitempty）。
+ * 路由判定：后端在调用日志上写入的 route_verdict 枚举（omitempty）。
  * 前端只做「枚举 → 展现」映射，不再靠 nodes[0] === '直连' 比对中文字面量猜语义，
  * 也不依赖从未被写入的死字段 via_proxy。
  * 旧记录不含该键 → routeVerdictTag 返回 null → UI 降级为 '-'（不报错、不上告警色）。
+ * route_verdict 已由 api.ts 的 CallLogRecord 以 RouteVerdict 枚举类型定义，直接复用。
  */
-type LogRecord = CallLogRecord & { route_verdict?: string }
+type LogRecord = CallLogRecord
 
 type RouteVerdictTag = { label: string; color: string }
 
@@ -840,7 +841,7 @@ function NodeAnalysisView({ logs }: { logs: LogRecord[] }) {
             })}
           </tbody>
         </table>
-      )}
+        )}
       </div>
     </div>
   )

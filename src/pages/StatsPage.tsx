@@ -1,7 +1,7 @@
 import { Fragment, useCallback, useEffect, useRef, useState, type ReactNode } from 'react'
 import clsx from 'clsx'
 import { BarChart3, ChevronDown, ChevronRight, RefreshCw, RotateCcw, Inbox, CalendarDays, Loader2 } from 'lucide-react'
-import { api, type StatsSummary, type DayStats } from '../lib/api'
+import { api, type StatsSummary, type DayStats, type FailCounts } from '../lib/api'
 
 /** 千分位格式化 */
 const fmt = (n: number) => n.toLocaleString('en-US')
@@ -57,6 +57,68 @@ function Card({
         <div className={clsx('text-[22px] font-semibold tabular-nums', accent ? 'text-teal-700' : 'text-zinc-900')}>
           {value}
         </div>
+      )}
+    </div>
+  )
+}
+
+const FAIL_REASONS = ['429', '401', '503', 'connect', 'timeout', 'other'] as const
+
+/** 失败原因分布卡片（阶段7：节点 × 原因，内存态·重启清零）；自轮询 5s */
+function FailStatsCard() {
+  const [counts, setCounts] = useState<FailCounts>({})
+  useEffect(() => {
+    let alive = true
+    const tick = async () => {
+      try {
+        const r = await api.failStats()
+        if (alive) setCounts(r.fail_counts ?? {})
+      } catch {
+        /* 忽略：无数据或后端未就绪 */
+      }
+    }
+    void tick()
+    const t = setInterval(tick, 5000)
+    return () => {
+      alive = false
+      clearInterval(t)
+    }
+  }, [])
+  const nodes = Object.keys(counts).sort()
+  return (
+    <div className="bg-white rounded-[16px] border border-zinc-200 shadow-sm p-5">
+      <div className="text-[13px] font-semibold text-zinc-800 mb-2">失败原因分布（节点 × 原因 · 内存态，重启清零）</div>
+      {nodes.length === 0 ? (
+        <p className="text-[12px] text-zinc-400">暂无失败记录</p>
+      ) : (
+        <table className="w-full text-[13px]">
+          <thead>
+            <tr className="text-left text-[12px] text-zinc-500 border-b border-zinc-100">
+              <th className="py-2 pr-3 font-medium">节点</th>
+              {FAIL_REASONS.map((r) => (
+                <th key={r} className="py-2 pr-3 font-medium text-right">{r}</th>
+              ))}
+              <th className="py-2 font-medium text-right">合计</th>
+            </tr>
+          </thead>
+          <tbody>
+            {nodes.map((node) => {
+              const reasons = counts[node] || {}
+              const total = Object.values(reasons).reduce((a, b) => a + b, 0)
+              return (
+                <tr key={node} className="border-b border-zinc-50">
+                  <td className="py-2 pr-3 text-zinc-800">{node}</td>
+                  {FAIL_REASONS.map((r) => (
+                    <td key={r} className="py-2 pr-3 text-right tabular-nums text-zinc-600">
+                      {reasons[r] ? fmt(reasons[r]) : '-'}
+                    </td>
+                  ))}
+                  <td className="py-2 text-right tabular-nums font-medium text-zinc-900">{fmt(total)}</td>
+                </tr>
+              )
+            })}
+          </tbody>
+        </table>
       )}
     </div>
   )
@@ -582,6 +644,9 @@ export default function StatsPage({
           </>
         )}
       </div>
+
+      {/* 失败原因分布（阶段7） */}
+      <FailStatsCard />
 
       {/* 重置统计：二次确认弹窗 */}
       {showResetConfirm && (

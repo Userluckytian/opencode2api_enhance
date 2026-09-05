@@ -1,6 +1,8 @@
 # Runtime state
 config.json
 stats.json
+config_history.jsonl
+postmortem/
 *.log
 
 # Build output

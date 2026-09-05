@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 )
 
 // ExecSpec 描述一次进程启动。
@@ -16,6 +17,7 @@ type ExecSpec struct {
 	LogOut   string   // stdout 重定向文件（空 = 丢弃）
 	LogErr   string   // stderr 重定向文件（空 = 丢弃）
 	NoWindow bool     // Windows CREATE_NO_WINDOW
+	Env      []string // 追加到子进程环境（形如 KEY=VALUE；空 = 仅继承父进程 env）
 }
 
 // Runner 抽象进程生命周期。
@@ -32,11 +34,24 @@ type realRunner struct{}
 // NewRealRunner 构造生产 Runner。
 func NewRealRunner() Runner { return &realRunner{} }
 
+// traceEnvKV 阶段 3：若父进程携带 OPENCODE2API_TRACE，则透传给子进程，形成进程树
+// trace 链——子进程无入站 X-Trace-ID 头时以此为进程级默认 trace（如启动期日志）。
+// 父进程未设置时返回 nil，不改变子进程环境。
+func traceEnvKV() []string {
+	if v := strings.TrimSpace(os.Getenv("OPENCODE2API_TRACE")); v != "" {
+		return []string{"OPENCODE2API_TRACE=" + v}
+	}
+	return nil
+}
+
 // Start 实现 Runner。
 func (r *realRunner) Start(spec ExecSpec) (int, error) {
 	cmd := exec.Command(spec.Bin, spec.Args...)
 	cmd.Dir = spec.Dir
 	applyNoWindow(cmd, spec.NoWindow)
+	if len(spec.Env) > 0 {
+		cmd.Env = append(os.Environ(), spec.Env...)
+	}
 	if spec.LogOut != "" {
 		if f, err := os.OpenFile(spec.LogOut, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644); err == nil {
 			cmd.Stdout = f

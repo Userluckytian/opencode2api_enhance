@@ -743,10 +743,14 @@ func responsesHandler(w http.ResponseWriter, r *http.Request) {
 		RouteMode:  routeMode.Load().(string),
 		Tier:       tierOfAuth(auth),
 		ServingPort: port,
+		TraceID:     getTraceID(r.Context()),
 		Status:     "ok",
 	}
 	if callRec.ReqID == "" {
 		callRec.ReqID = "req_" + randomString(12)
+	}
+	if callRec.TraceID == "" {
+		callRec.TraceID = callRec.ReqID
 	}
 
 	// 多模态路由

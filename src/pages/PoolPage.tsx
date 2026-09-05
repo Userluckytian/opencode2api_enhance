@@ -57,6 +57,8 @@ export default memo(function PoolPage({
     timeout_ttft_max_ms: 10000,
     timeout_silence_min_ms: 5000,
     timeout_silence_max_ms: 5000,
+    timeout_precontent_silence_min_ms: 30000,
+    timeout_precontent_silence_max_ms: 30000,
     failover_probe_min: 2,
     failover_probe_max: 3,
     call_log_max: 5000,
@@ -210,6 +212,8 @@ export default memo(function PoolPage({
           timeout_ttft_max_ms: c.timeout_ttft_max_ms,
           timeout_silence_min_ms: c.timeout_silence_min_ms,
           timeout_silence_max_ms: c.timeout_silence_max_ms,
+          timeout_precontent_silence_min_ms: c.timeout_precontent_silence_min_ms ?? 30000,
+          timeout_precontent_silence_max_ms: c.timeout_precontent_silence_max_ms ?? 30000,
           failover_probe_min: c.failover_probe_min,
           failover_probe_max: c.failover_probe_max,
           call_log_max: c.call_log_max,
@@ -472,6 +476,7 @@ export default memo(function PoolPage({
     const f = timeoutForm
     if (!validateRange(f.timeout_ttft_min_ms, f.timeout_ttft_max_ms) ||
         !validateRange(f.timeout_silence_min_ms, f.timeout_silence_max_ms) ||
+        !validateRange(f.timeout_precontent_silence_min_ms, f.timeout_precontent_silence_max_ms) ||
         !validateRange(f.failover_probe_min, f.failover_probe_max)) {
       toast('区间不合法：最小值需 >0 且 最小值 ≤ 最大值', false)
       return
@@ -486,6 +491,8 @@ export default memo(function PoolPage({
       await api.configSet('timeout_ttft_max_ms', String(f.timeout_ttft_max_ms))
       await api.configSet('timeout_silence_min_ms', String(f.timeout_silence_min_ms))
       await api.configSet('timeout_silence_max_ms', String(f.timeout_silence_max_ms))
+      await api.configSet('timeout_precontent_silence_min_ms', String(f.timeout_precontent_silence_min_ms))
+      await api.configSet('timeout_precontent_silence_max_ms', String(f.timeout_precontent_silence_max_ms))
       await api.configSet('failover_probe_min', String(f.failover_probe_min))
       await api.configSet('failover_probe_max', String(f.failover_probe_max))
       await api.configSet('call_log_max', String(f.call_log_max))
@@ -1383,6 +1390,29 @@ export default memo(function PoolPage({
                     onChange={(e) => setTimeoutForm({ ...timeoutForm, timeout_silence_max_ms: Number(e.target.value) })}
                     className="w-24 shrink-0 px-2 py-2 border rounded-lg text-[13px] text-right"
                   />
+                </div>
+                <div className="flex flex-col gap-3 pt-1">
+                  <div>
+                    <label className="text-[13px] text-zinc-700 block">未吐正文静默超时（毫秒，默认 30s，子代理长思考场景）</label>
+                    <p className="text-[11px] text-zinc-400 mb-1">已连接但未输出可见文本时（如 tool 调用组织中），静默判定的宽容上限。</p>
+                  </div>
+                  <div className="flex items-center gap-3">
+                    <input
+                      type="number"
+                      min={1}
+                      value={timeoutForm.timeout_precontent_silence_min_ms}
+                      onChange={(e) => setTimeoutForm({ ...timeoutForm, timeout_precontent_silence_min_ms: Number(e.target.value) })}
+                      className="w-24 shrink-0 px-2 py-2 border rounded-lg text-[13px] text-right"
+                    />
+                    <span className="text-zinc-400">~</span>
+                    <input
+                      type="number"
+                      min={1}
+                      value={timeoutForm.timeout_precontent_silence_max_ms}
+                      onChange={(e) => setTimeoutForm({ ...timeoutForm, timeout_precontent_silence_max_ms: Number(e.target.value) })}
+                      className="w-24 shrink-0 px-2 py-2 border rounded-lg text-[13px] text-right"
+                    />
+                  </div>
                 </div>
                 <div className="flex items-center gap-3">
                   <label className="text-[13px] text-zinc-700 flex-1 min-w-0 whitespace-nowrap">切换前并行探测数（默认 2~3）</label>

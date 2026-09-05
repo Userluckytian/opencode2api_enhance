@@ -135,10 +135,14 @@ func recordAuthFailure(r *http.Request, reason string) {
 		Status: "fail",
 		ErrMsg: "鉴权失败：" + reason,
 		ServingPort: port,
+		TraceID: getTraceID(r.Context()),
 		Events: []CallEvent{{Type: "auth_failed", Detail: reason, At: time.Now()}},
 	}
 	if rec.ReqID == "" {
 		rec.ReqID = "req_" + randomString(12)
+	}
+	if rec.TraceID == "" {
+		rec.TraceID = rec.ReqID
 	}
 	recordCall(rec)
 }

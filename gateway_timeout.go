@@ -31,6 +31,9 @@ const (
 	DefaultSilenceMax = 5 * time.Second
 	DefaultProbeMin   = 2
 	DefaultProbeMax   = 3
+	// DefaultPreContentSilence 已连接但尚未吐出可见内容时的静默宽容（子代理/工具调用长思考场景，
+	// 模型组织 tool_calls 阶段久不吐文本，默认 5s 会误杀，导致 completion_tokens=0 静默失败）
+	DefaultPreContentSilence = 30 * time.Second
 	// DefaultCallLogMax 日志保留上限（条），前端设置页可改
 	DefaultCallLogMax = 5000
 )
@@ -38,15 +41,25 @@ const (
 type TimeoutConfig struct {
 	TTFTRange    [2]time.Duration
 	SilenceRange [2]time.Duration
-	ProbeRange   [2]int
+	// PreContentSilenceRange 已连接但未见可见内容的静默宽容区间。子代理/工具调用
+	// 长思考场景，模型组织 tool_calls 参数时久不吐文本；若用普通 silence 会误杀为
+	// completion_tokens=0 的空回复。默认 30s，仅在 accumulated==""（未吐正文）时生效。
+	PreContentSilenceRange [2]time.Duration
+	ProbeRange             [2]int
 }
 
 func DefaultTimeoutConfig() TimeoutConfig {
 	return TimeoutConfig{
-		TTFTRange:    [2]time.Duration{DefaultTTFTMin, DefaultTTFTMax},
-		SilenceRange: [2]time.Duration{DefaultSilenceMin, DefaultSilenceMax},
-		ProbeRange:   [2]int{DefaultProbeMin, DefaultProbeMax},
+		TTFTRange:              [2]time.Duration{DefaultTTFTMin, DefaultTTFTMax},
+		SilenceRange:           [2]time.Duration{DefaultSilenceMin, DefaultSilenceMax},
+		PreContentSilenceRange: [2]time.Duration{DefaultPreContentSilence, DefaultPreContentSilence},
+		ProbeRange:             [2]int{DefaultProbeMin, DefaultProbeMax},
 	}
+}
+
+// RandomPreContentSilence 返回预内容阶段静默宽容值（[min,max] 均匀随机）。
+func (c TimeoutConfig) RandomPreContentSilence() time.Duration {
+	return randDuration(c.PreContentSilenceRange[0], c.PreContentSilenceRange[1])
 }
 
 // randDuration 返回 [min,max] 均匀随机值（含端点）
@@ -126,6 +139,8 @@ type CallRecord struct {
 	ServingPort string `json:"serving_port,omitempty"`
 	// RouteVerdict 路由结论：proxied / direct_by_design / direct_config_missing / direct_unexpected；空 = 旧记录或无法判定。
 	RouteVerdict string `json:"route_verdict,omitempty"`
+	// TraceID 分布式追踪 ID（阶段3）：入站 X-Trace-ID 复用或由 req_id 生成，贯穿同一请求全链路日志与跨进程传播；omitempty 保持旧记录兼容。
+	TraceID string `json:"trace_id,omitempty"`
 }
 
 func CallStatusText(rec CallRecord) string {
@@ -537,6 +552,11 @@ func recordCall(rec CallRecord) {
 	if err := l.Append(rec); err != nil {
 		slog.Error("call log append failed", "error", err)
 	}
+	// 阶段5/7：关键失败自动落脱敏现场包 + 节点×原因计数（异步/内存，不阻塞请求）。
+	if rec.Status != "" && rec.Status != "ok" {
+		recordFailure(rec)
+		maybeWritePostmortem(rec)
+	}
 }
 
 // setTimeoutConfigFromApp 从 AppConfig 读取区间配置并应用（热加载）
@@ -556,6 +576,12 @@ func setTimeoutConfigFromApp(cfg AppConfig) {
 	}
 	if cfg.ProbeMin > 0 && cfg.ProbeMax >= cfg.ProbeMin {
 		timeoutCfg.ProbeRange = [2]int{cfg.ProbeMin, cfg.ProbeMax}
+	}
+	if cfg.PreContentSilenceMinMS > 0 && cfg.PreContentSilenceMaxMS >= cfg.PreContentSilenceMinMS {
+		timeoutCfg.PreContentSilenceRange = [2]time.Duration{
+			time.Duration(cfg.PreContentSilenceMinMS) * time.Millisecond,
+			time.Duration(cfg.PreContentSilenceMaxMS) * time.Millisecond,
+		}
 	}
 	timeoutCfgMu.Unlock()
 	if cfg.CallLogMax > 0 {
@@ -652,6 +678,7 @@ func streamWithResume(w http.ResponseWriter, r *http.Request, upstreamBody []byt
 		timeoutCfgMu.RLock()
 		ttft := timeoutCfg.RandomTTFT()
 		silence := timeoutCfg.RandomSilence()
+		preContentSilence := timeoutCfg.RandomPreContentSilence()
 		timeoutCfgMu.RUnlock()
 		gotFirst := false
 		// 当前节点是否已插入过「🤖 节点 · 模型」标识前缀（每节点仅一次）
@@ -694,7 +721,12 @@ func streamWithResume(w http.ResponseWriter, r *http.Request, upstreamBody []byt
 			dur := silence
 			if !gotFirst {
 				dur = ttft
+			} else if len(accumulated) == 0 {
+				// 已连接但尚未吐出可见内容（子代理/工具调用长思考，模型组织 tool_calls 久不吐文本）：
+				// 用更大的预内容静默宽容，避免把"还在思考"误杀成 0 token 空回复。
+				dur = preContentSilence
 			}
+			sseDebugf("[%s] phase timer dur=%v gotFirst=%v accumulated=%d", reqID, dur, gotFirst, len(accumulated))
 			timer := time.NewTimer(dur)
 			select {
 			case resLine := <-lineCh:
@@ -897,7 +929,12 @@ func streamWithResume(w http.ResponseWriter, r *http.Request, upstreamBody []byt
 					res.ErrMsg = fmt.Sprintf("TTFT timeout (%v)", ttft)
 					callRec.Events = append(callRec.Events, CallEvent{Type: "ttft_timeout", Node: proxyAddr, Detail: res.ErrMsg, At: time.Now()})
 				} else {
-					res.ErrMsg = fmt.Sprintf("silence timeout (%v)", silence)
+					if len(accumulated) == 0 {
+						// 预内容静默（已连接、未见正文）：用宽容后的时长体现，便于日志诊断
+						res.ErrMsg = fmt.Sprintf("pre-content silence timeout (%v)", preContentSilence)
+					} else {
+						res.ErrMsg = fmt.Sprintf("silence timeout (%v)", silence)
+					}
 					// 已吐内容后的静默：不再续写（上游可能在思考，也可能已结束；续写易致模型重答拼缝）
 					resumeable = false
 					callRec.Events = append(callRec.Events, CallEvent{Type: "silence_timeout", Node: proxyAddr, Detail: res.ErrMsg, At: time.Now()})

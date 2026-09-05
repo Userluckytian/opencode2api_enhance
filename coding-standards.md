@@ -1,206 +1,117 @@
 # opencode2api_enhance 编码规范说明
 
-## 命名规范
+> 本项目 = **Go 后端（纯标准库）+ React 前端（Tailwind）+ Tauri 壳**。规范以真实代码为准，坚持零依赖与轻量化。
 
-### 文件命名
+## 一、Go 代码规范
+
+### 文件与包命名
 
 | 类型 | 规范 | 示例 |
 |------|------|------|
-| Vue 组件 | PascalCase | `FormInput.vue`, `ZoomImageViewer/index.vue` |
-| 组合式函数 | camelCase + `use` 前缀 | `useToken.ts`, `useECharts.ts` |
-| Pinia Store | camelCase + `use` 前缀 + `Store` 后缀 | `useUserStore` |
-| API 模块 | camelCase | `auth.ts`, `user.ts` |
-| 工具函数 | camelCase | `storage.ts`, `validate.ts` |
-| 样式文件 | kebab-case | `custom.css`, `variables.scss` |
-| 类型定义 | 文件名小写，类型名 PascalCase | `types.ts` → `FormItemOptions` |
+| 源文件 | snake_case.go | `chat_handler.go`、`custom_providers.go`、`gateway_timeout.go` |
+| 测试文件 | 被测文件 + `_test.go` | `chat_handler_test.go` |
+| 包名 | 小写单词，不加下划线 | `package manager`、`package contract` |
+| 平台分支文件 | 后缀 `_windows.go` / `_other.go` | `autostart_windows.go`、`netstat_other.go` |
 
-### 变量与函数
+### 标识符命名
 
-```ts
-// 组合式函数：use 前缀
-const { token, setToken } = useToken()
+- 导出标识符 **PascalCase**，未导出 **camelCase**。
+- 常量、构造函数、接收者命名保持简短一致。
 
-// 事件处理函数：handle 前缀
-function handleClick() { ... }
-function handleCheckChange() { ... }
-
-// 计算属性：get 前缀或描述性名称
-const isLoggedIn = computed(() => !!token)
-const innerValue = computed({ get, set })
-
-// 响应式变量：描述性名称
-const viewerVisible = ref(false)
-const selectedNodeId = ref<string | number | null>(null)
+```go
+// 导出处理函数 PascalCase；内部函数 camelCase
+func HandleChat(w http.ResponseWriter, r *http.Request) { ... }
+func parseUpstreamUsage(resp *http.Response) (*Usage, error) { ... }
 ```
 
-### CSS 类名
+### 依赖纪律（零第三方）
 
-```scss
-// 组件根类名：组件名 kebab-case
-.zv-overlay { ... }
-.zv-toolbar { ... }
+- **只用 Go 标准库**，go.mod 不引入任何 require。
+- 确需新增第三方依赖，必须在提交说明中论证理由，并评估是否可用标准库替代。
 
-// 修饰符：BEM 风格
-.node-label { ... }
-.node-label.is-active { ... }
+### 错误处理
 
-// CSS 变量：统一前缀
---app-color-primary
---app-bg-container
---app-border-color
-```
+- 错误向上冒泡时用 `%w` 包装并附上下文，不吞错、不 panic（除非不可恢复）。
 
-## Vue 组件规范
-
-### 单文件组件结构
-
-```vue
-<template>
-  <!-- 模板在最前 -->
-</template>
-
-<script setup lang="ts">
-// 第三方导入
-import { ref, computed } from 'vue'
-import { ElMessage } from 'element-plus'
-
-// 本地导入
-import type { UserInfo } from './types'
-
-// Props & Emits
-const props = defineProps<{ ... }>()
-const emit = defineEmits<{ ... }>()
-
-// 状态
-const data = ref(null)
-
-// 计算属性
-const derived = computed(() => ...)
-
-// 方法
-function handleAction() { ... }
-
-// 生命周期
-onMounted(() => { ... })
-</script>
-
-<style lang="scss" scoped>
-/* 组件样式 */
-</style>
-```
-
-### Props 与 Emits
-
-```ts
-// Props：使用泛型定义
-const props = defineProps<{
-  modelValue: string
-  options: SelectOptionItem[]
-  control?: SelectControlOptions
-}>()
-
-// 带默认值
-const props = withDefaults(
-  defineProps<{
-    loadFn: (parentId: string | number) => Promise<FileNodeItem[]>
-    modelValue?: FileNodeItem | null
-  }>(),
-  { modelValue: null }
-)
-
-// Emits：使用泛型定义
-const emit = defineEmits<{
-  'update:modelValue': [value: any]
-  'node-select': [node: FileNodeItem | null]
-}>()
-```
-
-### 组件命名
-
-```vue
-<!-- 组件内 name 由文件名自动推断 -->
-<!-- 不使用 vite-plugin-vue-setup-extend -->
-
-<!-- 使用时统一 PascalCase -->
-<FormInput v-model="form.name" />
-<ZoomImageViewer :src="url" />
-```
-
-## TypeScript 规范
-
-### 类型定义
-
-```ts
-// 接口使用 PascalCase
-export interface FileNodeItem {
-  id: string | number
-  name: string
-  fileType: 'FOLDER' | string
-  [key: string]: any  // 允许扩展属性
+```go
+if err != nil {
+    return fmt.Errorf("加载配置 %s: %w", path, err)
 }
-
-// 类型别名
-export type FormItemOptions = Partial<FormItemProps>
-export type SelectControlOptions = Partial<SelectProps>
 ```
 
-### 函数签名
+### 并发与 context
 
-```ts
-// 具体类型，避免 any
-const handleLoad = async (
-  node: any,
-  resolve: (data: FileNodeItem[]) => void
-) => { ... }
+- goroutine 生命周期必须受 `context` 控制，取消信号跨进程/请求链路透传。
+- 共享状态用 `mutex` 保护；channel 传递所有权，避免数据竞争（CI 跑 `-race`）。
 
-// 回调函数明确类型
-const triggerSelectUpdate = (node: FileNodeItem | null) => { ... }
+```go
+ctx, cancel := context.WithTimeout(r.Context(), timeout)
+defer cancel()
 ```
 
-## CSS 规范
+## 二、React / TypeScript 规范
 
-### 主题变量使用
+### 组件与文件
 
-```scss
-// ✅ 正确：使用 opencode2api_enhance CSS 变量
-color: var(--app-text-primary);
-background-color: var(--app-bg-container);
-border: 1px solid var(--app-border-color);
+- 组件文件 **PascalCase.tsx**，放在 `src/pages/` 或 `src/components/`。
+- 一律使用**函数组件 + hooks**，不使用 class 组件。
 
-// ❌ 错误：硬编码颜色值
-color: #303133;
-background-color: #ffffff;
-
-// ❌ 错误：使用其他项目变量
-color: var(--next-color-bar);
+```tsx
+// src/pages/InstancesPage.tsx
+export function InstancesPage() {
+  const [instances, setInstances] = useState<Instance[]>([])
+  return <div className="flex flex-col gap-2">...</div>
+}
 ```
 
-### 样式作用域
+### Hooks
 
-```vue
-<!-- scoped 样式：组件内使用 -->
-<style lang="scss" scoped>
-.component-class { ... }
-</style>
+- 自定义 hook 以 `use` 前缀命名，放在 `src/lib/` 或就近文件。
+- 副作用集中在 `useEffect`，依赖数组完整；避免在渲染中产生副作用。
 
-<!-- 非 scoped 样式：覆盖第三方组件内部样式 -->
-<style lang="scss">
-.el-tree-node__content { ... }
-</style>
+### 类型
+
+- 开启严格模式，**避免 `any`**；接口/类型用 PascalCase，字段 camelCase。
+- 与后端交互的数据结构在 `src/lib/api.ts` 集中定义，字段对齐 Go 侧 JSON tag。
+
+### API 对接层
+
+- 所有对 core 的调用统一走 `src/lib/api.ts` → `/api/admin/*`，桌面与 Web 共用同一层，不散落 fetch。
+
+## 三、样式规范（Tailwind）
+
+- 优先使用 **Tailwind 4 utility class** 内联布局与配色，全局样式集中在 `src/index.css`。
+- **不使用 SCSS、不使用 Element Plus、不使用 `--app-*` 变量体系**。
+- 暗色/主题用 Tailwind 的 `dark:` 变体或 data 属性方案，保持与七页 UI 一致。
+- 图标用 `lucide-react`，不引入额外图标库。
+
+```tsx
+<div className="rounded-lg border border-neutral-200 bg-white p-3 dark:border-neutral-800 dark:bg-neutral-900" />
 ```
 
-### 样式引入
+## 四、测试规范
 
-```scss
-// index.scss 使用 @use 引入
-@use './reset.scss';
-@use './nprogress.scss';
-@use './element.scss';
-@use './transition.scss';
-@use './theme/variables.scss';
-```
+- 每步改动后 `go test -count=1 ./...` **全绿**才提交；不触网，以 mock / httptest 为准。
+- HTTP 相关测试一律用 `httptest` **随机端口**，禁止占用真实服务端口。
+- 任何真实服务启动/测试前，按 `docs/AI-TESTING-GUIDE.md` 做端口与进程检查，并用三件套环境变量隔离：`OPCODE2API_DATA_DIR` / `OPCODE2API_GATEWAY_PORT` / `OPCODE2API_INSTANCE_BASE_PORT`；禁止 kill 非自己启动的 opencode2api / sing-box 进程。
+- 新逻辑须有可复现的测试步骤；错误路径也要覆盖测试。
+- 前端以 `npm run build`（tsc -b + vite build）通过为门槛。
 
-## Git 提交规范
+## 五、轻量化原则
+
+- **少依赖**：不引入图表库、状态管理库等重组件；分析/可视化用纯 CSS 实现。
+- **按需添加**：只加有实际使用价值的功能，不为「看起来丰富」堆功能。
+- **体积敏感**：UI 与运行时保持精简，避免无意义依赖膨胀拖慢启动、增大打包体积。
+- 新功能优先用现有技术栈（Tauri command + React + Tailwind + Go 标准库）完成。
+
+## 六、目录与分层约定
+
+- **core 与 vendor 解耦**：新增供应商 = 在 `vendors/` 加一个文件夹并实现 `core/contract`，**零 core 改动**。
+- 管理域逻辑集中在 `core/manager`，协议转换集中在根 main 包，不交叉混放。
+- 平台相关实现用 `_windows.go` / `_other.go` 构建标签隔离，公共逻辑不掺平台代码。
+- 前端七页 UI 是全平台唯一事实界面，新增页面须先与七页对齐。
+
+## 七、Git 提交规范
 
 ### 格式
 
@@ -223,48 +134,20 @@ color: var(--next-color-bar);
 | ci | 🐳 | CI/CD 配置 |
 | revert | ⏪ | 回滚 |
 
-### scope 范围
+### scope 范围（对齐真实模块）
 
-`auth`, `api`, `login`, `layout`, `theme`, `i18n`, `map`, `chart`, `user`, `role`, `menu`, `dict`
+`gateway`、`manager`、`router`、`aggregator`、`contract`、`vendors`、`custom`、`pool`、`proxy`、`socks`、`calllog`、`stats`、`ui`、`tauri`、`docs`、`ci`
 
 ### 示例
 
 ```
-✨feat(auth): 添加用户注册接口
-🐛fix(login): 修复登录报错弹窗重复显示
-♻️refactor(api): 请求拦截器支持 showGlobalError 开关
+✨feat(custom): 自定义源 key 连续失败熔断冷却自动恢复
+🐛fix(gateway): 修复新增供应商后已有供应商全部 502
+♻️refactor(router): smart 路由每请求推进游标并加质量加权抖动
 ```
 
 ### 规则
 
-- 描述使用**中文**，祈使语气，首字母不大写，结尾不加句号
-- 首行不超过 50 个字符
-- 正文每行不超过 72 个字符
-
-## 组件开发约定
-
-### 公共组件
-
-- 放在 `src/components/` 下
-- 支持 `v-model` 双向绑定
-- Props 使用泛型定义，提供默认值
-- 样式使用 `--app-*` CSS 变量，适配暗色模式
-
-### 页面组件
-
-- 放在 `src/views/` 对应目录下
-- 使用 `CgPanel`、`CgTable` 等公共组件
-- API 调用通过 `useAuth`、`useDict` 等组合式函数
-
-### 组合式函数
-
-- 返回值解构使用 `const { ... } = useXxx()` 模式
-- 内部状态使用 `ref` 或 `reactive`
-- 可选链调用方法避免空值错误
-
-### 样式
-
-- 所有颜色使用 `--app-*` CSS 变量
-- 暗色模式通过 `html.dark` 类自动切换
-- 组件内使用 `scoped` 样式
-- 覆盖 Element Plus 样式时使用非 `scoped` 样式块
+- 描述使用**中文**，祈使语气，结尾不加句号。
+- 首行尽量不超过 50 个字符；正文每行不超过 72 个字符。
+- 默认不 push 远程；破坏性操作与 push 需人类明确授权。

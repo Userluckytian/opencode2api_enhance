@@ -508,7 +508,7 @@ func applyCustomProvidersSave(m *manager.Manager, inputs []customProviderInput) 
 	}
 
 	cfg.Providers = kept
-	if err := saveConfig(configPath, cfg); err != nil {
+	if err := saveConfigWithWriter(configPath, cfg, "custom-propagate"); err != nil {
 		return nil, fmt.Errorf("配置写入失败: %w", err)
 	}
 	// 诊断日志：保存前后 providers 对比
