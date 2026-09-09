@@ -198,6 +198,10 @@ func (v *Vendor) call(ctx context.Context, msg *contract.Message, streaming bool
 	modelID := msg.Model
 	maxRetries := maxRetriesOf(msg)
 
+	// Responses-only 模型（muse-spark 系列）走 /zen/v1/responses（付费 go 面走 /zen/go/v1/responses）。
+	// 命中时请求构造与 2xx 响应都在厂商内完成 Responses ↔ chat 翻译，下游契约不变。
+	respURL, useResponses := v.responsesEndpoint(modelID, a)
+
 	var lastBody []byte
 	var lastStatus int
 	var lastHeader http.Header
@@ -206,7 +210,13 @@ func (v *Vendor) call(ctx context.Context, msg *contract.Message, streaming bool
 	var retryCount, retry401Count, retry429Count int
 
 	for retryCount <= maxRetries {
-		up, err := v.buildRequest(modelID, bodyMap, a)
+		var up *http.Request
+		var err error
+		if useResponses {
+			up, err = v.buildResponsesRequest(respURL, modelID, bodyMap, streaming, a)
+		} else {
+			up, err = v.buildRequest(modelID, bodyMap, a)
+		}
 		if err != nil {
 			lastErr = err
 			break
@@ -251,6 +261,9 @@ func (v *Vendor) call(ctx context.Context, msg *contract.Message, streaming bool
 					"model", modelID, "status", resp.StatusCode, "content_type", ct, "node", proxyAddr)
 			}
 			if streaming {
+				if useResponses {
+					return &callResult{stream: v.wrapResponsesSSE(resp.Body, modelID), status: resp.StatusCode, nodeAddr: proxyAddr}, nil
+				}
 				return &callResult{stream: resp.Body, status: resp.StatusCode, nodeAddr: proxyAddr}, nil
 			}
 			b, readErr := io.ReadAll(resp.Body)
@@ -258,7 +271,9 @@ func (v *Vendor) call(ctx context.Context, msg *contract.Message, streaming bool
 			if readErr != nil {
 				return nil, readErr
 			}
-			if isAnthropicFormat(b) {
+			if useResponses {
+				b = translateResponsesJSON(b, modelID)
+			} else if isAnthropicFormat(b) {
 				b = convertAnthropicToOpenAI(b, modelID)
 			}
 			return &callResult{body: b, status: resp.StatusCode, headers: resp.Header, nodeAddr: proxyAddr}, nil
