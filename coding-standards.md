@@ -1,117 +1,47 @@
-# opencode2api_enhance 编码规范说明
+# opencode2api_enhance 编码规范
 
-> 本项目 = **Go 后端（纯标准库）+ React 前端（Tailwind）+ Tauri 壳**。规范以真实代码为准，坚持零依赖与轻量化。
+> 本文件为**通用工程约定**，适用于任意语言/技术栈。各语言/框架的**项目专属约定**（如前端组件命名、后端分层规则、特定 Lint 配置）请在「项目专属约定」一章补充，由项目自行维护。
 
-## 一、Go 代码规范
+## 核心原则
 
-### 文件与包命名
+- **可读性优先**：代码是写给后来者（包括未来的自己）读的。
+- **职责单一**：一个函数/类/模块只做一件事；过大时拆解。
+- **一致优先**：以项目现有代码的主流写法为主；有约定先遵守约定。
+- **最小修改**：改动只动必要部分，不做顺手重构，避免放大 diff。
 
-| 类型 | 规范 | 示例 |
-|------|------|------|
-| 源文件 | snake_case.go | `chat_handler.go`、`custom_providers.go`、`gateway_timeout.go` |
-| 测试文件 | 被测文件 + `_test.go` | `chat_handler_test.go` |
-| 包名 | 小写单词，不加下划线 | `package manager`、`package contract` |
-| 平台分支文件 | 后缀 `_windows.go` / `_other.go` | `autostart_windows.go`、`netstat_other.go` |
+## 命名规范
 
-### 标识符命名
+- 文件、类、函数、变量的命名必须**表达意图**，避免 `tmp`、`data`、`obj` 这类无意义命名。
+- 遵循项目所在**语言/社区的通行命名风格**，并以项目现有代码为准。
+- 缩写仅在项目内通用时使用；跨模块命名保持一致。
 
-- 导出标识符 **PascalCase**，未导出 **camelCase**。
-- 常量、构造函数、接收者命名保持简短一致。
+## 代码结构与组织
 
-```go
-// 导出处理函数 PascalCase；内部函数 camelCase
-func HandleChat(w http.ResponseWriter, r *http.Request) { ... }
-func parseUpstreamUsage(resp *http.Response) (*Usage, error) { ... }
-```
+- 按**功能/模块**组织文件，而非按文件类型堆叠。
+- 单个文件/函数保持合理长度，超出阈值就拆分。
+- 公共逻辑抽取复用，避免复制粘贴（DRY）。
 
-### 依赖纪律（零第三方）
+## 代码风格
 
-- **只用 Go 标准库**，go.mod 不引入任何 require。
-- 确需新增第三方依赖，必须在提交说明中论证理由，并评估是否可用标准库替代。
+- **格式化交给工具**：优先使用项目配置的 formatter（如 prettier/black/gofmt）与 linter，不靠人工对齐。
+- 避免无意义的冗余；注释表达「为什么」而不是「做了什么」。
+- 魔法数字/字符串抽成命名常量。
 
-### 错误处理
+## 错误处理
 
-- 错误向上冒泡时用 `%w` 包装并附上下文，不吞错、不 panic（除非不可恢复）。
+- 明确错误边界在哪里；不要用空 `catch`/`except` 吞掉异常。
+- 关键路径的错误必须记录日志并给出可读提示。
+- 对外部输入（用户输入、API 返回值、文件内容）做校验与兜底。
 
-```go
-if err != nil {
-    return fmt.Errorf("加载配置 %s: %w", path, err)
-}
-```
+## 安全
 
-### 并发与 context
+- **密钥、token、密码、凭证绝不进 git**；使用环境变量/密钥管理。
+- 不硬编码密钥与真实地址。
+- 对敏感操作（push 远程、删除、改动生产）需人类明确授权。
 
-- goroutine 生命周期必须受 `context` 控制，取消信号跨进程/请求链路透传。
-- 共享状态用 `mutex` 保护；channel 传递所有权，避免数据竞争（CI 跑 `-race`）。
+## Git 提交规范
 
-```go
-ctx, cancel := context.WithTimeout(r.Context(), timeout)
-defer cancel()
-```
-
-## 二、React / TypeScript 规范
-
-### 组件与文件
-
-- 组件文件 **PascalCase.tsx**，放在 `src/pages/` 或 `src/components/`。
-- 一律使用**函数组件 + hooks**，不使用 class 组件。
-
-```tsx
-// src/pages/InstancesPage.tsx
-export function InstancesPage() {
-  const [instances, setInstances] = useState<Instance[]>([])
-  return <div className="flex flex-col gap-2">...</div>
-}
-```
-
-### Hooks
-
-- 自定义 hook 以 `use` 前缀命名，放在 `src/lib/` 或就近文件。
-- 副作用集中在 `useEffect`，依赖数组完整；避免在渲染中产生副作用。
-
-### 类型
-
-- 开启严格模式，**避免 `any`**；接口/类型用 PascalCase，字段 camelCase。
-- 与后端交互的数据结构在 `src/lib/api.ts` 集中定义，字段对齐 Go 侧 JSON tag。
-
-### API 对接层
-
-- 所有对 core 的调用统一走 `src/lib/api.ts` → `/api/admin/*`，桌面与 Web 共用同一层，不散落 fetch。
-
-## 三、样式规范（Tailwind）
-
-- 优先使用 **Tailwind 4 utility class** 内联布局与配色，全局样式集中在 `src/index.css`。
-- **不使用 SCSS、不使用 Element Plus、不使用 `--app-*` 变量体系**。
-- 暗色/主题用 Tailwind 的 `dark:` 变体或 data 属性方案，保持与七页 UI 一致。
-- 图标用 `lucide-react`，不引入额外图标库。
-
-```tsx
-<div className="rounded-lg border border-neutral-200 bg-white p-3 dark:border-neutral-800 dark:bg-neutral-900" />
-```
-
-## 四、测试规范
-
-- 每步改动后 `go test -count=1 ./...` **全绿**才提交；不触网，以 mock / httptest 为准。
-- HTTP 相关测试一律用 `httptest` **随机端口**，禁止占用真实服务端口。
-- 任何真实服务启动/测试前，按 `docs/AI-TESTING-GUIDE.md` 做端口与进程检查，并用三件套环境变量隔离：`OPCODE2API_DATA_DIR` / `OPCODE2API_GATEWAY_PORT` / `OPCODE2API_INSTANCE_BASE_PORT`；禁止 kill 非自己启动的 opencode2api / sing-box 进程。
-- 新逻辑须有可复现的测试步骤；错误路径也要覆盖测试。
-- 前端以 `npm run build`（tsc -b + vite build）通过为门槛。
-
-## 五、轻量化原则
-
-- **少依赖**：不引入图表库、状态管理库等重组件；分析/可视化用纯 CSS 实现。
-- **按需添加**：只加有实际使用价值的功能，不为「看起来丰富」堆功能。
-- **体积敏感**：UI 与运行时保持精简，避免无意义依赖膨胀拖慢启动、增大打包体积。
-- 新功能优先用现有技术栈（Tauri command + React + Tailwind + Go 标准库）完成。
-
-## 六、目录与分层约定
-
-- **core 与 vendor 解耦**：新增供应商 = 在 `vendors/` 加一个文件夹并实现 `core/contract`，**零 core 改动**。
-- 管理域逻辑集中在 `core/manager`，协议转换集中在根 main 包，不交叉混放。
-- 平台相关实现用 `_windows.go` / `_other.go` 构建标签隔离，公共逻辑不掺平台代码。
-- 前端七页 UI 是全平台唯一事实界面，新增页面须先与七页对齐。
-
-## 七、Git 提交规范
+> 下列为默认约定，仅供**无既有约定**时使用；若项目已有自己的提交规范，以项目现有规范为准（可直接覆写本节）。
 
 ### 格式
 
@@ -119,7 +49,7 @@ export function InstancesPage() {
 <gitmoji><type>(<scope>): <中文描述>
 ```
 
-### type 类型
+### type 与 gitmoji
 
 | type | gitmoji | 说明 |
 |------|---------|------|
@@ -134,20 +64,40 @@ export function InstancesPage() {
 | ci | 🐳 | CI/CD 配置 |
 | revert | ⏪ | 回滚 |
 
-### scope 范围（对齐真实模块）
-
-`gateway`、`manager`、`router`、`aggregator`、`contract`、`vendors`、`custom`、`pool`、`proxy`、`socks`、`calllog`、`stats`、`ui`、`tauri`、`docs`、`ci`
-
-### 示例
-
-```
-✨feat(custom): 自定义源 key 连续失败熔断冷却自动恢复
-🐛fix(gateway): 修复新增供应商后已有供应商全部 502
-♻️refactor(router): smart 路由每请求推进游标并加质量加权抖动
-```
-
 ### 规则
 
-- 描述使用**中文**，祈使语气，结尾不加句号。
-- 首行尽量不超过 50 个字符；正文每行不超过 72 个字符。
-- 默认不 push 远程；破坏性操作与 push 需人类明确授权。
+- 描述使用**中文**，祈使语气，首字母不大写，结尾不加句号
+- 首行尽量不超过 50 字符
+- 正文每行不超过 72 字符
+
+## 模块/组件开发约定
+
+- 公共可复用模块放入统一目录（如 `src/components/`、`lib/`、`common/`），保持职责单一。
+- 对外接口支持统一的输入/输出约定，必要时提供默认值。
+- 样式若使用 CSS 变量，统一使用 `--app-*` 前缀（适配主题/暗色切换）。
+
+## 项目专属约定
+
+> 本节为**留空填写**区，由目标项目按其实际技术栈补充，AI 与协作者据此执行。以下给出各栈的填写提示，按需勾选/填写，不需要的可整行删除。
+
+### 技术栈
+- 语言/框架：____________
+- 构建/运行命令：____________
+- 包管理器：____________
+- 测试命令/工具：____________
+
+### 前端约定（若是前端项目）
+- 组件命名：____________（如 PascalCase）
+- 状态管理：____________
+- 样式作用域 / 主题变量：____________
+- 路由 / 目录结构：____________
+
+### 后端约定（若是后端项目）
+- 分层结构：____________（如 controller/service/repository）
+- API 返回结构：____________
+- 异常/错误定义：____________
+- 数据访问方式：____________
+
+### 其他
+- Lint/格式化工具与配置：____________
+- 特殊工具链 / 版本要求：____________

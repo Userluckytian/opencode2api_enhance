@@ -6,10 +6,12 @@ agent: build
 使用 @phase-planner 子代理，按 `docs/ai-framework/phased-plan-driven.md` 与 `AGENTS.md` 执行阶段规划。
 
 要求：
-1. 先读进度/总控文档与既有 `docs/ai-framework/plans/` 或 `docs/superpowers/plans/`，避免重复已完成阶段。
-2. 产出完整阶段计划（含验收总表 + 文末可粘贴交接提示词五段结构）；可参考 `docs/ai-framework/phase-plan.template.md`。
-3. 明确做/不做与红线；建议分支名；不要擅自 push。
-4. 结束后给出计划路径；提示完成后用 `/accept-phase`，仅需提示词时用 `/handoff`。
+0. **开工前先问用户三件事**（一次问清）：① **运行模式**（交互式/目标模式，默认交互式）② 本阶段**实施档位**（简约/经济/全能/豪华，默认全能） ③ **是否启用子代理**（只作用于「独立角色」——代码审查+验收；简约/经济建议不启用，全能/豪华建议启用）。写入计划头部。
+1. 若用户选**目标模式**（§12）：先立 MASTER 目标（全部模块/边界/依赖/每模块完成判据），阶段计划**到了才细化/更新**，自主连续推进；等不了的人工项标记「待人工」不阻塞；红线仍需授权；全部完成才停。
+2. 先读进度/总控文档与既有 `docs/ai-framework/plans/` 或 `docs/superpowers/plans/`，避免重复已完成阶段。
+3. 产出完整阶段计划（含实施档位、验收总表 + 文末可粘贴交接提示词五段结构）；可参考 `docs/ai-framework/phase-plan.template.md`；档位不含的环节在「跳过项」登记。
+4. 明确做/不做与红线；建议分支名；不要擅自 push。
+5. 结束后给出计划路径；提示完成后用 `/accept-phase`，仅需提示词时用 `/handoff`。
 
 人类补充的阶段目标与约束：
 $ARGUMENTS

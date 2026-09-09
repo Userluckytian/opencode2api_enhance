@@ -97,3 +97,6 @@ legacy/
 # 按天问题日志（只入库约定文档 README.md，每日日志本地保留不入库）
 docs/issue-log/*
 !docs/issue-log/README.md
+
+# AI 工具原地改写前的 .bak 备份（本地保留，不入库）
+*.bak
