@@ -1,5 +1,39 @@
 # Changelog
 
+## v1.7.4（2026-09-09，正式发布）
+
+> 由 v1.7.4-beta.1/2/3 验证后合入 main 的正式版：可观测性机制 + opencode 免费模型（muse-spark）完整可用。
+
+### 🚀 新功能
+
+- **opencode muse-spark 系列免费模型可用**：上游仅通过 OpenAI Responses 端点（`/zen/v1/responses`）提供
+  该模型，此前网关固定走 chat/completions 恒 500。现按模型自动路由 responses 端点（付费 go 面走
+  `/zen/go/v1/responses`），并在厂商内完成 chat ↔ responses 双向翻译（非流式 JSON + 流式 SSE），
+  三种下游协议（OpenAI chat / Anthropic / Responses）统一可用
+- **工具调用 / agent loop 闭环**：客户端 tools/tool_choice 透传到上游，历史 assistant tool_calls 与
+  tool 结果映射为 Responses items；返回侧还原 `message.tool_calls`（非流）与流式 `function_call` 事件，
+  模型从"只口头应答"变为真正可调用工具并基于结果续答
+- **usage 明细透出**：muse 的推理 token 数以 `completion_tokens_details.reasoning_tokens` 透传，
+  客户端可见"思考了多少"
+- **可观测性机制**（beta 系列并入）：调用记录归因字段/路由结论/统一日志/分布式 Trace/诊断/失败现场打包/
+  配置溯源/失败计数/复现重放/预内容静默超时
+
+### 🐛 修复
+
+- **muse-spark-1.3-contributor-free 恒 500**：chat/completions 端点上游不支持该模型（任何出口均 500/
+  403），改走 responses 端点后正常
+- **assistant 历史消息 400**：Responses 协议按角色限制 content part 类型，assistant 历史必须用
+  `output_text`（误用 `input_text` 上游 400）
+- **tool_choice 400**：muse 上游仅支持 `tool_choice:"auto"`，`none/required/指定函数` 归一化处理
+  （none → 本轮不下发工具；required/指定函数 → 回退 auto 决策）
+- **首字慢归因**：muse 为长思考模型（默认 effort=high，单次数百 reasoning token 后吐正文），
+  思考段上游仅下发加密内容，属上游特性；外部 `reasoning_effort=low/medium/high` 已确认透传生效
+
+### 🔧 内部/规范
+
+- `vendors/opencode` 新增 responses 端点支持层（模型判定/端点选择/请求构造/JSON 与 SSE 翻译）
+- Go 测试全绿；真机 e2e 验证：非流/流式/Anthropic 三协议 + 带工具 agent loop 闭环
+
 ## v1.7.4-beta.3（2026-09-05，测试预发布）
 
 > 合入 `feat/debug-observability` 调试与可观测性机制（阶段1-8）。验证通过后再合入 main 打正式 `v1.7.4`。
