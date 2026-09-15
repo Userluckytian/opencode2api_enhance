@@ -159,6 +159,27 @@ func (m *Manager) DeleteHandler() http.HandlerFunc {
 	}
 }
 
+// RefreshModelsHandler POST /api/admin/plugins/{id}/refresh-models：手动从上游（官网，
+// 经插件子进程）刷新该插件模型清单并触发聚合目录重建。
+func (m *Manager) RefreshModelsHandler() http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if !requireMethod(w, r, http.MethodPost) {
+			return
+		}
+		id := r.PathValue("id")
+		view, err := m.RefreshModels(id)
+		if err != nil {
+			if errors.Is(err, errNotFound) {
+				writeErr(w, http.StatusNotFound, err.Error())
+			} else {
+				writeErr(w, http.StatusConflict, err.Error())
+			}
+			return
+		}
+		writeJSON(w, map[string]any{"status": "ok", "plugin": view})
+	}
+}
+
 func (m *Manager) enabledOf(id string) bool {
 	m.mu.Lock()
 	defer m.mu.Unlock()

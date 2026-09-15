@@ -118,3 +118,12 @@ func pluginSigOf(rps []pluginprovider.RunningPlugin) string {
 	}
 	return sb.String()
 }
+
+// onPluginModelRefresh 手动刷新插件模型回调：无节流强制刷新聚合目录（/v1/models 即时更新）。
+func onPluginModelRefresh(id string) {
+	if globalAgg == nil {
+		return
+	}
+	refreshModelCatalog()
+	slog.Info("plugin models refreshed", "plugin", id)
+}

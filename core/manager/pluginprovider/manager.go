@@ -13,6 +13,7 @@ import (
 	"crypto/rand"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -72,6 +73,8 @@ type Config struct {
 	StateFile string
 	// OnChange 就绪/状态/增删变化回调（R2 桥接厂商经此触发 rebuildVendors；可为 nil）。
 	OnChange func()
+	// OnModelRefresh 手动刷新模型回调（main 侧注入强制刷聚合目录；可为 nil）。
+	OnModelRefresh func(id string)
 }
 
 // Manager 插件管理器。所有插件状态在 mu 保护下读写；子进程 stdout 管道/退出
@@ -907,24 +910,25 @@ func parseReadyLine(line string) (*readyMsg, bool) {
 	}
 }
 
-// queryModelCount 就绪后向子进程拉一次模型目录计数（不参与桥接，仅列表展示）。
-func (m *Manager) queryModelCount(p *plugin) {
+// fetchPluginModels 向子进程拉取最新模型 ID 清单（GET {url}/v1/models）。
+func (m *Manager) fetchPluginModels(p *plugin) ([]string, error) {
 	m.mu.Lock()
 	url, auth := p.url, p.auth
+	timeout := m.cfg.ModelTimeout
 	m.mu.Unlock()
 	if url == "" {
-		return
+		return nil, errors.New("插件端点未就绪")
 	}
-	ctx, cancel := context.WithTimeout(m.ctx, m.cfg.ModelTimeout)
+	ctx, cancel := context.WithTimeout(m.ctx, timeout)
 	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url+"/v1/models", nil)
 	if err != nil {
-		return
+		return nil, err
 	}
 	req.Header.Set("Authorization", "Bearer "+auth)
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
-		return
+		return nil, err
 	}
 	defer resp.Body.Close()
 	var out struct {
@@ -933,16 +937,28 @@ func (m *Manager) queryModelCount(p *plugin) {
 		} `json:"data"`
 	}
 	if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&out); err != nil {
-		return
+		return nil, err
 	}
-	m.mu.Lock()
-	p.modelCount = len(out.Data)
 	ids := make([]string, 0, len(out.Data))
 	for _, d := range out.Data {
 		if d.ID != "" {
 			ids = append(ids, d.ID)
 		}
 	}
+	if len(ids) == 0 {
+		return nil, errors.New("empty model list")
+	}
+	return ids, nil
+}
+
+// queryModelCount 就绪后向子进程拉一次模型目录计数（不参与桥接，仅列表展示）。
+func (m *Manager) queryModelCount(p *plugin) {
+	ids, err := m.fetchPluginModels(p)
+	if err != nil {
+		return
+	}
+	m.mu.Lock()
+	p.modelCount = len(ids)
 	p.modelsAll = ids
 	m.mu.Unlock()
 }
@@ -972,6 +988,36 @@ func randomToken() string {
 func (m *Manager) Rescan() []View {
 	m.scan()
 	return m.Views()
+}
+
+// RefreshModels 手动刷新模型：从子进程拉取官网最新清单，更新模型计数，并触发
+// OnModelRefresh 回调（main 侧强制刷新聚合目录）。失败时保持旧清单并返回错误。
+func (m *Manager) RefreshModels(id string) (View, error) {
+	m.mu.Lock()
+	p, ok := m.plugins[id]
+	var status, url string
+	if ok {
+		status, url = p.status, p.url
+	}
+	m.mu.Unlock()
+	if !ok {
+		return View{}, errNotFound
+	}
+	if status != StatusRunning || url == "" {
+		return View{}, errors.New("插件未运行，无法刷新模型")
+	}
+	ids, err := m.fetchPluginModels(p)
+	if err != nil {
+		return View{}, fmt.Errorf("刷新模型失败: %w", err)
+	}
+	m.mu.Lock()
+	p.modelCount = len(ids)
+	p.modelsAll = ids
+	m.mu.Unlock()
+	if m.cfg.OnModelRefresh != nil {
+		m.cfg.OnModelRefresh(id)
+	}
+	return m.View(id), nil
 }
 
 // View 插件列表项（管理 API 契约，设计文档 §七）。

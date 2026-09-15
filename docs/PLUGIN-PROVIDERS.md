@@ -227,6 +227,7 @@ argv         = --provider-serve --port 0   （port 0 = OS 分配随机端口）
 | `/api/admin/plugins` | GET | 扫描结果列表（id/name/version/状态/模型数/全量模型清单 models_all/暴露配置/路径/provider.json 全文） |
 | `/api/admin/plugins/{id}/config` | POST | 保存编辑后的 provider.json（校验后原子写盘） |
 | `/api/admin/plugins/{id}/exposed-models` | POST | 保存模型暴露白名单（`{"expose_all":bool,"exposed_models":[...]}`；仅合并两个保留键，写盘后聚合目录/网关即时生效） |
+| `/api/admin/plugins/{id}/refresh-models` | POST | 手动从上游（官网，经插件子进程）刷新该插件模型清单并触发聚合目录重建（`models_all`/`models` 即时更新） |
 | `/api/admin/plugins/{id}/toggle` | POST | 启停（停进程 or 拉起+注册） |
 | `/api/admin/plugins/{id}` | DELETE | 停进程 + 整目录删除 |
 | `/api/admin/plugins/rescan` | POST | 手动重扫 `providers/` |
