@@ -704,6 +704,8 @@ export const api = {
       exposed_models: exposedModels,
     }),
   pluginDelete: (id: string) => req<PluginDeleteResponse>('DELETE', `/plugins/${encodeURIComponent(id)}`),
+  pluginRefreshModels: (id: string) =>
+    req<PluginSaveResponse>('POST', `/plugins/${encodeURIComponent(id)}/refresh-models`),
 
   // 订阅（main 功能 M1）：preview 拉取解析、import 建实例、import-pool 仅入缓存
   subscribePreview: (url: string) => req<SubscribeResult>('POST', '/subscribe/preview', { url }),

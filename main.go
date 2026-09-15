@@ -208,7 +208,10 @@ func main() {
 	// 共享：主管理器开关落盘，实例/网关子进程下一扫描周期（≤3s）跟随停/启自家插件
 	// 并移除/恢复聚合模型——开关全局一致生效（2026-08-20 现场：客户端连统一网关
 	// 48280，网关进程旧装配不启插件，导致开/关都获取不到插件模型）。
-	pluginMgr := bindPluginMgr(pluginprovider.New(pluginprovider.Config{OnChange: syncPlugins}))
+	pluginMgr := bindPluginMgr(pluginprovider.New(pluginprovider.Config{
+		OnChange:       syncPlugins,
+		OnModelRefresh: onPluginModelRefresh,
+	}))
 	pluginMgr.Start()
 	defer pluginMgr.Close()
 	registerHTTPRoutes(mux, managerInst, pluginMgr)
@@ -328,6 +331,7 @@ func registerHTTPRoutes(mux *http.ServeMux, managerInst *manager.Manager, plugin
 		mux.HandleFunc("/api/admin/plugins/{id}/config", loggingMiddleware(requireAuth(pluginMgr.ConfigSaveHandler())))
 		mux.HandleFunc("/api/admin/plugins/{id}/toggle", loggingMiddleware(requireAuth(pluginMgr.ToggleHandler())))
 		mux.HandleFunc("/api/admin/plugins/{id}/exposed-models", loggingMiddleware(requireAuth(pluginMgr.ExposedModelsHandler())))
+		mux.HandleFunc("/api/admin/plugins/{id}/refresh-models", loggingMiddleware(requireAuth(pluginMgr.RefreshModelsHandler())))
 		mux.HandleFunc("/api/admin/plugins/{id}", loggingMiddleware(requireAuth(pluginMgr.DeleteHandler())))
 	}
 	// T3: 订阅源列表管理（新增/删除/立即拉取）+ 列表查看。

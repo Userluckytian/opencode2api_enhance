@@ -137,6 +137,7 @@ export default function CustomModelsPage({ toast }: { toast: (msg: string, ok?: 
   const [pluginConfirmDelete, setPluginConfirmDelete] = useState<string | null>(null)
   const [pluginBusy, setPluginBusy] = useState(false)
   const [modelSearch, setModelSearch] = useState('')
+  const [modelRefreshBusy, setModelRefreshBusy] = useState(false)
   // 启停/保存后子进程状态异步推进（starting→running/need_config），延迟刷新让状态落定
   const pluginRefreshTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
 
@@ -484,6 +485,29 @@ export default function CustomModelsPage({ toast }: { toast: (msg: string, ok?: 
       toast(`保存失败：${String(e)}`, false)
     } finally {
       setPluginBusy(false)
+    }
+  }
+
+  // 手动刷新模型：从官网（经插件子进程）拉最新清单，更新弹层 + 卡片模型数；
+  // 失败保留旧清单只报错；已勾选项中不在新清单的自动移除。
+  const refreshPluginModels = async () => {
+    if (!pluginExposing) return
+    setModelRefreshBusy(true)
+    try {
+      const r = await api.pluginRefreshModels(pluginExposing.id)
+      const fresh = r.plugin.models_all ?? []
+      setPlugins((prev) => prev?.map((x) => (x.id === pluginExposing.id ? r.plugin : x)) ?? null)
+      setPluginExposing((prev) => {
+        if (!prev) return prev
+        const keep = new Set([...prev.allowed].filter((m) => fresh.includes(m)))
+        return { ...prev, allModels: fresh, allowed: keep }
+      })
+      setModelSearch('')
+      toast(`已从官网刷新模型列表（${fresh.length} 个）`, true)
+    } catch (e) {
+      toast(`刷新模型失败：${String(e)}`, false)
+    } finally {
+      setModelRefreshBusy(false)
     }
   }
 
@@ -1178,9 +1202,21 @@ export default function CustomModelsPage({ toast }: { toast: (msg: string, ok?: 
           <div className="bg-white rounded-2xl shadow-xl w-full max-w-[722px] max-h-[90vh] overflow-y-auto p-6 space-y-4" onClick={(e) => e.stopPropagation()}>
             <div className="flex items-center justify-between">
               <div className="text-[15px] font-semibold text-zinc-900">暴露模型 · {pluginExposing.name}</div>
-              <button type="button" onClick={() => { setPluginExposing(null); setModelSearch('') }} className="p-1.5 rounded-lg text-zinc-400 hover:bg-zinc-100">
-                <X size={16} />
-              </button>
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => void refreshPluginModels()}
+                  disabled={modelRefreshBusy}
+                  className="flex items-center gap-1.5 border border-zinc-200 text-zinc-600 rounded-lg px-3 py-1.5 text-[13px] hover:bg-zinc-50 disabled:opacity-50"
+                  title="从官网重新拉取该插件最新模型列表"
+                >
+                  <RefreshCw size={14} className={modelRefreshBusy ? 'animate-spin' : ''} />
+                  刷新模型
+                </button>
+                <button type="button" onClick={() => { setPluginExposing(null); setModelSearch('') }} className="p-1.5 rounded-lg text-zinc-400 hover:bg-zinc-100">
+                  <X size={16} />
+                </button>
+              </div>
             </div>
 
             <div className="space-y-2">

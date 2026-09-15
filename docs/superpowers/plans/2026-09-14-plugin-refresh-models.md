@@ -204,11 +204,15 @@ func (m *Manager) queryModelCount(p *plugin) {
 func (m *Manager) RefreshModels(id string) (View, error) {
 	m.mu.Lock()
 	p, ok := m.plugins[id]
+	var status, url string
+	if ok {
+		status, url = p.status, p.url
+	}
 	m.mu.Unlock()
 	if !ok {
 		return View{}, errNotFound
 	}
-	if p.status != StatusRunning || p.url == "" {
+	if status != StatusRunning || url == "" {
 		return View{}, errors.New("插件未运行，无法刷新模型")
 	}
 	ids, err := m.fetchPluginModels(p)
