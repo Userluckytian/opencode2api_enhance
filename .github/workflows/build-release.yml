@@ -2,7 +2,7 @@ name: build-and-release
 
 # 触发：
 #   - push 到 main / feat/desktop-app，且提交信息含「CI」时自动打包（产物=artifacts）
-#   - push 版本 tag（v*）时自动打包 + 发布 GitHub Release（产物=Release 附件）
+#   - push 版本 tag（v*）时自动打包 + 发布 GitHub Release（产物=Release 附件，正文取自 CHANGELOG.md 对应版本段落）
 on:
   push:
     branches:
@@ -149,6 +149,61 @@ jobs:
     permissions:
       contents: write
     steps:
+      # 需读仓库里的 CHANGELOG.md；fetch-depth: 0 便于 git describe 找到上一版本 tag
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # 用 CHANGELOG.md 中对应版本段落作为 Release 正文；找不到时回退为 Full Changelog 链接
+      - name: Compose release body from CHANGELOG
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag="${GITHUB_REF_NAME}"
+          python3 - "$tag" .release-extract.md <<'PY'
+          import sys, pathlib, re
+          tag, out_path = sys.argv[1], pathlib.Path(sys.argv[2])
+          p = pathlib.Path("CHANGELOG.md")
+          body = ""
+          if p.exists():
+              out, capture = [], False
+              for ln in p.read_text(encoding="utf-8").splitlines():
+                  if ln.startswith("## "):
+                      if capture:
+                          break
+                      h = ln[3:].strip()
+                      m = re.match(r"[0-9A-Za-z.\-]+", h)
+                      head = m.group(0) if m else h
+                      if head == tag:
+                          capture = True
+                          continue
+                  if capture:
+                      out.append(ln)
+              body = "\n".join(out).strip()
+          out_path.write_text(body, encoding="utf-8")
+          PY
+          prev="$(git describe --tags --abbrev=0 "${tag}^" 2>/dev/null || true)"
+          {
+            if [ -s .release-extract.md ]; then
+              cat .release-extract.md
+              echo
+            else
+              echo "**${tag}**"
+              echo
+            fi
+            echo "---"
+            echo
+            if [ -n "$prev" ]; then
+              echo "**Full Changelog**: https://github.com/${GITHUB_REPOSITORY}/compare/${prev}...${tag}"
+            else
+              echo "**Full Changelog**: https://github.com/${GITHUB_REPOSITORY}/releases/tag/${tag}"
+            fi
+          } > RELEASE_BODY.md
+          echo "上一版本: ${prev:-（未找到）}"
+          echo "----- RELEASE_BODY.md -----"
+          cat RELEASE_BODY.md
+
       - name: Download all artifacts
         uses: actions/download-artifact@v4
         with:
@@ -158,6 +213,6 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           files: release/**/*
-          generate_release_notes: true
+          body_path: RELEASE_BODY.md
           name: opencode2api ${{ github.ref_name }}
           fail_on_unmatched_files: false
