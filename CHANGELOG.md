@@ -1,5 +1,19 @@
 # Changelog
 
+## v1.7.5-beta.2（2026-09-17，测试预发布）
+
+> 上游 opencode 免费通道新增服务端身份门禁，导致全部免费模型 403；本版适配后恢复可用。
+
+### 🐛 修复
+
+- **opencode 免费模型恢复可用（403 FreeTierError）**：上游自 2026-09-16/17 起对匿名免费通道
+  （`Authorization: Bearer public`）增加两项服务端校验——① `x-opencode-session` 必须为官方身份格式
+  `ses_` + 12 位十六进制 + 14 位 base62（共 30 字符）；② `User-Agent` 必须为 `opencode/<版本>` 且
+  版本 ≥ 1.17.0（低于该版本返回 426 UpgradeRequired，无版本号或第三方 UA 返回 403 FreeTierError）。
+  本版按官方规范生成会话与请求 ID（`x-opencode-request` 同为 `msg_` + 26 位身份串），并把版本探测
+  兜底值提升到门禁下限之上（探测到偏低版本时按 1.17.0 上报）；chat 与 responses 两条上游路径同步生效。
+  真机复验：`mimo-v2.5-free` 恢复 HTTP 200（修复前同场景 curl 实测 403）
+
 ## v1.7.5-beta.1（2026-09-15，beta）
 
 > 插件式供应商体验增强：模型清单手动刷新。
