@@ -284,13 +284,33 @@ func (v *Vendor) Cache(ctx context.Context) []contract.Model {
 	return all
 }
 
-// IsFree 实现 contract.Vendor：沿用既有规则（-free 后缀 / big-pickle）。
+// freeModelsWithoutSuffix 集中维护上游明确免费、但 ID 不带 `-free` 后缀的模型。
+// OpenCode 偶尔会用无后缀 ID 发布免费模型；新增例外时只改此处，避免目录与展示规则漂移。
+var freeModelsWithoutSuffix = [...]string{
+	"big-pickle",
+	"union-alpha",
+}
+
+// IsFreeModel 判断 OpenCode 模型是否属于免费通道。
+func IsFreeModel(modelID string) bool {
+	if strings.Contains(strings.ToLower(modelID), "-free") {
+		return true
+	}
+	for _, freeModelID := range freeModelsWithoutSuffix {
+		if strings.EqualFold(modelID, freeModelID) {
+			return true
+		}
+	}
+	return false
+}
+
+// IsFree 实现 contract.Vendor。
 func (v *Vendor) IsFree(modelID string) bool {
-	return v.isFree(modelID)
+	return IsFreeModel(modelID)
 }
 
 func (v *Vendor) isFree(modelID string) bool {
-	return strings.Contains(strings.ToLower(modelID), "-free") || strings.EqualFold(modelID, "big-pickle")
+	return IsFreeModel(modelID)
 }
 
 // ErrSemantics 实现 contract.Vendor：opencode 的可重试/可切换/坏账状态码。

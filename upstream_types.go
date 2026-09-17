@@ -6,6 +6,8 @@ import (
 	"crypto/subtle"
 	"net/http"
 	"strings"
+
+	"github.com/6Kmfi6HP/opencode2api/vendors/opencode"
 )
 
 type TierType int
@@ -112,7 +114,7 @@ func (auth UpstreamAuth) shouldUseGoEndpoint(modelID string) bool {
 	}
 }
 
-// isFreeModel 判定免费模型：名称任意位置包含 "-free"，或名称等于官方动态返回的真实免费模型 big-pickle。
+// isFreeModel 复用 OpenCode 厂商的免费模型规则，确保目录标记与 /v1/models 过滤一致。
 func isFreeModel(modelID string) bool {
-	return strings.Contains(strings.ToLower(modelID), "-free") || strings.EqualFold(modelID, "big-pickle")
+	return opencode.IsFreeModel(modelID)
 }
