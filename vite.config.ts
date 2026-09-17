@@ -14,6 +14,9 @@ export default defineConfig({
     __APP_VERSION__: JSON.stringify(pkg.version),
   },
   server: {
+    // Tauri devUrl 必须与此端口一致；固定端口避免 5173 被占用时 Vite 静默切到其它端口。
+    port: 1420,
+    strictPort: true,
     // headless 开发：浏览器访问 vite dev server 时 /api 转发到本地管理服务
     proxy: {
       '/api': {
