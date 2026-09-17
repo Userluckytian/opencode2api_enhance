@@ -12,6 +12,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -20,12 +21,19 @@ import (
 	"github.com/6Kmfi6HP/opencode2api/core/contract"
 )
 
+// minFreeTierVersion 是上游免费通道（Authorization: Bearer public）要求的最低客户端版本。
+// 上游按 User-Agent "opencode/<版本>" 识别客户端：低于该版本返回 426 UpgradeRequired
+// （"OpenCode 1.17.0 or newer is required to use the free tier"），
+// 无版本号或第三方 UA 返回 403 FreeTierError。
+// 见 docs/issue-log/2026-09-17.md「opencode 免费通道新增服务端校验」。
+const minFreeTierVersion = "1.17.0"
+
 // 上游端点（OpenCode 专属）。
 const (
 	zenModelsURL = "https://opencode.ai/zen/v1/models"
 	goModelsURL  = "https://opencode.ai/zen/go/v1/models"
 	versionURL   = "https://registry.npmjs.org/opencode-ai/latest"
-	versionDef   = "1.15.3"
+	versionDef   = minFreeTierVersion
 
 	// surfaceZen / surfaceGo 是 contract.Model.Meta 中 "surface" 键的取值，
 	// 用于保留 zen 目录与 go 目录的区分（路由/目录过滤需要）。
@@ -133,7 +141,7 @@ func (v *Vendor) transport() contract.Transport { return v.tr }
 func (v *Vendor) sessionID() string {
 	v.ocOnce.Do(func() {
 		v.ocClientVer = v.fetchOCVersion()
-		v.ocSessionID = "ses_" + randomString(24)
+		v.ocSessionID = "ses_" + canonicalID()
 		v.ocProjectID = randomHex(40)
 		slog.Info("opencode session initialized", "version", v.ocClientVer, "session_id", v.ocSessionID)
 	})
@@ -143,7 +151,7 @@ func (v *Vendor) sessionID() string {
 // refreshOCSession 强制刷新会话（供管理端/401 恢复调用）。
 func (v *Vendor) refreshOCSession() {
 	v.ocClientVer = v.fetchOCVersion()
-	v.ocSessionID = "ses_" + randomString(24)
+	v.ocSessionID = "ses_" + canonicalID()
 	v.ocProjectID = randomHex(40)
 	slog.Info("opencode session refreshed", "version", v.ocClientVer, "session_id", v.ocSessionID)
 	v.ocOnce = sync.Once{}
@@ -181,7 +189,13 @@ func (v *Vendor) fetchOCVersion() string {
 		Version string `json:"version"`
 	}
 	if json.Unmarshal(body, &info) == nil && info.Version != "" {
-		return info.Version
+		// 上游按版本号放行免费通道；库存元数据异常偏低时按最低可接受版本上报，
+		// 避免整体降级为 426/403。
+		if versionAtLeast(info.Version, minFreeTierVersion) {
+			return info.Version
+		}
+		slog.Warn("opencode version below free-tier minimum, using floor",
+			"got", info.Version, "floor", minFreeTierVersion)
 	}
 	return versionDef
 }
@@ -359,4 +373,38 @@ func randomHex(n int) string {
 		b[i] = hex[b[i]%byte(len(hex))]
 	}
 	return string(b)
+}
+
+// randomBase62 生成 n 位 base62 随机串（0-9A-Za-z），与官方客户端身份串字符集一致。
+func randomBase62(n int) string {
+	const alphabet = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
+	b := make([]byte, n)
+	rand.Read(b)
+	for i := range b {
+		b[i] = alphabet[b[i]%byte(len(alphabet))]
+	}
+	return string(b)
+}
+
+// canonicalID 返回官方客户端的身份串：12 位十六进制（时间戳段）+ 14 位 base62，共 26 字符。
+// 上游免费通道对 x-opencode-session 做严格格式校验（正则等价 ^ses_[0-9a-f]{12}[0-9A-Za-z]{14}$，
+// 总长 30）：缺失、UUID 风格、长度不符都会 403 FreeTierError。x-opencode-request 用 "msg_" 前缀同格式。
+func canonicalID() string { return randomHex(12) + randomBase62(14) }
+
+// versionAtLeast 判断 x.y.z 版本串 a 是否 >= b（缺失段按 0，解析失败按 0）。
+func versionAtLeast(a, b string) bool {
+	as, bs := strings.Split(a, "."), strings.Split(b, ".")
+	for i := 0; i < 3; i++ {
+		av, bv := 0, 0
+		if i < len(as) {
+			av, _ = strconv.Atoi(strings.TrimSpace(as[i]))
+		}
+		if i < len(bs) {
+			bv, _ = strconv.Atoi(strings.TrimSpace(bs[i]))
+		}
+		if av != bv {
+			return av > bv
+		}
+	}
+	return true
 }

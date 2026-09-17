@@ -148,7 +148,7 @@ func (v *Vendor) buildRequest(modelID string, bodyMap map[string]any, a authT) (
 	req.Header.Set("x-opencode-client", "cli")
 	req.Header.Set("x-opencode-project", v.ocProjectID)
 	req.Header.Set("x-opencode-session", v.ocSessionID)
-	req.Header.Set("x-opencode-request", "req_"+randomString(24))
+	req.Header.Set("x-opencode-request", "msg_"+canonicalID())
 	req.Header.Set("Accept", "application/json")
 	return req, nil
 }
