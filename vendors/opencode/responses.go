@@ -217,7 +217,7 @@ func responsesEffort(effort string) string {
 func (v *Vendor) buildResponsesRequest(upstreamURL, modelID string, bodyMap map[string]any, streaming bool, a authT) (*http.Request, error) {
 	rb := map[string]any{
 		"model":  modelID,
-		"stream": streaming,
+		"stream": streaming || a.mode == authPublic, // 免费通道 body 门禁强制流式
 		"input":  responsesInputFromMessages(bodyMap["messages"]),
 	}
 	for _, k := range []string{"temperature", "top_p"} {
@@ -250,7 +250,9 @@ func (v *Vendor) buildResponsesRequest(upstreamURL, modelID string, bodyMap map[
 			case "auto":
 				rb["tool_choice"] = "auto"
 			case "none":
-				responsesTools = nil
+				// 上游 muse 不支持 tool_choice:none，近似为「本轮不调工具」：
+				// 只保留门禁占位工具（否则免费通道 403），其余客户端工具不下发。
+				responsesTools = filterGateTools(responsesTools)
 			}
 		}
 		// 对象形态（指定函数）或其它值：不进 switch，走默认（有工具+无 tool_choice=auto）

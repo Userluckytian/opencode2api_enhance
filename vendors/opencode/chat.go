@@ -202,6 +202,12 @@ func (v *Vendor) call(ctx context.Context, msg *contract.Message, streaming bool
 	// 命中时请求构造与 2xx 响应都在厂商内完成 Responses ↔ chat 翻译，下游契约不变。
 	respURL, useResponses := v.responsesEndpoint(modelID, a)
 
+	// 免费通道 body 级门禁（2026-09-18）：强制 stream:true + 补齐 bash/glob/grep/read 工具名。
+	// 仅匿名 public 通道生效；付费通道（zen/go 带 key）请求形态保持不变。
+	if a.mode == authPublic {
+		ensureAgentGate(bodyMap, !useResponses)
+	}
+
 	var lastBody []byte
 	var lastStatus int
 	var lastHeader http.Header
@@ -272,9 +278,17 @@ func (v *Vendor) call(ctx context.Context, msg *contract.Message, streaming bool
 				return nil, readErr
 			}
 			if useResponses {
-				b = translateResponsesJSON(b, modelID)
+				if isSSEBody(b) {
+					// 免费通道强制 stream 后，非流式下游也会拿到 Responses SSE：
+					// 先走既有 responses→chat SSE 翻译，再聚合为非流式 chat.completion。
+					b = aggregateChatSSE(readAllCloser(v.wrapResponsesSSE(io.NopCloser(bytes.NewReader(b)), modelID)), modelID)
+				} else {
+					b = translateResponsesJSON(b, modelID)
+				}
 			} else if isAnthropicFormat(b) {
 				b = convertAnthropicToOpenAI(b, modelID)
+			} else if isSSEBody(b) {
+				b = aggregateChatSSE(b, modelID)
 			}
 			return &callResult{body: b, status: resp.StatusCode, headers: resp.Header, nodeAddr: proxyAddr}, nil
 		}
