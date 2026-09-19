@@ -704,6 +704,8 @@ export const api = {
   // 插件式供应商（第七页「自定义模型」插件 tab）：providers/ 目录发现 / 重扫 / 配置保存 / 启停 / 删除
   pluginsList: () => req<PluginListResponse>('GET', '/plugins'),
   pluginsRescan: () => req<PluginListResponse>('POST', '/plugins/rescan'),
+  /** 由 core 代开系统浏览器（Tauri WebView 拦截 window.open 的唯一可靠通路） */
+  openUrl: (url: string) => req<{ ok: boolean; opened?: string; error?: string }>('POST', '/open-url', { url }),
   pluginSaveConfig: (id: string, providerJSON: string) =>
     req<PluginSaveResponse>('POST', `/plugins/${encodeURIComponent(id)}/config`, { provider_json: providerJSON }),
   pluginToggle: (id: string, enabled: boolean) =>

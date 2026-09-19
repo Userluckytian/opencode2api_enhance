@@ -512,7 +512,16 @@ export default function CustomModelsPage({ toast }: { toast: (msg: string, ok?: 
     const params = new URLSearchParams({ gateway: `${window.location.origin}/v1`, plugin: p.id })
     if (key) params.set('key', key)
     if (models.length) params.set('models', models.join(','))
-    window.open(`${target}/?${params.toString()}`, '_blank', 'noopener')
+    const panelUrl = `${target}/?${params.toString()}`
+    // Tauri WebView 会静默拦截 window.open（跨源新窗口）——统一由 core 代开系统
+    // 浏览器（同源 /api/admin/open-url）；失败时浏览器模式兜底 window.open。
+    try {
+      const r = await api.openUrl(panelUrl)
+      if (!r.ok) throw new Error(r.error || 'open-url failed')
+    } catch {
+      const w = window.open(panelUrl, '_blank', 'noopener')
+      if (!w) { toast(`无法自动打开面板，请手动访问：${panelUrl}`, false) }
+    }
   }
 
   const openPluginEdit = (p: PluginProviderView) => {

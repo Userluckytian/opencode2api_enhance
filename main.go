@@ -266,6 +266,8 @@ func registerHTTPRoutes(mux *http.ServeMux, managerInst *manager.Manager, plugin
 	mux.HandleFunc("/api/admin/stats", loggingMiddleware(requireAuth(managerInst.StatsHandler())))
 	mux.HandleFunc("/api/admin/stats/by-day", loggingMiddleware(requireAuth(managerInst.StatsByDayHandler())))
 	mux.HandleFunc("/api/admin/stats/reset", loggingMiddleware(requireAuth(managerInst.ResetStatsHandler())))
+	// 插件面板入口：WebView 拦截 window.open（跨源新窗口），由 core 代开系统浏览器
+	mux.HandleFunc("/api/admin/open-url", loggingMiddleware(requireAuth(managerInst.OpenURLHandler())))
 	mux.HandleFunc("/api/admin/call-log", loggingMiddleware(requireAuth(managerInst.CallLogHandler())))
 	mux.HandleFunc("/api/admin/call-log/clear", loggingMiddleware(requireAuth(managerInst.ClearCallLogHandler())))
 	// 调用日志过滤与聚合（main 分支功能迁移 M4）。
