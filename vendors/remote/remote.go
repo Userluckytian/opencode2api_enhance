@@ -103,7 +103,9 @@ func (v *Vendor) ListModels(ctx context.Context) ([]contract.Model, error) {
 	}
 	var out struct {
 		Data []struct {
-			ID string `json:"id"`
+			ID              string `json:"id"`
+			ContextWindow   int    `json:"context_window"`
+			MaxOutputTokens int    `json:"max_output_tokens"`
 		} `json:"data"`
 	}
 	if err := json.Unmarshal(body, &out); err != nil {
@@ -118,11 +120,17 @@ func (v *Vendor) ListModels(ctx context.Context) ([]contract.Model, error) {
 		if m.ID == "" {
 			continue
 		}
+		// 插件可携带上下文窗口/最大输出等元数据（扩展字段，缺省 0 = 未知），
+		// 填入 Caps 供聚合目录与 /v1/models 扩展输出使用。
 		models = append(models, contract.Model{
 			ID:       v.prefix() + m.ID,
 			Provider: v.cfg.ID,
 			// 令牌由网关持有，客户端无需携带 → 对外即「免费可用」目录（与 custom 同款语义）。
 			Free: true,
+			Caps: contract.Capabilities{
+				ContextWindow: m.ContextWindow,
+				MaxTokens:     m.MaxOutputTokens,
+			},
 		})
 	}
 	models = v.filterAllowed(models)

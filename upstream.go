@@ -337,6 +337,10 @@ func callOpenCodeAPI(ctx context.Context, upstreamBody []byte, modelID string, a
 // callOpenCodeAPIOnce 非流式单模型尝试（原路由 + 厂商级 failover 循环）。
 func callOpenCodeAPIOnce(ctx context.Context, upstreamBody []byte, modelID string, auth UpstreamAuth) ([]byte, int, http.Header, string, error) {
 	cands := chatCandidates(modelID)
+	if len(cands) == 0 {
+		return nil, http.StatusServiceUnavailable, nil, "",
+			fmt.Errorf("没有可服务模型 %s 的供应商（其厂商未注册或已停用）", modelID)
+	}
 
 	var lastReply *contract.Reply
 	var lastErr error
@@ -389,6 +393,10 @@ func callOpenCodeAPIStream(ctx context.Context, upstreamBody []byte, modelID str
 // callOpenCodeAPIStreamOnce 流式单模型尝试（原路由 + 厂商级 failover 循环）。
 func callOpenCodeAPIStreamOnce(ctx context.Context, upstreamBody []byte, modelID string, auth *UpstreamAuth) (io.ReadCloser, int, http.Header, string, error) {
 	cands := chatCandidates(modelID)
+	if len(cands) == 0 {
+		return nil, http.StatusServiceUnavailable, nil, "",
+			fmt.Errorf("没有可服务模型 %s 的供应商（其厂商未注册或已停用）", modelID)
+	}
 
 	var lastStream *contract.Stream
 	var lastErr error

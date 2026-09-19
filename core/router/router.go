@@ -6,6 +6,7 @@ package router
 
 import (
 	"sort"
+	"strings"
 
 	"github.com/6Kmfi6HP/opencode2api/core/aggregator"
 	"github.com/6Kmfi6HP/opencode2api/core/contract"
@@ -43,8 +44,13 @@ func (r *Router) vendorByID(id string) contract.Vendor {
 // candidates 返回按优先级排序的可服务 modelID 的厂商：
 //  1. modelMap[model]（若存在且已注册）
 //  2. 聚合器倒排索引中提供该模型的厂商（按目录出现顺序）
-//  3. 兜底 defaultID
+//  3. 带厂商前缀（"x/model"）的模型：前缀 x 命中已注册厂商 → 直连该厂商；
+//     x 未注册（停用/未加载/写错）→ 返回空候选，由上层报明确错误
+//  4. 无前缀且无人提供 → 兜底 defaultID
 //
+// 带前缀的模型不兜底默认厂商：默认厂商对该模型必然报 model not supported
+// （401），既给客户端一个误导性错误，还会把默认厂商的账号池打进坏池
+//（2026-09-19 skywork 插件停用期间 skywork/* 请求全部误落 opencode 的事故）。
 // 去重并保持顺序。
 func (r *Router) candidates(modelID string) []contract.Vendor {
 	var out []contract.Vendor
@@ -65,7 +71,15 @@ func (r *Router) candidates(modelID string) []contract.Vendor {
 		add(pid)
 	}
 	if len(out) == 0 {
-		add(r.defaultID) // 兜底默认厂商（无可选候选时）
+		if prefix, _, ok := strings.Cut(modelID, "/"); ok && prefix != "" {
+			// 前缀命中已注册厂商（其目录本轮拉取失败 ≠ 厂商不可用）→ 直连该厂商。
+			if v := r.vendorByID(prefix); v != nil {
+				out = append(out, v)
+				return out
+			}
+			return out // 前缀厂商未注册：空候选，上层报明确错误
+		}
+		add(r.defaultID) // 无前缀模型：保持默认厂商兜底
 	}
 	return out
 }

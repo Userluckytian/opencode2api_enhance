@@ -18,6 +18,10 @@ type ModelInfo struct {
 	Object  string `json:"object"`
 	Created int64  `json:"created"`
 	OwnedBy string `json:"owned_by"`
+	// 扩展元数据（OpenRouter 风格；OpenAI 兼容客户端会忽略未知字段，
+	// 支持的客户端据此展示上下文窗口/最大输出）。0 = 未知，不输出。
+	ContextLength   int `json:"context_length,omitempty"`
+	MaxOutputTokens int `json:"max_output_tokens,omitempty"`
 }
 
 var (

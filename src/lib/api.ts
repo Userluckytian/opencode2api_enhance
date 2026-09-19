@@ -164,6 +164,14 @@ export type CustomProbeResult = {
 // 插件式供应商（R1 后端 core/manager/pluginprovider.View，设计文档 docs/PLUGIN-PROVIDERS.md 七）
 export type PluginStatus = 'running' | 'need_config' | 'disabled' | 'starting' | 'error'
 
+export type PluginModelDetail = {
+  id: string
+  /** 上下文窗口大小（token），0/缺省 = 插件未提供 */
+  context_window?: number
+  /** 单次最大输出 token，0/缺省 = 插件未提供 */
+  max_output_tokens?: number
+}
+
 export type PluginProviderView = {
   id: string
   name: string
@@ -173,6 +181,8 @@ export type PluginProviderView = {
   models: number
   /** 全量模型 ID 清单（暴露勾选弹层用；running 且拉取成功才有值） */
   models_all?: string[]
+  /** 全量模型详情（上下文窗口/最大输出等元数据，面板展示用；插件未提供的模型不出现） */
+  models_detail?: PluginModelDetail[]
   /** 全部暴露（true 时 exposed_models 无意义） */
   expose_all: boolean
   /** 暴露白名单（expose_all=false 时生效） */

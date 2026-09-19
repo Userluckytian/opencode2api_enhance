@@ -344,7 +344,11 @@ func appendOtherFreeModels(base []ModelInfo, agg *aggregator.Aggregator) []Model
 			continue // 前缀后仍冲突（两个非 opencode 厂商同名）→ 跳过重复
 		}
 		have[id] = true
-		out = append(out, ModelInfo{ID: id, Object: "model", Created: now, OwnedBy: m.Provider})
+		// 厂商目录携带的能力元数据（插件供应商的上下文窗口/最大输出）随目录输出，
+		// 供支持的客户端展示；未提供的厂商字段为零值不输出。
+		out = append(out, ModelInfo{ID: id, Object: "model", Created: now, OwnedBy: m.Provider,
+			ContextLength:   m.Caps.ContextWindow,
+			MaxOutputTokens: m.Caps.MaxTokens})
 	}
 	return out
 }

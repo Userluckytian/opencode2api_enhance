@@ -224,7 +224,8 @@ type plugin struct {
 	url          string
 	startedAt    time.Time
 	modelCount   int
-	modelsAll    []string // 就绪后拉取的全量模型 ID 清单（暴露勾选弹层用；尽力而为，失败为空）
+	modelsAll    []string      // 就绪后拉取的全量模型 ID 清单（暴露勾选弹层用；尽力而为，失败为空）
+	modelsDetail []ModelDetail // 全量模型详情（上下文窗口等元数据，面板展示用；与 modelsAll 同源）
 	restartCount int
 
 	supervising bool          // 监督协程是否存活（startSupervisor 去重）
@@ -502,7 +503,7 @@ func (m *Manager) handleStdoutLine(p *plugin, ln string) bool {
 		p.lastError = ""
 		p.startedAt = time.Now()
 		m.mu.Unlock()
-		m.queryModelCount(p) // 尽力而为（模型数展示；失败保持 0）
+		go m.queryModelCountWithRetry(p) // 异步 + 退避重试（见函数注释）
 		m.notifyChange()
 		return true
 	case "need_config":
@@ -823,7 +824,7 @@ func (m *Manager) spawnAndReadReady(p *plugin) bool {
 				p.restartCount++
 				m.mu.Unlock()
 				go watchExit(cmd, exitCh)
-				m.queryModelCount(p) // 尽力而为（模型数展示；失败保持 0）
+				go m.queryModelCountWithRetry(p) // 异步 + 退避重试（见函数注释）
 				m.notifyChange()
 				return true
 			case "need_config":
@@ -910,57 +911,106 @@ func parseReadyLine(line string) (*readyMsg, bool) {
 	}
 }
 
-// fetchPluginModels 向子进程拉取最新模型 ID 清单（GET {url}/v1/models）。
-func (m *Manager) fetchPluginModels(p *plugin) ([]string, error) {
+// ModelDetail 插件模型详情（管理 API models_detail；插件 /v1/models 扩展字段
+// 原样透传，缺省 0 = 插件未提供，面板据此决定是否展示）。
+type ModelDetail struct {
+	ID              string `json:"id"`
+	ContextWindow   int    `json:"context_window,omitempty"`
+	MaxOutputTokens int    `json:"max_output_tokens,omitempty"`
+}
+
+// fetchPluginModels 向子进程拉取最新模型清单（GET {url}/v1/models，OpenAI 格式）。
+// 返回模型 ID 列表（models_all 兼容契约）与详情切片（上下文窗口等扩展元数据，
+// 插件未提供该字段的模型不进详情切片）。
+func (m *Manager) fetchPluginModels(p *plugin) ([]string, []ModelDetail, error) {
 	m.mu.Lock()
 	url, auth := p.url, p.auth
 	timeout := m.cfg.ModelTimeout
 	m.mu.Unlock()
 	if url == "" {
-		return nil, errors.New("插件端点未就绪")
+		return nil, nil, errors.New("插件端点未就绪")
 	}
 	ctx, cancel := context.WithTimeout(m.ctx, timeout)
 	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url+"/v1/models", nil)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	req.Header.Set("Authorization", "Bearer "+auth)
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	defer resp.Body.Close()
 	var out struct {
 		Data []struct {
-			ID string `json:"id"`
+			ID              string `json:"id"`
+			ContextWindow   int    `json:"context_window"`
+			MaxOutputTokens int    `json:"max_output_tokens"`
 		} `json:"data"`
 	}
 	if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&out); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	ids := make([]string, 0, len(out.Data))
+	details := make([]ModelDetail, 0, len(out.Data))
 	for _, d := range out.Data {
-		if d.ID != "" {
-			ids = append(ids, d.ID)
+		if d.ID == "" {
+			continue
+		}
+		ids = append(ids, d.ID)
+		if d.ContextWindow > 0 || d.MaxOutputTokens > 0 {
+			details = append(details, ModelDetail{
+				ID:              d.ID,
+				ContextWindow:   d.ContextWindow,
+				MaxOutputTokens: d.MaxOutputTokens,
+			})
 		}
 	}
 	if len(ids) == 0 {
-		return nil, errors.New("empty model list")
+		return nil, nil, errors.New("empty model list")
 	}
-	return ids, nil
+	return ids, details, nil
 }
 
-// queryModelCount 就绪后向子进程拉一次模型目录计数（不参与桥接，仅列表展示）。
-func (m *Manager) queryModelCount(p *plugin) {
-	ids, err := m.fetchPluginModels(p)
-	if err != nil {
+// queryModelCountWithRetry 就绪后拉取插件模型目录（计数 + models_all/models_detail）。
+// 首拉常撞上插件冷启动的上游目录拉取（大响应、慢），宿主单次超时会得到空清单且
+// 无法自愈（暴露弹层按钮依赖 models_all 非空）——这里退避重试兜底；全部失败仅
+// 告警，等面板「刷新模型」手动触发。异步运行，不阻塞监督协程。
+func (m *Manager) queryModelCountWithRetry(p *plugin) {
+	backoff := []time.Duration{0, 5 * time.Second, 15 * time.Second, 30 * time.Second}
+	for i, d := range backoff {
+		if d > 0 {
+			select {
+			case <-m.ctx.Done():
+				return
+			case <-time.After(d):
+			}
+			// 重试前确认插件仍在运行（可能已被停用/删除）。
+			m.mu.Lock()
+			still := p.status == StatusRunning && p.enabled
+			m.mu.Unlock()
+			if !still {
+				return
+			}
+		}
+		ids, details, err := m.fetchPluginModels(p)
+		if err != nil {
+			if i == len(backoff)-1 {
+				slog.Warn("plugin model list fetch failed; use panel refresh-models to retry",
+					"plugin", p.id, "attempts", len(backoff), "error", err)
+			} else {
+				slog.Warn("plugin model list fetch failed, retrying", "plugin", p.id, "attempt", i+1, "error", err)
+			}
+			continue
+		}
+		m.mu.Lock()
+		p.modelCount = len(ids)
+		p.modelsAll = ids
+		p.modelsDetail = details
+		m.mu.Unlock()
 		return
 	}
-	m.mu.Lock()
-	p.modelCount = len(ids)
-	p.modelsAll = ids
-	m.mu.Unlock()
 }
 
 // killCurrent 终止当前子进程并清 pid（幂等）；返回被杀的 pid（等待其退出用）。
@@ -1006,13 +1056,14 @@ func (m *Manager) RefreshModels(id string) (View, error) {
 	if status != StatusRunning || url == "" {
 		return View{}, errors.New("插件未运行，无法刷新模型")
 	}
-	ids, err := m.fetchPluginModels(p)
+	ids, details, err := m.fetchPluginModels(p)
 	if err != nil {
 		return View{}, fmt.Errorf("刷新模型失败: %w", err)
 	}
 	m.mu.Lock()
 	p.modelCount = len(ids)
 	p.modelsAll = ids
+	p.modelsDetail = details
 	m.mu.Unlock()
 	if m.cfg.OnModelRefresh != nil {
 		m.cfg.OnModelRefresh(id)
@@ -1022,19 +1073,20 @@ func (m *Manager) RefreshModels(id string) (View, error) {
 
 // View 插件列表项（管理 API 契约，设计文档 §七）。
 type View struct {
-	ID            string   `json:"id"`
-	Name          string   `json:"name"`
-	Version       string   `json:"version"`
-	Status        string   `json:"status"`
-	Models        int      `json:"models"`
-	ModelsAll     []string `json:"models_all,omitempty"`     // 全量模型 ID 清单（暴露勾选弹层用）
-	ExposeAll     bool     `json:"expose_all"`               // 全部暴露（true 时 ExposedModels 无意义）
-	ExposedModels []string `json:"exposed_models,omitempty"` // 暴露白名单（ExposeAll=false 时生效）
-	Path          string   `json:"path"`
-	ProviderJSON  string   `json:"provider_json"` // provider.json 全文（面板编辑回填）
-	PID           int      `json:"pid,omitempty"`
-	URL           string   `json:"url,omitempty"`
-	LastError     string   `json:"last_error,omitempty"`
+	ID            string        `json:"id"`
+	Name          string        `json:"name"`
+	Version       string        `json:"version"`
+	Status        string        `json:"status"`
+	Models        int           `json:"models"`
+	ModelsAll     []string      `json:"models_all,omitempty"`     // 全量模型 ID 清单（暴露勾选弹层用）
+	ModelsDetail  []ModelDetail `json:"models_detail,omitempty"`  // 全量模型详情（上下文窗口等，面板展示用）
+	ExposeAll     bool          `json:"expose_all"`               // 全部暴露（true 时 ExposedModels 无意义）
+	ExposedModels []string      `json:"exposed_models,omitempty"` // 暴露白名单（ExposeAll=false 时生效）
+	Path          string        `json:"path"`
+	ProviderJSON  string        `json:"provider_json"` // provider.json 全文（面板编辑回填）
+	PID           int           `json:"pid,omitempty"`
+	URL           string        `json:"url,omitempty"`
+	LastError     string        `json:"last_error,omitempty"`
 	StartedAt     string   `json:"started_at,omitempty"`
 	RestartCount  int      `json:"restart_count"`
 }
@@ -1081,7 +1133,8 @@ func (m *Manager) viewOf(p *plugin) View {
 	return View{
 		ID: p.id, Name: name, Version: ver,
 		Status: p.status, Models: p.modelCount,
-		ModelsAll: p.modelsAll, ExposeAll: p.man.ExposeAll == nil || *p.man.ExposeAll,
+		ModelsAll: p.modelsAll, ModelsDetail: p.modelsDetail,
+		ExposeAll:     p.man.ExposeAll == nil || *p.man.ExposeAll,
 		ExposedModels: p.man.ExposedModels,
 		Path:          p.dir, ProviderJSON: string(p.raw),
 		PID: p.pid, URL: p.url, LastError: p.lastError,
