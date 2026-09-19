@@ -331,3 +331,60 @@ argv         = --provider-serve --port 0   （port 0 = OS 分配随机端口）
 - [ ] 仅监听 127.0.0.1；运行数据只写 data/
 - [ ] UTF-8 无 BOM 读写 provider.json（或读侧剥 BOM）
 - [ ] 私有配置缺失时提供默认模板（`_hint` 字段说明）
+
+---
+
+## 十一、插件功能建议清单（P1/P2，提炼自两个参考实现）
+
+> §10 是契约强制项（P0，宿主校验，违反即拒载）。本章是**建议级**功能点，提炼自两个
+> 已落地的真实插件：**mmxproxy**（`panel_port` 固定端口面板、号池守护、事件驱动凭证
+> 恢复、网络管理）与 **skywork**（`panel=sidecar` 动态端口面板、对话调试、resolve
+> 网络管理、上下文信息透出）。新插件作者按 P1 逐项实现，即可与宿主面板/统计/运维
+> 体验保持一致。
+
+### 11.1 P1 强烈建议
+
+| 功能点 | 说明 | 参考实现 |
+|---|---|---|
+| 内嵌管理面板 | go:embed 单页 HTML，至少三块：**网关接入信息卡**（吃宿主 🌐 传递的 `?gateway=&key=&models=`，密钥打码）、**账号池健康状态**、**说明页**（token 获取/续期指引） | skywork `/`；mmxproxy「说明/账号池」页 |
+| 面板入口声明 | 私有配置声明 `panel:"sidecar"`（面板挂插件动态端口）或 `panel_port:N`（固定端口，0=禁用）；宿主卡片据此渲染 🌐 图标，**点击时实时解析最新端点**（sidecar 重启会换端口） | skywork（sidecar）；mmxproxy（固定端口） |
+| provider.json 自管理 | 缺字段自举默认模板（`_hint` 说明）、3s 轮询热重载、临时文件+rename 原子写、读侧剥 UTF-8 BOM | 两者均实现 |
+| 账号池 | 多账号轮询/冷却/失效标记；掩码后状态在面板可见 | 两者均实现 |
+| 网络管理 | 上游对网络环境有要求时：探测（探针按上游特性自定）→ 自动选路 → 结果持久化；Clash 外部控制地址/密钥配置化 | skywork（resolve 候选/直连/代理优先级）；mmxproxy（geo 探针+托管分组切换） |
+| stderr 日志纪律 | stdout 只留状态行；日志走 stderr 或 `data/` 文件 | 两者均实现 |
+| 契约冒烟测试 | 随插件交付自测：`bash scripts/plugin-smoke-test.sh <exe> <provider.json>`（见 11.4） | 宿主提供通用脚本 |
+
+### 11.2 P2 按需
+
+| 功能点 | 说明 | 参考实现 |
+|---|---|---|
+| 对话调试区 | 面板内经网关全链路发测试对话；**跨域规避**：由插件服务端代理转发（流式在服务端聚合 SSE），浏览器不直连网关端口 | skywork |
+| 凭证自动恢复 | 上游 401 → 事件队列 → 自动重登（需上游支持密码重登） | mmxproxy `relogin.go` |
+| 号池守护 | 可用数低于阈值自动补号；节奏刻意保守（随机间隔/单日上限/失败退避），状态可查询 | mmxproxy `poolkeeper.go` |
+| 用量统计 | 按天落盘 + `/v1/usage/*` 查询 API | mmxproxy `usage.go` |
+| 网络设置分离持久化 | 网络配置首次由 provider.json 种子，之后落 `data/net.json`（面板可编辑）——避免频繁写回 provider.json | mmxproxy `net.go` |
+| 专属分组+独立监听端口 | 建议用户为插件配 mihomo listener 独立端口/专属分组：切节点不影响其他应用流量 | mmxproxy（文档建议） |
+| 上下文信息透出 | `/v1/models` 带 `context_window`/`max_output_tokens`，宿主透传进聚合目录与扩展字段 | skywork |
+
+### 11.3 源码组织建议
+
+两种已验证的组织方式（**单源码双模式已尝试并回退**：独立版后台循环与插件契约外壳的
+耦合维护成本高于收益）：
+
+- **fork 自包含 + 同步器**：插件目录完全自包含（fork 源码 + 构建脚本 + 部署包），
+  与独立版共享的文件列**显式清单**，配同步脚本并声明权威侧（mmxproxy：`sync-src.ps1`，
+  plugin 侧为权威副本）
+- **同仓库子目录独立模块**：插件为仓库内独立 Go module（skywork：`plugin/src`），
+  协议核心文件在两产物间为镜像关系，README 显式声明同步义务
+
+### 11.4 通用契约冒烟测试
+
+宿主提供通用脚本（插件作者交付前必跑，Linux/macOS/Git Bash 均可）：
+
+```bash
+bash scripts/plugin-smoke-test.sh <插件exe> <provider.json> [就绪等待秒数=12]
+```
+
+判定项：stdout 就绪行（port / auth 一次性令牌原样回显 / id 与目录一致）；
+`/v1/models` 无令牌 401、带令牌 200（503=账号未就绪，警告级）；`/v1/chat/completions`
+无令牌 401；面板可达（按 panel/panel_port 声明自动选择检查方式）。退出码 0=全部通过。
