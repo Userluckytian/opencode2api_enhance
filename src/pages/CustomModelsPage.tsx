@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import clsx from 'clsx'
-import { Loader2, Pencil, Plus, PlugZap, Activity, Trash2, X, Plug, RefreshCw, ListChecks, Search } from 'lucide-react'
-import { api, type CustomKeyStrategy, type CustomProviderInput, type CustomProviderTestResult, type CustomProviderView, type CustomProtocol, type PluginProviderView, type PluginStatus } from '../lib/api'
+import { Loader2, Pencil, Plus, PlugZap, Activity, Trash2, X, Plug, RefreshCw, ListChecks, Search, Globe } from 'lucide-react'
+import { api, type CustomKeyStrategy, type CustomProviderInput, type CustomProviderTestResult, type CustomProviderView, type CustomProtocol, type PluginModelDetail, type PluginProviderView, type PluginStatus } from '../lib/api'
 
 // 自定义模型源表单（新增/编辑共用）。编辑时 key 留空 = 保留原 key。
 type FormState = {
@@ -90,10 +90,30 @@ type PluginExposeState = {
   name: string
   /** 全量模型清单（弹层勾选用；来自后端 models_all） */
   allModels: string[]
+  /** 模型元数据（上下文窗口/最大输出；来自后端 models_detail，键 = 模型 ID） */
+  details: Record<string, PluginModelDetail>
   /** 全部暴露（默认 true；false = 只暴露 allowed 里的勾选项） */
   exposeAll: boolean
   /** 暴露白名单 */
   allowed: Set<string>
+}
+
+// token 数 → 紧凑显示（1000000 → 1M、128000 → 128K；0/未提供 → 空串）
+const fmtTokens = (n?: number): string => {
+  if (!n || n <= 0) return ''
+  if (n >= 1_000_000) {
+    const m = n / 1_000_000
+    return `${Number.isInteger(m) ? m : m.toFixed(1)}M`
+  }
+  if (n >= 1000) return `${Math.round(n / 1000)}K`
+  return String(n)
+}
+
+// PluginProviderView.models_detail → 弹层展示用的键值表
+const pluginDetailsOf = (p: PluginProviderView): Record<string, PluginModelDetail> => {
+  const out: Record<string, PluginModelDetail> = {}
+  for (const d of p.models_detail ?? []) out[d.id] = d
+  return out
 }
 
 // 顶层 name 编辑 → 同步写回 JSON 的 name 字段（id/entry 由后端保护，前端不动）
@@ -114,6 +134,26 @@ const jsonName = (json: string): string => {
     return typeof obj.name === 'string' ? obj.name : ''
   } catch {
     return ''
+  }
+}
+
+// 解析插件管理面板的打开地址（球形图标入口）：
+//   panel = "sidecar" → 面板由插件子进程的动态 API 端口提供（如 skywork）；
+//   panel_port（正整数）→ 插件自带的固定端口面板（如 mmxproxy）；
+// 两者都没有 → null，卡片不渲染面板入口按钮。
+const pluginPanelBase = (p: PluginProviderView): string | null => {
+  try {
+    const obj = JSON.parse(p.provider_json) as {
+      provider_private_configs?: { panel_port?: unknown; panel?: unknown }
+    }
+    const pc = obj.provider_private_configs ?? {}
+    if (pc.panel === 'sidecar') return p.url ?? null
+    const port = pc.panel_port
+    return typeof port === 'number' && Number.isInteger(port) && port > 0
+      ? `http://127.0.0.1:${port}`
+      : null
+  } catch {
+    return null
   }
 }
 
@@ -441,6 +481,40 @@ export default function CustomModelsPage({ toast }: { toast: (msg: string, ok?: 
     }
   }
 
+  // 打开插件自带控制面板（如 mmxproxy 的注册/签到、skywork 的网络管理页）：
+  // 新窗口 <面板地址>/?…，并把网关接入信息经查询参数带给面板展示——
+  //   base    = pluginPanelBase 解析的面板地址（固定端口或子进程动态端口）；
+  //   gateway = 本网关 /v1 地址（/v1 与管理 UI 同端口同源）；
+  //   key     = 实例访问密钥（即 default_password；获取失败则不传，面板显示占位）；
+  //   models  = 该插件暴露进聚合目录的模型全名（{插件id}/{模型id}，见 vendors/remote.prefix）。
+  // 参数仅在本机 127.0.0.1 页面间传递，面板侧默认打码显示。
+  const openPluginPanel = async (p: PluginProviderView, base: string) => {
+    // sidecar 模式的面板端口是动态的：子进程每次重启都会换端口，页面缓存的
+    // url 可能已过期（点开白屏）。点击时重新拉取最新端点，避免打开死端口。
+    let target = base
+    try {
+      const obj = JSON.parse(p.provider_json) as { provider_private_configs?: { panel?: unknown } }
+      if (obj.provider_private_configs?.panel === 'sidecar') {
+        const fresh = (await api.pluginsList()).plugins.find(x => x.id === p.id)
+        if (fresh?.url && fresh.status === 'running') target = fresh.url
+      }
+    } catch {
+      // 刷新失败时用缓存地址兜底
+    }
+    const exposed = p.expose_all ? (p.models_all ?? []) : (p.exposed_models ?? [])
+    const models = exposed.map((m) => `${p.id}/${m}`)
+    let key = ''
+    try {
+      key = (await api.configGet()).default_password ?? ''
+    } catch {
+      // 密钥获取失败不阻断：面板照常打开，接入信息区显示占位与指引
+    }
+    const params = new URLSearchParams({ gateway: `${window.location.origin}/v1`, plugin: p.id })
+    if (key) params.set('key', key)
+    if (models.length) params.set('models', models.join(','))
+    window.open(`${target}/?${params.toString()}`, '_blank', 'noopener')
+  }
+
   const openPluginEdit = (p: PluginProviderView) => {
     setPluginEditing({
       id: p.id,
@@ -457,6 +531,7 @@ export default function CustomModelsPage({ toast }: { toast: (msg: string, ok?: 
       id: p.id,
       name: p.name || p.id,
       allModels: p.models_all ?? [],
+      details: pluginDetailsOf(p),
       exposeAll: p.expose_all,
       allowed: new Set(p.exposed_models ?? []),
     })
@@ -500,7 +575,7 @@ export default function CustomModelsPage({ toast }: { toast: (msg: string, ok?: 
       setPluginExposing((prev) => {
         if (!prev) return prev
         const keep = new Set([...prev.allowed].filter((m) => fresh.includes(m)))
-        return { ...prev, allModels: fresh, allowed: keep }
+        return { ...prev, allModels: fresh, details: pluginDetailsOf(r.plugin), allowed: keep }
       })
       setModelSearch('')
       toast(`已从官网刷新模型列表（${fresh.length} 个）`, true)
@@ -1117,6 +1192,12 @@ export default function CustomModelsPage({ toast }: { toast: (msg: string, ok?: 
                       <div className="text-xs text-zinc-500">
                         {p.models} 个模型
                         {!p.expose_all && p.exposed_models ? ` · 白名单 ${p.exposed_models.length} 个` : ''}
+                        {(() => {
+                          // 卡片摘要：模型目录携带上下文窗口时展示最大值（skywork 等）
+                          let maxCtx = 0
+                          for (const d of p.models_detail ?? []) if ((d.context_window ?? 0) > maxCtx) maxCtx = d.context_window ?? 0
+                          return maxCtx > 0 ? <span className="text-zinc-600"> · 上下文最大 {fmtTokens(maxCtx)}</span> : null
+                        })()}
                         {p.started_at ? ` · 启动 ${fmtTime(p.started_at)}` : ''}
                         {p.restart_count > 0 ? ` · 已重启 ${p.restart_count} 次` : ''}
                         {p.last_error ? <span className="text-red-500"> · {p.last_error}</span> : null}
@@ -1141,13 +1222,30 @@ export default function CustomModelsPage({ toast }: { toast: (msg: string, ok?: 
                           )}
                         />
                       </button>
+                      {(() => {
+                        // 面板入口（球形图标）：插件声明 panel="sidecar"（动态端口）
+                        // 或 panel_port（固定端口）时渲染；未运行时不可达（按钮置灰）
+                        const base = pluginPanelBase(p)
+                        return base ? (
+                          <button
+                            type="button"
+                            onClick={() => void openPluginPanel(p, base)}
+                            disabled={p.status !== 'running'}
+                            className="p-2 rounded-lg text-zinc-500 hover:bg-zinc-100 disabled:opacity-40 disabled:cursor-not-allowed"
+                            aria-label="打开控制面板"
+                            title={p.status !== 'running' ? '插件运行中才能打开其控制面板' : '在新窗口打开插件自带控制面板（注册 / 签到 / 网络管理）'}
+                          >
+                            <Globe size={15} />
+                          </button>
+                        ) : null
+                      })()}
                       <button
                         type="button"
                         onClick={() => openPluginExpose(p)}
-                        disabled={p.status !== 'running' || (p.models_all ?? []).length === 0}
+                        disabled={p.status !== 'running'}
                         className="p-2 rounded-lg text-zinc-500 hover:bg-zinc-100 disabled:opacity-40 disabled:cursor-not-allowed"
                         aria-label="暴露模型"
-                        title={p.status !== 'running' ? '插件运行中才能配置暴露模型' : (p.models_all ?? []).length === 0 ? '尚未获取到模型清单' : '自定义要暴露给 /v1/models 的模型'}
+                        title={p.status !== 'running' ? '插件运行中才能配置暴露模型' : (p.models_all ?? []).length === 0 ? '尚未获取到模型清单，可在弹层内点「刷新模型」重试' : '自定义要暴露给 /v1/models 的模型'}
                       >
                         <ListChecks size={15} />
                       </button>
@@ -1245,29 +1343,41 @@ export default function CustomModelsPage({ toast }: { toast: (msg: string, ok?: 
               <div className={clsx('border rounded-lg max-h-72 overflow-y-auto', pluginExposing.exposeAll && 'opacity-50 pointer-events-none')}>
                 {pluginExposing.allModels
                   .filter((m) => !modelSearch || m.toLowerCase().includes(modelSearch.toLowerCase()))
-                  .map((m) => (
-                    <label key={m} className="flex items-center gap-2 px-3 py-1.5 text-[13px] font-mono text-zinc-700 hover:bg-zinc-50 cursor-pointer border-b last:border-b-0">
-                      <input
-                        type="checkbox"
-                        checked={pluginExposing.exposeAll || pluginExposing.allowed.has(m)}
-                        disabled={pluginExposing.exposeAll}
-                        onChange={() => {
-                          setPluginExposing((prev) => {
-                            if (!prev) return prev
-                            const next = new Set(prev.allowed)
-                            if (next.has(m)) next.delete(m)
-                            else next.add(m)
-                            return { ...prev, allowed: next }
-                          })
-                        }}
-                        className="accent-zinc-900"
-                      />
-                      <span className="truncate">{m}</span>
-                    </label>
-                  ))}
-                {pluginExposing.allModels.filter((m) => !modelSearch || m.toLowerCase().includes(modelSearch.toLowerCase())).length === 0 && (
+                  .map((m) => {
+                    const d = pluginExposing.details[m]
+                    const ctx = fmtTokens(d?.context_window)
+                    const out = fmtTokens(d?.max_output_tokens)
+                    return (
+                      <label key={m} className="flex items-center gap-2 px-3 py-1.5 text-[13px] font-mono text-zinc-700 hover:bg-zinc-50 cursor-pointer border-b last:border-b-0">
+                        <input
+                          type="checkbox"
+                          checked={pluginExposing.exposeAll || pluginExposing.allowed.has(m)}
+                          disabled={pluginExposing.exposeAll}
+                          onChange={() => {
+                            setPluginExposing((prev) => {
+                              if (!prev) return prev
+                              const next = new Set(prev.allowed)
+                              if (next.has(m)) next.delete(m)
+                              else next.add(m)
+                              return { ...prev, allowed: next }
+                            })
+                          }}
+                          className="accent-zinc-900"
+                        />
+                        <span className="truncate">{m}</span>
+                        {(ctx || out) && (
+                          <span className="ml-auto shrink-0 font-sans text-[11px] text-zinc-400">
+                            {ctx ? `上下文 ${ctx}` : ''}{ctx && out ? ' · ' : ''}{out ? `输出 ${out}` : ''}
+                          </span>
+                        )}
+                      </label>
+                    )
+                  })}
+                {pluginExposing.allModels.length === 0 ? (
+                  <div className="px-3 py-2 text-xs text-amber-600">尚未获取到模型清单，请点右上角「刷新模型」重试</div>
+                ) : pluginExposing.allModels.filter((m) => !modelSearch || m.toLowerCase().includes(modelSearch.toLowerCase())).length === 0 ? (
                   <div className="px-3 py-2 text-xs text-zinc-400">无匹配模型</div>
-                )}
+                ) : null}
               </div>
               {!pluginExposing.exposeAll && (
                 <div className="flex items-center gap-3 text-xs text-zinc-500">

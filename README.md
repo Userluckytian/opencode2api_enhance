@@ -123,6 +123,13 @@ npm install
 npm run tauri:dev
 ```
 
+> ⚠️ **重编 core 后壳不会自动重新内嵌**：`bin/opencode2api.exe` 是在 **cargo 编译时**
+> 被 `include_bytes` 嵌入壳的（见 `src-tauri/build.rs` / `embed.rs`），而 `bin/` 不在
+> cargo 的默认文件监听范围内——只重新 `go build` core 再跑 `tauri:dev`，壳里仍是旧
+> core。触发重嵌任选其一：touch 任意 Rust 源文件（如 `touch src-tauri/src/main.rs`）、
+> 改动 `src-tauri/` 下代码，或 `cargo clean`。前端改动无此问题（`tauri:dev` 走 vite
+> 实时服务；core 服务的 web UI 读仓库根 `dist/`，`npm run build` 即可）。
+
 ## 数据目录
 
 运行时数据（配置文件、实例清单、日志）存 `%APPDATA%\opencode2api-manager\`（正式版）：
