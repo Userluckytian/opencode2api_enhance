@@ -123,6 +123,10 @@ npm install
 npm run tauri:dev
 ```
 
+> 💡 **构建脚本报 `resource path target\release\WebView2Loader.dll doesn't exist`**：
+> 本地 `target/` 被清理后会出现。按 CI 同样方式补回即可：
+> `mkdir -p src-tauri/target/release && cp src-tauri/WebView2Loader.dll src-tauri/target/release/`
+
 > ⚠️ **重编 core 后壳不会自动重新内嵌**：`bin/opencode2api.exe` 是在 **cargo 编译时**
 > 被 `include_bytes` 嵌入壳的（见 `src-tauri/build.rs` / `embed.rs`），而 `bin/` 不在
 > cargo 的默认文件监听范围内——只重新 `go build` core 再跑 `tauri:dev`，壳里仍是旧
