@@ -46,6 +46,11 @@ const (
 	defaultRescanInterval = 3 * time.Second  // providers/ 目录扫描间隔
 	defaultModelTimeout   = 5 * time.Second  // 模型数查询超时
 	defaultStableReset    = 30 * time.Second // 「健康运行」判定阈值（退避归零门槛）
+
+	// 状态文件并发写的「写后校验」重试（见 mergeStateWrite）：多进程读-合并-写
+	// 存在互相抹除窗口，写后重读确认本条已落盘，未落盘则带最新内容重做。
+	stateWriteMaxAttempts = 4
+	stateWriteRetryDelay  = 5 * time.Millisecond
 )
 
 // orphanReapInterval watch 扫描循环内周期性孤儿回收的降频间隔（var 仅为测试可
@@ -236,11 +241,18 @@ type plugin struct {
 	modelsDetail []ModelDetail // 全量模型详情（上下文窗口等元数据，面板展示用；与 modelsAll 同源）
 	restartCount int
 
-	supervising bool          // 监督协程是否存活（startSupervisor 去重）
-	stopCh      chan struct{} // 删除/关闭时关闭（不可重建，见 stopPlugin）
-	stopped     bool
-	retryCh     chan struct{} // 唤醒监督协程立即行动（启用/配置保存/清单修复）
-	exitCh      chan struct{} // 子进程退出通知（缓冲 1，防泄漏）
+	supervising bool // 监督协程是否存活（startSupervisor 去重）
+	// toggleMu 串行化本插件的「读 enabled → kill/spawn → setStatus → 落盘」整段。
+	// 为什么需要（2026-09-21 实测）：扫描跟随（applyStateChanges）与该实例上的用户
+	// HTTP toggle 可能在同一瞬间作用于同一插件，两者都做 killCurrent + setStatus，
+	// 后完成者会把先完成者的 status/pid 写花（表现为 enabled=true 但 status=disabled，
+	// 进程其实在跑）。m.mu 不能包住这段——killCurrent 可能耗时数秒（taskkill），
+	// 持 m.mu 会阻塞全局。
+	toggleMu sync.Mutex
+	stopCh   chan struct{} // 删除/关闭时关闭（不可重建，见 stopPlugin）
+	stopped  bool
+	retryCh  chan struct{} // 唤醒监督协程立即行动（启用/配置保存/清单修复）
+	exitCh   chan struct{} // 子进程退出通知（缓冲 1，防泄漏）
 	// stdoutCh 子进程 stdout 行流（当前 spawn 周期有效）：spawnAndReadReady 就该通道
 	// 解析就绪行；收到首个 need_config 后把它移交稳定态（supervise 的 select 分支），
 	// 从而持续捕获子进程后续补打的 ready/fatal 行（设计文档 §4.1：宿主必须持续
@@ -713,45 +725,61 @@ func (m *Manager) writeStateFile(state map[string]bool) error {
 // 的 Toggle 与 watch 协程 applyStateChanges→Toggle）无锁并发会互相丢条目（审查
 // 返工缺陷 1，8 goroutine 实测 8 丢 5）；跨进程的毫秒级窗口为已知边界——rename
 // 保证无撕裂、损坏自愈，不引入跨进程文件锁。
-func (m *Manager) updateStateFile(id string, enabled bool) {
-	m.stateMu.Lock()
-	defer m.stateMu.Unlock()
-	m.state[id] = enabled
-	base := loadPluginState(m.cfg.StateFile) // 写前重读：以磁盘当前内容为基底
-	base[id] = enabled
-	if err := m.writeStateFile(base); err != nil {
-		slog.Warn("plugin state write failed", "path", m.cfg.StateFile, "error", err)
-		return
+// mergeStateWrite 落盘单条启停状态：读-合并-写 + **写后校验重试**（有界）。
+//
+// expect == nil：用户意图，无条件生效；expect != nil：跟随路径，先 CAS（磁盘当前值
+// 必须仍等于 expect，否则放弃落盘——防陈旧快照覆盖并发新值）。
+//
+// 为何还需要「写后校验」：多进程共享同一文件，两个进程并发写**不同**插件时，后写者的
+// base 可能是旧内容，会把对方刚写的条目抹掉（原「毫秒窗口」）。写后重读确认本条确实
+// 落盘，未落盘则带最新内容重做（stateWriteMaxAttempts 次），使并发写收敛到「两者都在」。
+// 不引入跨进程文件锁：保持文件格式与旧版本兼容，且无陈旧锁风险。
+func (m *Manager) mergeStateWrite(id string, enabled bool, expect *bool) bool {
+	for attempt := 1; attempt <= stateWriteMaxAttempts; attempt++ {
+		m.stateMu.Lock()
+		base := loadPluginState(m.cfg.StateFile)
+		cur, ok := base[id]
+		if expect != nil && (!ok || cur != *expect) {
+			m.stateMu.Unlock()
+			slog.Info("plugin state follow skipped: state changed concurrently",
+				"id", id, "want", enabled, "expect", *expect, "current", cur, "present", ok, "pid", os.Getpid())
+			return false
+		}
+		m.state[id] = enabled
+		base[id] = enabled
+		err := m.writeStateFile(base)
+		m.stateMu.Unlock()
+		if err != nil {
+			slog.Warn("plugin state write failed", "path", m.cfg.StateFile, "error", err)
+			return false
+		}
+		if got, ok := loadPluginState(m.cfg.StateFile)[id]; ok && got == enabled {
+			// 可观测（2026-09-21 竞态排查）：多进程共享同一文件，出问题要知道是谁写的。
+			slog.Info("plugin state written", "id", id, "enabled", enabled, "pid", os.Getpid(), "attempt", attempt)
+			return true
+		}
+		slog.Info("plugin state write clobbered concurrently, retrying",
+			"id", id, "enabled", enabled, "attempt", attempt, "pid", os.Getpid())
+		time.Sleep(stateWriteRetryDelay)
 	}
-	// 可观测（2026-09-21 竞态排查）：多进程共享同一文件，出问题时要能知道是谁写的。
-	slog.Info("plugin state written", "id", id, "enabled", enabled, "pid", os.Getpid())
+	slog.Warn("plugin state write gave up after retries", "id", id, "enabled", enabled, "pid", os.Getpid())
+	return false
 }
 
-// updateStateFileCAS 与 updateStateFile 同款「写前重读合并 + 原子替换」，但额外做一次
-// 跨进程 compare-and-swap：仅当磁盘上该 id 的当前值仍等于 expect 时才落盘。
+// updateStateFile 用户/管理端显式开关落盘：用户意图无条件生效（不做 CAS）。
+func (m *Manager) updateStateFile(id string, enabled bool) {
+	m.mergeStateWrite(id, enabled, nil)
+}
+
+// updateStateFileCAS 跟随路径落盘：仅当磁盘上该 id 的当前值仍等于 expect 时才写。
 //
-// 为何需要（2026-09-21 实测缺陷）：跟随路径的决策值来自 applyStateChanges 开头的一次
+// 为何需要 CAS（2026-09-21 实测缺陷）：跟随的决策值来自 applyStateChanges 开头的一次
 // 快照读，而 toggle 在落盘前会先 killCurrent（Windows taskkill 可能耗时数秒）——这段
 // 窗口里用户经另一个进程 toggle 的新值会被陈旧快照值无条件盖回去（现场：vibex 被写回
 // false、插件被停）。CAS 让「磁盘新值」优先：放弃本次落盘，内存与磁盘的短暂不一致由
 // 下一个扫描周期（≤3s）收敛。
 func (m *Manager) updateStateFileCAS(id string, enabled, expect bool) {
-	m.stateMu.Lock()
-	defer m.stateMu.Unlock()
-	base := loadPluginState(m.cfg.StateFile)
-	cur, ok := base[id]
-	if !ok || cur != expect {
-		slog.Info("plugin state follow skipped: state changed concurrently",
-			"id", id, "want", enabled, "expect", expect, "current", cur, "present", ok, "pid", os.Getpid())
-		return
-	}
-	m.state[id] = enabled
-	base[id] = enabled
-	if err := m.writeStateFile(base); err != nil {
-		slog.Warn("plugin state write failed", "path", m.cfg.StateFile, "error", err)
-		return
-	}
-	slog.Info("plugin state followed", "id", id, "enabled", enabled, "pid", os.Getpid())
+	m.mergeStateWrite(id, enabled, &expect)
 }
 
 // applyStateChanges 跨进程启停状态跟随：重读状态文件，凡与当前 enabled 不一致的
@@ -1376,10 +1404,22 @@ func (m *Manager) toggleFollow(id string, enabled, expect bool) (View, error) {
 
 // toggle 是 Toggle / toggleFollow 的共用实现：expect == nil = 用户意图（无条件落盘），
 // expect != nil = 跟随路径（写时 CAS，防陈旧快照覆盖新值）。
+//
+// 整段持 p.toggleMu：同一插件的并发 toggle（扫描跟随 vs 用户点击）必须串行，否则
+// kill/spawn 与 setStatus 交错会把 status/pid 写花（见 plugin.toggleMu 注释）。
 func (m *Manager) toggle(id string, enabled bool, expect *bool) (View, error) {
 	m.mu.Lock()
 	p, ok := m.plugins[id]
+	m.mu.Unlock()
 	if !ok {
+		return View{}, errNotFound
+	}
+	p.toggleMu.Lock()
+	defer p.toggleMu.Unlock()
+
+	// 持 toggleMu 后再查一次：期间可能已被 Delete 移除（双重确认，避免对已删除插件 kill/spawn）。
+	m.mu.Lock()
+	if cur, ok := m.plugins[id]; !ok || cur != p {
 		m.mu.Unlock()
 		return View{}, errNotFound
 	}
@@ -1416,6 +1456,16 @@ func (m *Manager) Delete(id string) error {
 	m.mu.Lock()
 	p, ok := m.plugins[id]
 	if !ok {
+		m.mu.Unlock()
+		return errNotFound
+	}
+	m.mu.Unlock()
+	// 与 toggle 同一把锁：删除与启停不得交错（否则 kill/删除 与 spawn/setStatus 互踩）。
+	p.toggleMu.Lock()
+	defer p.toggleMu.Unlock()
+
+	m.mu.Lock()
+	if cur, ok := m.plugins[id]; !ok || cur != p {
 		m.mu.Unlock()
 		return errNotFound
 	}
