@@ -1,16 +1,23 @@
 # Changelog
 
-## 未发布
+## v1.7.5-beta.6（2026-09-21，测试预发布）
+
+> 两项修复：流式 tool_calls 增量丢工具名（grok CLI 工具调用全失效）+ 插件启停状态跨进程竞态。
 
 ### 🐛 修复
 
+- **流式 tool_calls 增量丢工具名（逐帧取值客户端工具调用全失效）**：OpenAI 流式约定同一
+  工具调用只有首帧带 `id` / `type` / `function.name`，后续帧只有 `arguments` 增量，客户端
+  应自行累加。但部分客户端（实测 grok CLI 1.0.34）逐帧取值、被空字符串覆盖，最终工具名
+  为空报 `Tool not found`。现网关流式转发按请求持有状态、按 `index` 记住首帧头字段并在
+  后续帧补齐（`normalizeToolCallDeltas`）；对正确累加的客户端无副作用。responses / claude
+  两条流路径本就跨帧聚合，不受影响
 - **插件启停状态被陈旧快照写回旧值（跨进程竞态）**：经管理 API 启用某插件后，状态文件可能在
   十几秒内被其它实例写回 `false`、插件被停（2026-09-21 现场：vibex；同一轮连续 toggle 6 次复现 1 次）。
   根因是跟随路径（`applyStateChanges`）用函数开头的快照值落盘，而 `Toggle` 落盘前会先 `killCurrent`
   （`taskkill` 可能耗时数秒），窗口内用户经另一进程改的新值被旧快照覆盖。现改为：跟随路径
   **预检 + 写时 CAS**（`updateStateFileCAS`），磁盘值 ≠ 期望值则放弃落盘；用户 toggle 路径不变
   （无条件生效）。写盘/跳过补 `id/enabled/pid` 日志。详见 `docs/PLUGIN-PROVIDERS.md` §4.4
-
 
 ## v1.7.5-beta.5（2026-09-19，测试预发布）
 

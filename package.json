@@ -1,7 +1,7 @@
 {
   "name": "opencode2api-manager",
   "private": true,
-  "version": "1.7.5-beta.5",
+  "version": "1.7.5-beta.6",
   "type": "module",
   "scripts": {
     "dev": "vite",
