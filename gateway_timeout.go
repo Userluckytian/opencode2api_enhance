@@ -643,6 +643,9 @@ func streamWithResume(w http.ResponseWriter, r *http.Request, upstreamBody []byt
 	attempt := 0
 	res := resumeStreamResult{DoneAt: time.Now()}
 	accumulated := ""
+	// tool_calls 增量补齐状态（按 index 记住 id/type/name）：
+	// 上游只在第一帧带 name，后续帧为空——部分客户端会丢工具名，详见 normalizeToolCallDeltas。
+	tcState := map[int]map[string]string{}
 	// 已有部分内容时，通过续写 body 重连
 	currentBody := upstreamBody
 	sseDebugf("[%s] streamWithResume start, model=%s, keepReasoning=%v", reqID, model, keepReasoning)
@@ -871,6 +874,8 @@ func streamWithResume(w http.ResponseWriter, r *http.Request, upstreamBody []byt
 				var out string
 				var chunkUsage map[string]any
 				if obj != nil {
+					// 补齐 tool_calls 增量的 id/type/name（逐帧取值的客户端不再丢工具名）
+					normalizeToolCallDeltas(obj, tcState)
 					conv, u := convertStreamChunkFromObj(obj, keepReasoning)
 					if conv != "" {
 						out = "data: " + conv

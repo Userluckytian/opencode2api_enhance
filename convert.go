@@ -224,6 +224,7 @@ func cleanNulls(m map[string]any) {
 	}
 }
 
+// cleanStreamDelta 清理 delta 中的空值/无用字段（保持原有语义）。
 func cleanStreamDelta(delta map[string]any, keepReasoning bool) {
 	if v, ok := delta["content"]; ok && v == nil {
 		delete(delta, "content")
@@ -243,6 +244,78 @@ func cleanStreamDelta(delta map[string]any, keepReasoning bool) {
 	}
 	if s, ok := delta["role"].(string); ok && s == "" {
 		delete(delta, "role")
+	}
+}
+
+// normalizeToolCallDeltas 让每个 tool_calls 增量都带上 id / type / name。
+//
+// 背景：OpenAI 流式约定里，同一个工具调用分多帧下发——**只有第一帧带 name/id**，
+// 后续帧只带 arguments 增量（name/id 为空字符串）。客户端应当“累加”这些字段。
+// 但部分客户端（实测 grok CLI 1.0.34）逐帧取值、被空字符串覆盖，最终工具名为空，
+// 报 `Tool not found: `` `，工具调用全部失效。
+//
+// 这里按 index 记住首次出现的 id/type/name，并在后续帧里补齐，让“逐帧取值”的
+// 客户端也能正常工作；对本来就正确的客户端无副作用（值相同）。
+// state 由调用方按流持有（每个请求一份）。
+func normalizeToolCallDeltas(obj map[string]any, state map[int]map[string]string) {
+	if obj == nil || state == nil {
+		return
+	}
+	choices, ok := obj["choices"].([]any)
+	if !ok {
+		return
+	}
+	for _, c := range choices {
+		choice, ok := c.(map[string]any)
+		if !ok {
+			continue
+		}
+		delta, ok := choice["delta"].(map[string]any)
+		if !ok {
+			continue
+		}
+		toolCalls, ok := delta["tool_calls"].([]any)
+		if !ok {
+			continue
+		}
+		for _, tc := range toolCalls {
+			call, ok := tc.(map[string]any)
+			if !ok {
+				continue
+			}
+			idx := 0
+			if v, ok := call["index"].(float64); ok {
+				idx = int(v)
+			}
+			prev := state[idx]
+			if prev == nil {
+				prev = map[string]string{}
+				state[idx] = prev
+			}
+			// id：首次出现时记住，后续为空则补齐
+			if s, _ := call["id"].(string); s != "" {
+				prev["id"] = s
+			} else if prev["id"] != "" {
+				call["id"] = prev["id"]
+			}
+			// type：同上
+			if s, _ := call["type"].(string); s != "" {
+				prev["type"] = s
+			} else if prev["type"] != "" {
+				call["type"] = prev["type"]
+			}
+			// function.name：同上（这是关键——丢了它工具就找不到）
+			fn, ok := call["function"].(map[string]any)
+			if !ok {
+				fn = map[string]any{}
+				call["function"] = fn
+			}
+			if s, _ := fn["name"].(string); s != "" {
+				prev["name"] = s
+			} else if prev["name"] != "" {
+				fn["name"] = prev["name"]
+			}
+		}
 	}
 }
 
