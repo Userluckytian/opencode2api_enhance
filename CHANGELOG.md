@@ -1,5 +1,16 @@
 # Changelog
 
+## 未发布
+
+### 🐛 修复
+
+- **插件启停状态被陈旧快照写回旧值（跨进程竞态）**：经管理 API 启用某插件后，状态文件可能在
+  十几秒内被其它实例写回 `false`、插件被停（2026-09-21 现场：vibex；同一轮连续 toggle 6 次复现 1 次）。
+  根因是跟随路径（`applyStateChanges`）用函数开头的快照值落盘，而 `Toggle` 落盘前会先 `killCurrent`
+  （`taskkill` 可能耗时数秒），窗口内用户经另一进程改的新值被旧快照覆盖。现改为：跟随路径
+  **预检 + 写时 CAS**（`updateStateFileCAS`），磁盘值 ≠ 期望值则放弃落盘；用户 toggle 路径不变
+  （无条件生效）。写盘/跳过补 `id/enabled/pid` 日志。详见 `docs/PLUGIN-PROVIDERS.md` §4.4
+
 
 ## v1.7.5-beta.5（2026-09-19，测试预发布）
 

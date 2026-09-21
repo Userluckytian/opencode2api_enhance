@@ -202,6 +202,25 @@ argv         = --provider-serve --port 0   （port 0 = OS 分配随机端口）
 | 主进程退出 | 统一 kill 全部子进程（复用 orphan/process 管理逻辑） |
 | 配置文件变更 | 供应商自 watch 自己的 `provider.json`（3s ticker，仿 `startConfigWatcher`），自行重载；entry/api_version 变更才由主进程重启子进程 |
 
+### 4.4 启停状态的跨进程共享（`<providers>/.plugin-state.json`）
+
+所有 opencode2api 进程（主管理器 / 实例子进程 / 统一网关子进程）共享同一 `providers/` 目录，
+也共享同一份启停状态文件：任一处开关落盘后，其它进程在下一个扫描周期（≤3s）跟随停/启自家插件。
+
+| 路径 | 落盘语义 | 为什么 |
+|---|---|---|
+| **用户 toggle**（管理 API / 面板点击） | 无条件生效（写前重读合并 + 原子 rename） | 用户意图必须赢，不做 CAS |
+| **跟随**（`applyStateChanges`） | **预检 + 写时 CAS**：磁盘当前值 ≠ 决策所依据的快照值 → 放弃落盘并记日志 | 防陈旧快照覆盖并发新值 |
+
+**为什么跟随必须 CAS**（2026-09-21 实测缺陷）：跟随的决策值来自一次快照读，而落盘前会先
+`killCurrent`（Windows `taskkill` 可能耗时数秒）——这段窗口里用户经另一个进程 toggle 的新值，
+会被快照里的旧值无条件盖回去（现场：vibex 被写回 `false`、插件被停）。CAS 后：磁盘新值保留，
+内存与磁盘的短暂不一致由下一扫描周期收敛；写盘/跳过均带 `id/enabled/pid` 日志，便于定位写者。
+
+> 已知残留：同进程内「扫描跟随」与「用户 HTTP toggle」并发时会互相写花 `status/pid`；
+> 跨进程「用户 toggle vs 用户 toggle」的毫秒窗口仍在。两者均需更大改动（每插件一文件或文件锁）
+> 才能彻底消除，目前优先用日志观测。
+
 ## 五、配置自举（首次安装体验）
 
 ```
