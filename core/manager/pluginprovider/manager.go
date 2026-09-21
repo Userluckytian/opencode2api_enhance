@@ -721,7 +721,37 @@ func (m *Manager) updateStateFile(id string, enabled bool) {
 	base[id] = enabled
 	if err := m.writeStateFile(base); err != nil {
 		slog.Warn("plugin state write failed", "path", m.cfg.StateFile, "error", err)
+		return
 	}
+	// 可观测（2026-09-21 竞态排查）：多进程共享同一文件，出问题时要能知道是谁写的。
+	slog.Info("plugin state written", "id", id, "enabled", enabled, "pid", os.Getpid())
+}
+
+// updateStateFileCAS 与 updateStateFile 同款「写前重读合并 + 原子替换」，但额外做一次
+// 跨进程 compare-and-swap：仅当磁盘上该 id 的当前值仍等于 expect 时才落盘。
+//
+// 为何需要（2026-09-21 实测缺陷）：跟随路径的决策值来自 applyStateChanges 开头的一次
+// 快照读，而 toggle 在落盘前会先 killCurrent（Windows taskkill 可能耗时数秒）——这段
+// 窗口里用户经另一个进程 toggle 的新值会被陈旧快照值无条件盖回去（现场：vibex 被写回
+// false、插件被停）。CAS 让「磁盘新值」优先：放弃本次落盘，内存与磁盘的短暂不一致由
+// 下一个扫描周期（≤3s）收敛。
+func (m *Manager) updateStateFileCAS(id string, enabled, expect bool) {
+	m.stateMu.Lock()
+	defer m.stateMu.Unlock()
+	base := loadPluginState(m.cfg.StateFile)
+	cur, ok := base[id]
+	if !ok || cur != expect {
+		slog.Info("plugin state follow skipped: state changed concurrently",
+			"id", id, "want", enabled, "expect", expect, "current", cur, "present", ok, "pid", os.Getpid())
+		return
+	}
+	m.state[id] = enabled
+	base[id] = enabled
+	if err := m.writeStateFile(base); err != nil {
+		slog.Warn("plugin state write failed", "path", m.cfg.StateFile, "error", err)
+		return
+	}
+	slog.Info("plugin state followed", "id", id, "enabled", enabled, "pid", os.Getpid())
 }
 
 // applyStateChanges 跨进程启停状态跟随：重读状态文件，凡与当前 enabled 不一致的
@@ -741,7 +771,15 @@ func (m *Manager) applyStateChanges() {
 	}
 	m.mu.Unlock()
 	for _, id := range diff {
-		if _, err := m.Toggle(id, st[id]); err != nil {
+		// 预检：快照读与执行之间可能已被别的进程/用户改写（toggle 内的 killCurrent 可能
+		// 耗时数秒）。当前值已不等于快照 → 跳过，让下一轮扫描跟随磁盘新值，避免为陈旧
+		// 决策白做一次 kill/spawn 抖动。写盘那一步还有 CAS 兜底（见 updateStateFileCAS）。
+		if cur, ok := loadPluginState(m.cfg.StateFile)[id]; !ok || cur != st[id] {
+			slog.Info("plugin state follow skipped: snapshot stale",
+				"id", id, "snapshot", st[id], "current", cur, "present", ok)
+			continue
+		}
+		if _, err := m.toggleFollow(id, st[id], st[id]); err != nil {
 			slog.Debug("plugin state follow failed", "id", id, "error", err)
 		}
 	}
@@ -1325,7 +1363,20 @@ func (m *Manager) SetExposedModels(id string, exposeAll bool, exposedModels []st
 }
 
 // Toggle 启停插件（enabled=false 停进程+注销但不删文件；true 拉起+注册）。
+// Toggle 用户/管理端显式开关：用户意图无条件生效（写盘不做 CAS，见 updateStateFile）。
 func (m *Manager) Toggle(id string, enabled bool) (View, error) {
+	return m.toggle(id, enabled, nil)
+}
+
+// toggleFollow 跟随其它进程落盘的开关（applyStateChanges 专用）：写盘走 CAS，
+// expect = 本次决策所依据的快照值；磁盘已被改成别的值则放弃落盘（新值优先）。
+func (m *Manager) toggleFollow(id string, enabled, expect bool) (View, error) {
+	return m.toggle(id, enabled, &expect)
+}
+
+// toggle 是 Toggle / toggleFollow 的共用实现：expect == nil = 用户意图（无条件落盘），
+// expect != nil = 跟随路径（写时 CAS，防陈旧快照覆盖新值）。
+func (m *Manager) toggle(id string, enabled bool, expect *bool) (View, error) {
 	m.mu.Lock()
 	p, ok := m.plugins[id]
 	if !ok {
@@ -1345,11 +1396,15 @@ func (m *Manager) Toggle(id string, enabled bool) (View, error) {
 		m.setStatus(p, StatusStarting, "")
 		m.signalRetry(p)
 	} else {
-		m.killCurrent(p)
+		m.killCurrent(p) // 可能耗时数秒（taskkill）——落盘在其后，故跟随路径必须 CAS
 		m.setStatus(p, StatusDisabled, "")
 	}
 	if !same {
-		m.updateStateFile(id, enabled) // 跨进程共享：实例/网关子进程据此跟随
+		if expect != nil {
+			m.updateStateFileCAS(id, enabled, *expect) // 跨进程共享：跟随路径，写时 CAS
+		} else {
+			m.updateStateFile(id, enabled) // 跨进程共享：实例/网关子进程据此跟随
+		}
 	}
 	return m.View(id), nil
 }
