@@ -45,6 +45,7 @@ const (
 	defaultBackoffCap     = 60 * time.Second // 崩溃退避封顶
 	defaultRescanInterval = 3 * time.Second  // providers/ 目录扫描间隔
 	defaultModelTimeout   = 5 * time.Second  // 模型数查询超时
+	defaultStableReset    = 30 * time.Second // 「健康运行」判定阈值（退避归零门槛）
 )
 
 // orphanReapInterval watch 扫描循环内周期性孤儿回收的降频间隔（var 仅为测试可
@@ -62,6 +63,10 @@ type Config struct {
 	// BackoffBase / BackoffCap 崩溃指数退避区间（默认 1s→60s）。
 	BackoffBase time.Duration
 	BackoffCap  time.Duration
+	// StableResetThreshold 视为「一次健康运行」的最短存活时长（默认 30s）：
+	// 子进程退出后，存活不足该时长则退避指数递增（防「就绪即退」插件被高频重启），
+	// 超过则把退避归零（偶发崩溃不累积惩罚）。
+	StableResetThreshold time.Duration
 	// RescanInterval 目录扫描间隔（默认 3s；<=0 关闭自动扫描，仅手动 Rescan）。
 	RescanInterval time.Duration
 	// APIVersion 兼容的契约版本（默认 1）。
@@ -105,6 +110,9 @@ func New(cfg Config) *Manager {
 	}
 	if cfg.BackoffCap <= 0 {
 		cfg.BackoffCap = defaultBackoffCap
+	}
+	if cfg.StableResetThreshold <= 0 {
+		cfg.StableResetThreshold = defaultStableReset
 	}
 	if cfg.RescanInterval <= 0 {
 		cfg.RescanInterval = defaultRescanInterval
@@ -392,8 +400,21 @@ func (m *Manager) startSupervisor(p *plugin) {
 	}()
 }
 
+// nextBackoff 指数退避递增（封顶 capD）：delay → 2×delay，不超过封顶值。
+// 启动失败路径与「子进程退出」路径共用（见 supervise）。
+func nextBackoff(cur, capD time.Duration) time.Duration {
+	if next := cur * 2; next < capD {
+		return next
+	}
+	return capD
+}
+
 // supervise 插件生命周期监督循环：等启用 → 等清单合法 → spawn 等就绪行 →
 // 稳定态监听退出/重试/停用。启动失败或崩溃按指数退避重启（1s→60s 封顶）。
+//
+// 2026-09-21 修复两条「插件疯狂重启」根因（loomy 插件线上实测 78 分钟 2670 次）：
+//  1. 稳定态必须内层循环——非就绪 stdout 行不得掉出循环触发无条件重拉（见下方注释）；
+//  2. 退出路径必须等退避——只有稳定运行超过 StableResetThreshold 才把退避归零。
 func (m *Manager) supervise(p *plugin) {
 	delay := m.cfg.BackoffBase
 	for {
@@ -437,13 +458,11 @@ func (m *Manager) supervise(p *plugin) {
 			case <-p.stopCh:
 				return
 			}
-			delay *= 2
-			if delay > m.cfg.BackoffCap {
-				delay = m.cfg.BackoffCap
-			}
+			delay = nextBackoff(delay, m.cfg.BackoffCap)
 			continue
 		}
-		delay = m.cfg.BackoffBase // 就绪成功，退避归零
+		// 就绪/待配置（子进程存活）起点：用于判定本次运行是否「稳定」（见退出路径）。
+		readyAt := time.Now()
 
 		// 丢弃 spawn 期间到达的重试信号：子进程已按最新清单启动，无需再重启。
 		select {
@@ -452,23 +471,56 @@ func (m *Manager) supervise(p *plugin) {
 		}
 		// 稳定态：持续消费子进程 stdout 行流（need_config 后子进程补打 ready/fatal 行），
 		// 同时监听退出/重试/停用。设计文档 §4.1：宿主必须持续消费 stdout 行流。
-		select {
-		case <-p.exitCh:
-			m.setStatus(p, StatusError, "子进程意外退出")
-		case <-p.retryCh: // 配置保存（entry/api_version 变化）→ 重启子进程
-			m.killCurrent(p)
-			m.setStatus(p, StatusStarting, "")
-			continue
-		case <-p.stopCh:
-			m.killCurrent(p)
-			return
-		case ln, ok := <-p.stdoutCh:
-			if !ok {
-				continue // stdout 关闭由 exitCh 分支处理（子进程退出时触发）
+		//
+		// 内层 for 不可省（2026-09-21 修复 1）：select 若直接作为外层循环体末句，
+		// 任何一行「非就绪」stdout（插件自打的日志行、panel_ready/panel_skip 等扩展
+		// 状态行、重复 ready）被 handleStdoutLine 判为忽略后 select 即结束 → 外层回到
+		// 顶部 → 无条件再 spawnAndReadReady → 第一步 killCurrent 杀掉仍然健康的子进程。
+		// 表现为「插件每 1~2 秒被重启一次、restart_count 无限增长」（loomy 插件就绪后
+		// 追加 panel_* 行，单宿主即可复现）。内层 for 让忽略行留在稳定态继续消费。
+		exitedChild := false
+	stable:
+		for {
+			select {
+			case <-p.exitCh:
+				m.setStatus(p, StatusError, "子进程意外退出")
+				exitedChild = true
+				break stable
+			case <-p.retryCh: // 配置保存（entry/api_version 变化）→ 重启子进程
+				m.killCurrent(p)
+				m.setStatus(p, StatusStarting, "")
+				break stable
+			case <-p.stopCh:
+				m.killCurrent(p)
+				return
+			case ln, ok := <-p.stdoutCh:
+				if !ok {
+					// stdout 关闭 = 子进程已退出（exitCh 随后也会到达，此处先行处理）。
+					exitedChild = true
+					break stable
+				}
+				if m.handleStdoutLine(p, ln) {
+					break stable // 已重启（fatal）或就绪（ready），回外层统一处理
+				}
+				// 非就绪行（插件日志/扩展状态行）：忽略并留在稳定态继续消费。
 			}
-			if m.handleStdoutLine(p, ln) {
-				continue // 已重启（fatal）或就绪（ready），回循环顶部统一处理
+		}
+		// 子进程退出 → 指数退避后再拉起（2026-09-21 修复 2）。原先退避在「就绪」时
+		// 无条件归零、退出路径又完全不等退避，导致「就绪即退」的插件以进程启动开销
+		// 的间隔（实测 ~1.2s，且与 BackoffBase 无关）无限重启——loomy 78 分钟 2670 次，
+		// 并连带把 rebuildVendors / 模型目录刷新放大成每秒一轮的日志风暴。
+		// 只有稳定运行超过 StableResetThreshold 才视为一次健康运行并把退避归零。
+		if exitedChild {
+			if time.Since(readyAt) >= m.cfg.StableResetThreshold {
+				delay = m.cfg.BackoffBase
 			}
+			select {
+			case <-time.After(delay):
+			case <-p.retryCh:
+			case <-p.stopCh:
+				return
+			}
+			delay = nextBackoff(delay, m.cfg.BackoffCap)
 		}
 	}
 }
@@ -1087,8 +1139,8 @@ type View struct {
 	PID           int           `json:"pid,omitempty"`
 	URL           string        `json:"url,omitempty"`
 	LastError     string        `json:"last_error,omitempty"`
-	StartedAt     string   `json:"started_at,omitempty"`
-	RestartCount  int      `json:"restart_count"`
+	StartedAt     string        `json:"started_at,omitempty"`
+	RestartCount  int           `json:"restart_count"`
 }
 
 // View 查询单个插件视图（不存在返回零值）。
