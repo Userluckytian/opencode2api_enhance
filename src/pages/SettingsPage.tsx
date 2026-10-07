@@ -18,6 +18,10 @@ export default function SettingsPage({
   const [clashUrl, setClashUrl] = useState('')
   const [clashToken, setClashToken] = useState('')
 
+  // 免费通道客户端版本（opencode 上报 User-Agent 用的版本号）
+  const [ocVersion, setOcVersion] = useState('')
+  const [savingOcVersion, setSavingOcVersion] = useState(false)
+
   // 网关超时切换 / 节点前缀 已归位实例池页
   // 订阅自动拉取 已归位节点池页
   // 残留进程清理（孤儿实例 / 探针残留）
@@ -59,6 +63,7 @@ export default function SettingsPage({
       .configGet()
       .then((cfg) => {
         setClashUrl(cfg.clash_external_url)
+        setOcVersion(cfg.opencode_client_version || '')
       })
       .catch(() => {})
   }, [])
@@ -80,6 +85,23 @@ export default function SettingsPage({
       toast('保存失败', false)
     } finally {
       setSavingClash(false)
+    }
+  }
+
+  // 保存免费通道客户端版本；空串 = 删掉该项，回到自动探测 npm 最新版
+  const handleSaveOcVersion = async () => {
+    setSavingOcVersion(true)
+    try {
+      await api.configSet('opencode_client_version', ocVersion.trim())
+      toast(ocVersion.trim() ? `已保存，重启网关后生效：opencode/${ocVersion.trim()}` : '已清空，重启网关后回到自动探测', true)
+      const cfg = await api.configGet()
+      setConfig(cfg)
+      setOcVersion(cfg.opencode_client_version || '')
+    } catch (e) {
+      console.error('保存客户端版本失败', e)
+      toast('保存失败', false)
+    } finally {
+      setSavingOcVersion(false)
     }
   }
 
@@ -229,6 +251,40 @@ export default function SettingsPage({
         </button>
       </div>
       )}
+
+      {/* 免费通道客户端版本（上游按 User-Agent 版本判定；抬高下限后可在此跟进，无需重编译） */}
+      <div className="bg-white rounded-2xl border p-5 space-y-4">
+        <div>
+          <h2 className="text-lg font-semibold text-zinc-900">免费通道客户端版本</h2>
+          <p className="text-zinc-500 text-xs">
+            上报给 OpenCode 上游的客户端版本（User-Agent: opencode/&lt;版本&gt;）。上游会抬高免费通道的最低版本要求，
+            报得太低会返回 426 Upgrade Required。留空则自动探测 npm 上的最新版本。
+          </p>
+        </div>
+
+        <div className="space-y-2">
+          <label className="block text-sm font-medium text-zinc-700">版本号</label>
+          <input
+            type="text"
+            placeholder="留空 = 自动探测（如 1.99.0）"
+            value={ocVersion}
+            onChange={(e) => setOcVersion(e.target.value)}
+            className="w-full px-3 py-2 border rounded-lg"
+          />
+          <p className="text-zinc-500 text-xs">
+            格式 x.y.z 三段数字。保存后重启网关生效（版本号在会话初始化时读取）。
+          </p>
+        </div>
+
+        <button
+          onClick={handleSaveOcVersion}
+          disabled={savingOcVersion}
+          className="flex items-center gap-1.5 bg-zinc-900 text-white rounded-lg px-4 py-2 text-[13px] hover:bg-zinc-700 disabled:cursor-not-allowed disabled:opacity-60"
+        >
+          {savingOcVersion ? <Loader2 size={14} className="animate-spin" /> : null}
+          {savingOcVersion ? '保存中…' : '保存'}
+        </button>
+      </div>
 
       {/* 开机自启（仅桌面端：桌面临近登录自启；Web/Docker/Linux 服务器 headless 端隐藏，服务器用 systemd/容器编排管理） */}
       {isDesktop && (

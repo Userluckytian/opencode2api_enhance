@@ -267,6 +267,8 @@ export type ConfigView = {
   failover_probe_max: number
   call_log_max: number
   show_node_prefix: boolean
+  /** 免费通道上报的客户端版本（空 = 自动探测 npm 最新版） */
+  opencode_client_version: string
   /** U3: 界面轮询间隔（秒，0 = 关闭轮询，默认 5） */
   ui_poll_interval_sec: number
   subscribe_url: string

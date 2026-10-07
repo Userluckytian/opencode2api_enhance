@@ -229,6 +229,78 @@ func mergeProviderEntries(existing, customs []map[string]any) []map[string]any {
 	return append(kept, customs...)
 }
 
+// OpencodeClientVersionOf 读 providers 中 type=opencode 条目的 params.client_version。
+// 空串 = 未配置 = 走自动探测（npm 最新版，失败回落兜底版本）。
+// 免费通道上报的 User-Agent 版本由该值决定，上游抬高下限时在此跟进。
+func OpencodeClientVersionOf(cfg Config) string {
+	for _, p := range cfg.Providers {
+		if t, _ := p["type"].(string); t != "opencode" {
+			continue
+		}
+		params, ok := p["params"].(map[string]any)
+		if !ok {
+			continue
+		}
+		if v, ok := params["client_version"].(string); ok {
+			return strings.TrimSpace(v)
+		}
+	}
+	return ""
+}
+
+// SetOpencodeClientVersion 写入（或删除）providers 中 type=opencode 条目的
+// params.client_version。空串 = 删除该键，回到自动探测。
+// 找不到 opencode 条目时物化一个：providers 为空时是「只认 opencode」的隐式列表，
+// 无处落盘会让用户设置丢失。
+func SetOpencodeClientVersion(cfg *Config, value string) error {
+	if value != "" && !validClientVersion(value) {
+		return fmt.Errorf("invalid opencode_client_version %q: 期望 x.y.z 三段数字（如 1.99.0）", value)
+	}
+	idx := -1
+	for i, p := range cfg.Providers {
+		if t, _ := p["type"].(string); t == "opencode" {
+			idx = i
+			break
+		}
+	}
+	if idx < 0 {
+		cfg.Providers = append(cfg.Providers, map[string]any{
+			"id": "opencode", "type": "opencode", "enabled": true,
+		})
+		idx = len(cfg.Providers) - 1
+	}
+	params, _ := cfg.Providers[idx]["params"].(map[string]any)
+	if params == nil {
+		params = map[string]any{}
+	}
+	if value == "" {
+		delete(params, "client_version")
+	} else {
+		params["client_version"] = value
+	}
+	cfg.Providers[idx]["params"] = params
+	return nil
+}
+
+// validClientVersion 校验 x.y.z 三段数字：上游只比较三段数值，格式写错会静默降级为 403/426。
+func validClientVersion(v string) bool {
+	parts := strings.Split(v, ".")
+	if len(parts) != 3 {
+		return false
+	}
+	for _, p := range parts {
+		if p == "" {
+			return false
+		}
+		for _, c := range p {
+			if c < '0' || c > '9' {
+				return false
+			}
+		}
+	}
+	return true
+}
+
 // effectiveDefaultPassword 生效默认密码：未设置 → "123456"。
 func (m *Manager) effectiveDefaultPassword() string {
 	pw := m.loadConfig().DefaultPassword
@@ -270,6 +342,8 @@ func (m *Manager) ConfigGet(key string) (string, error) {
 		return strconv.FormatInt(cfg.CallLogMax, 10), nil
 	case "show_node_prefix":
 		return strconv.FormatBool(cfg.ShowNodePrefix), nil
+	case "opencode_client_version":
+		return OpencodeClientVersionOf(cfg), nil
 	case "ui_poll_interval_sec":
 		if cfg.UiPollIntervalSec == nil {
 			return strconv.Itoa(defaultUiPollIntervalSec), nil
@@ -436,6 +510,10 @@ func (m *Manager) ConfigSet(key, value string) error {
 			return fmt.Errorf("invalid boolean for show_node_prefix: %s", value)
 		}
 		cfg.ShowNodePrefix = b
+	case "opencode_client_version":
+		if err := SetOpencodeClientVersion(&cfg, strings.TrimSpace(value)); err != nil {
+			return err
+		}
 	case "ui_poll_interval_sec":
 		v, err := parseInt()
 		if err != nil {
@@ -733,6 +811,8 @@ type ConfigView struct {
 	FailoverProbeMax        int64   `json:"failover_probe_max"`
 	CallLogMax              int64   `json:"call_log_max"`
 	ShowNodePrefix          bool    `json:"show_node_prefix"`
+	// OpencodeClientVersion 免费通道上报的客户端版本（空 = 自动探测）
+	OpencodeClientVersion   string  `json:"opencode_client_version"`
 	UiPollIntervalSec       int     `json:"ui_poll_interval_sec"`
 	UpstreamProxy           string  `json:"upstream_proxy"`
 	SubscribeURL            string  `json:"subscribe_url"`
@@ -793,6 +873,7 @@ func (m *Manager) ConfigViewOf() ConfigView {
 		FailoverProbeMax:        def(cfg.FailoverProbeMax, 3),
 		CallLogMax:              def(cfg.CallLogMax, 5000),
 		ShowNodePrefix:          cfg.ShowNodePrefix,
+		OpencodeClientVersion:   OpencodeClientVersionOf(cfg),
 		UiPollIntervalSec:       uiPollIntervalSecOf(cfg),
 		UpstreamProxy:           cfg.UpstreamProxy,
 		SubscribeURL:            cfg.SubscribeURL,

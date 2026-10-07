@@ -23,17 +23,26 @@ import (
 
 // minFreeTierVersion 是上游免费通道（Authorization: Bearer public）要求的最低客户端版本。
 // 上游按 User-Agent "opencode/<版本>" 识别客户端：低于该版本返回 426 UpgradeRequired
-// （"OpenCode 1.17.0 or newer is required to use the free tier"），
+// （"OpenCode 1.18.0 or newer is required to use the free tier"），
 // 无版本号或第三方 UA 返回 403 FreeTierError。
-// 见 docs/issue-log/2026-09-17.md「opencode 免费通道新增服务端校验」。
-const minFreeTierVersion = "1.17.0"
+//
+// 下限由上游单方面抬升且会继续往上走（1.17.0 → 1.18.0，2026-10-07 再次上调，
+// 免费模型全量 426）。历史排查见 docs/issue-log/2026-09-17.md。
+const minFreeTierVersion = "1.18.0"
 
 // 上游端点（OpenCode 专属）。
 const (
 	zenModelsURL = "https://opencode.ai/zen/v1/models"
 	goModelsURL  = "https://opencode.ai/zen/go/v1/models"
 	versionURL   = "https://registry.npmjs.org/opencode-ai/latest"
-	versionDef   = minFreeTierVersion
+
+	// versionDef 是版本探测失败（npm 经 SOCKS 不可达 / 超时 / 非 2xx）时的兜底上报版本。
+	// 探测走代理池出口，失败是常态：日志里 session 初始化版本在 1.18.32（探测成功）与
+	// 1.17.0（回落兜底）之间反复跳。兜底值若等于 minFreeTierVersion，上游每抬一次下限
+	// 就会在探测失败的窗口里集体 426。上游只做「版本 ≥ 下限」的单向比较（实测
+	// 1.18.0 / 1.18.35 / 1.99.0 均 200，1.17.0 才 426），故兜底取明显高于下限的值，
+	// 使探测失败不再是可用性单点。
+	versionDef = "1.99.0"
 
 	// surfaceZen / surfaceGo 是 contract.Model.Meta 中 "surface" 键的取值，
 	// 用于保留 zen 目录与 go 目录的区分（路由/目录过滤需要）。
@@ -83,6 +92,11 @@ type Config struct {
 	// 429 重试前 sleep min(base*2^n, cap)（0 = 默认 1000 / 30000）。
 	RateLimitBackoffBaseMS int
 	RateLimitBackoffCapMS  int
+	// ClientVersion 覆盖免费通道上报给上游的客户端版本（User-Agent: opencode/<值>）。
+	// 空 = 默认行为：启动时探测 npm 最新版本，探测失败回落 versionDef。
+	// 用户可配（providers[].params.client_version）：上游抬高免费通道下限时，
+	// 改配置即可跟进，无需重编译；置空/删除则回到自动探测。
+	ClientVersion string
 }
 
 // Vendor 实现 contract.Vendor，代表 OpenCode 上游。
@@ -168,6 +182,11 @@ func (v *Vendor) SessionID() string {
 }
 
 func (v *Vendor) fetchOCVersion() string {
+	// 配置显式指定时直接采用，跳过 npm 探测：探测走代理池出口本就不可靠，
+	// 而用户显式配置是确定值，不该被探测失败覆盖。
+	if v.cfg.ClientVersion != "" {
+		return v.cfg.ClientVersion
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), versionFetchTimeout)
 	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, versionURL, nil)

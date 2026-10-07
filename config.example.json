@@ -19,7 +19,10 @@
       "id": "opencode",
       "type": "opencode",
       "name": "OpenCode",
-      "enabled": true
+      "enabled": true,
+      "params": {
+        "client_version": "1.99.0"
+      }
     }
   ],
   "routing": {

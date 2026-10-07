@@ -23,6 +23,11 @@ const (
 	// ParamRateLimitBackoffBaseMS / ParamRateLimitBackoffCapMS 键：429 指数退避 base/cap 毫秒（int；S2）。
 	ParamRateLimitBackoffBaseMS = "_rate_limit_backoff_base_ms"
 	ParamRateLimitBackoffCapMS  = "_rate_limit_backoff_cap_ms"
+
+	// ParamClientVersion 键：免费通道上报给上游的客户端版本（string；用户可配）。
+	// 非 "_" 前缀 → 配置文件中 providers[].params.client_version 可覆盖，
+	// 用于上游抬高免费通道下限后无需重编译即可跟进。
+	ParamClientVersion = "client_version"
 )
 
 func init() {
@@ -57,6 +62,9 @@ func init() {
 		}
 		if n, ok := spec.Params[ParamRateLimitBackoffCapMS].(int); ok {
 			cfg.RateLimitBackoffCapMS = n
+		}
+		if s, ok := spec.Params[ParamClientVersion].(string); ok {
+			cfg.ClientVersion = s
 		}
 		return New(cfg), nil
 	})
