@@ -552,6 +552,45 @@ export type SubscriptionSource = {
 
 export type SubscriptionTargetLabel = 'solo' | 'pool' | 'pool-only'
 
+// 批量粘贴代理链接导入的结果（vless/vmess/trojan/ss/hy2/http/socks5 等）
+export type ImportLinksResult = {
+  status: string
+  imported: number
+  group: string
+  /** 被跳过的坏行数（逐行解析时统计） */
+  skipped: number
+  /** 逐行错误说明（如「第 3 行：不支持的协议 ftp://」） */
+  errors?: string[]
+}
+
+// 本地代理文件源（用户本机已有的 Clash 配置文件 / 目录）
+export type LocalProfileSource = {
+  path: string
+  group: string
+  kind: 'file' | 'dir'
+  node_count: number
+  last_import?: string
+  last_error?: string
+}
+
+export type LocalProfileAddResult = {
+  status: string
+  path: string
+  group: string
+  imported: number
+  files: number
+}
+
+export type LocalProfileReloadResult = {
+  status: string
+  reloaded: number
+  total?: number
+  imported: number
+  files?: number
+  group?: string
+  results?: { path: string; group: string; imported: number; files: number; error?: string }[]
+}
+
 // ─── 健康巡检（main 功能迁移 M2） ─────────────────────────────────────────────
 
 export type HealthRecord = {
@@ -754,6 +793,23 @@ export const api = {
       url,
       name: name ?? undefined,
     }),
+
+  // 批量粘贴代理链接导入（vless/vmess/trojan/ss/hy2/http/socks5 等；group 留空自动「手动导入N」）
+  subscriptionsImportLinks: (text: string, group?: string) =>
+    req<ImportLinksResult>('POST', '/subscriptions/import-links', {
+      text,
+      group: group ?? undefined,
+    }),
+
+  // 本地代理文件导入（Clash YAML 单文件 / 目录；导入后节点进订阅缓存，与订阅节点同源）
+  localProfilesList: () => req<{ sources: LocalProfileSource[] }>('GET', '/local-profiles'),
+  localProfilesAdd: (path: string, group?: string) =>
+    req<LocalProfileAddResult>('POST', '/local-profiles/add', { path, group: group ?? undefined }),
+  localProfilesRemove: (path: string) =>
+    req<{ status: string; removed: boolean; removed_nodes: number }>('POST', '/local-profiles/remove', { path }),
+  /** path 留空 = 重载全部源 */
+  localProfilesReload: (path?: string) =>
+    req<LocalProfileReloadResult>('POST', '/local-profiles/reload', { path: path ?? undefined }),
 
   // 开机自启：由 Go core 承载（写 Windows 注册表），经 HTTP 调用
   autostartGet: async (): Promise<boolean> => {

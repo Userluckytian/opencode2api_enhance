@@ -89,7 +89,16 @@ UI 参照 Windsurf Account Manager 的浅色官网风格：无边框窗口 + 自
 powershell -ExecutionPolicy Bypass -File scripts/prepare-portable.ps1
 ```
 
-自动完成：编译最新 Go core → Rust 壳（内嵌 core + sing-box）→ 组装 `portable-out/`（exe + WebView2Loader.dll + portable.txt + 前端 dist）→ 校验。生成的 portable 包走**独立端口槽位与数据目录**，与正式版零冲突，适合日常测试（详见 [测试指南](docs/TESTING.md)）。
+前置条件（脚本会自检并给出可操作报错）：
+
+- `go` 在 PATH（编译 Go core）
+- `cargo` + MSVC 工具链（编译 Rust 壳）。脚本会**自动初始化 MSVC 环境**：优先用 `VsDevCmd.bat`，若该 VS 安装缺 `vcvars` 脚本（此时 `VsDevCmd` 静默不设环境）则回退到**从磁盘探测** `VC\Tools\MSVC\<ver>` 与 Windows SDK 并自行拼 `PATH/INCLUDE/LIB`；两者都失败时报「install Desktop development with C++」
+- `bin\sing-box.exe`：Windows 用 `powershell -ExecutionPolicy Bypass -File scripts\fetch-singbox.ps1`（版本自动对齐 CI 矩阵）
+- `bin\dist\`：先跑 `npm run build`
+
+自动完成：编译最新 Go core（版本号取自 `package.json`，commit/branch 取自 git）→ Rust 壳（内嵌 core + sing-box）→ 组装 `portable-out/`（exe + WebView2Loader.dll + portable.txt + 前端 dist）→ 校验。生成的 portable 包走**独立端口槽位与数据目录**，与正式版零冲突，适合日常测试（详见 [测试指南](docs/TESTING.md)）。
+
+> 注意：运行过打包产物后，壳会在 `portable-out\bin\` 释放 `opencode2api.exe` / `sing-box.exe`（各约数十 MB）。脚本重新打包前会清理整个输出目录，若提示文件被占用，先退出正在运行的 `opencode2api.exe`。
 
 ### Linux 构建（本地 / WSL）
 
@@ -112,7 +121,9 @@ Linux 桌面产物（.deb）需在 Linux 环境构建（Windows 可用 WSL），
 `bin/` 被 `.gitignore` 忽略，`opencode2api.exe` 与 `sing-box.exe` 均不入库，本地构建前需自行准备：
 
 - `opencode2api`（Windows 为 `.exe`）：由本仓库 Go 源码构建（`go build -trimpath -ldflags "-s -w" -o bin/opencode2api .`）
-- `sing-box`（Windows 为 `.exe`）：一键脚本 `./scripts/fetch-singbox.sh` 从 [sing-box 官方 Release](https://github.com/SagerNet/sing-box/releases) 下载（默认 v1.13.16，`SINGBOX_VERSION` 可覆盖），自动按宿主平台放到 `bin/`；CI 由 workflow 自动准备
+- `sing-box`（Windows 为 `.exe`）：一键脚本从 [sing-box 官方 Release](https://github.com/SagerNet/sing-box/releases) 下载并放到 `bin/`；CI 由 workflow 自动准备
+  - Windows：`powershell -ExecutionPolicy Bypass -File scripts\fetch-singbox.ps1`（默认版本自动读取 CI 矩阵，`-Version` 可覆盖）
+  - Linux/macOS：`./scripts/fetch-singbox.sh [target]`（默认 v1.13.16，`SINGBOX_VERSION` 可覆盖；Windows 资产只有 `.zip`，脚本已按 target 自动选择压缩格式）
 
 远程构建无需手动准备：GitHub Actions 会自动构建 Go 核心、下载 sing-box 并完成打包（见 `.github/workflows/build-release.yml`）。
 

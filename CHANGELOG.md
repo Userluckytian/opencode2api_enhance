@@ -1,5 +1,55 @@
 # Changelog
 
+## v1.7.7（2026-10-17，正式发布）
+
+### 🔧 构建工具
+
+- **`scripts/prepare-portable.ps1` 修 4 个缺陷**（此前无法在干净环境一条命令跑通）：
+  1. **MSVC 环境不初始化**：只调 `VsDevCmd.bat`，而部分 VS 安装（如 VS 18 BuildTools 仅装工具集、缺
+     `vcvars64.bat`/`vcvarsall.bat`）下它打印 banner、exit 0 却不设任何变量，于是 `cargo build` 直接
+     `linker \`link.exe\` not found`。现改为「先试 VsDevCmd → 失败则从磁盘探测 `VC\Tools\MSVC\<ver>`
+     （要求同时有 `link.exe` 与 `cl.exe`，避免误认 Go 自带的 `link.exe`）与 Windows SDK，自行拼
+     `PATH/INCLUDE/LIB`」，并在开头给出可操作报错而非深层报错。
+  2. **`WebView2Loader.dll` 复制顺序反了**：`tauri.conf.json` 把它列为 bundle resource，cargo build
+     时就要存在，但脚本第 3 步才复制 → `resource path ... doesn't exist`。现移到 cargo build 之前，
+     并保留 `-SkipRustBuild` 时回退到仓库内 `src-tauri/WebView2Loader.dll`。
+  3. **版本号与 commit 静默失真**：`-Version` 默认值硬编码 `"v1.3.0"`，与 `package.json` 的
+     `1.7.6-beta` 早已漂移（打出来的包标 1.3.0）；`try { git ... } catch` 又把错误吞成 `commit=unknown`。
+     现改为「`-Version` 留空即读 `package.json`」，git 取不到时 `Write-Warning` 显式提示，并补上
+     `main.branch` 注入。
+  4. **旧产物残留**：运行过打包产物后壳会在 `portable-out/bin/` 释放 core 与 sing-box，`Remove-Item`
+     失败只警告不中断，旧文件会混进新包。现清理失败即抛出，并提示占用进程 PID。
+- **新增 `scripts/fetch-singbox.ps1`**：`fetch-singbox.sh` 对所有平台都拼 `.tar.gz`，但 SagerNet 只为
+  Windows 发布 `.zip`（实测 `.tar.gz` 返回 404），在 Windows 上必失败。新脚本按 `.zip` 下载、带镜像兜底，
+  默认版本自动读取 CI 矩阵保持一致；`fetch-singbox.sh` 同步修正为按 target 选压缩格式。
+
+
+> 节点池补上「本地 Clash 配置文件」这条来源，并让订阅导入支持批量粘贴代理链接 + 自定义分组名。
+
+### ✨ 新增
+
+- **本地代理文件导入（节点池 → 订阅导入 → 本地代理文件）**：可直接指定本机已有的 Clash 配置文件路径
+  （`.yaml` / `.yml` / `.txt`）或配置文件所在目录（取其下 1 层配置文件），解析其中的 `proxies` 后进节点池。
+  此前只有两条本地来源——Clash 外部控制 API 与 Clash Verge 的固定 profiles 目录——因此把配置放在
+  Clash for Windows / mihomo party / 便携版 / 自建目录的用户，节点池里根本看不到自己的节点。
+  现在任意路径都能读：**只读不写**（不动用户原始配置），支持「重载」单源或全部源，移除源时清理该分组节点
+  （分组被其它源共用时只删源记录）。非 Clash 内容的文件（明文链接列表 / base64）自动回退到订阅文本解析。
+- **批量粘贴代理链接导入 + 自定义分组名**：订阅弹窗新增「批量链接导入」，一行一条粘贴即可入池，可自定分组名
+  （留空自动「手动导入1/2/…」）。整段粘贴 Clash YAML、base64 订阅文本、sing-box JSON 同样可用。
+  解析失败的行走「先整体、失败再逐行」兜底：好行照常导入，坏行以「第 N 行：原因」返回给前端展示。
+- **代理协议补齐 `http` / `https` / `socks5` / `socks5h` / `socks4`**：链接解析与 sing-box 出站生成两端都补齐。
+  此前只认 `socks://`，且 `http` 代理完全无法解析——用户手上的机房 / 家宽 / 内网 HTTP、SOCKS5 代理无处安放。
+  无认证写法（`socks5://host:port`、`http://host:port`）也支持；`https` 表示到代理本身走 TLS。
+  顺带把用户名从 `cipher` 槽位拆到独立的 `username` 字段（Clash YAML 的 `username` 键现在能正确读到）。
+
+### 📝 说明
+
+- 本地文件源登记在 `dataDir/local_profiles.json`，导入的节点写入订阅缓存（与订阅节点同源），
+  因此可直接扫描、入池、按分组删除；`ListNodesWithGroup` 的来源优先级（外部 API > 本地 profiles > 订阅缓存）保持不变。
+- 批量链接导入的分组会登记为一条占位订阅源（`manual://<分组名>`），让「订阅管理」列表里能看见并删除它。
+- 接口说明见 `docs/API.md` 的「节点导入（管理）」一节。
+
+
 ## v1.7.6-beta（2026-10-15，测试预发布）
 
 > 修复「工具 schema 里名为 `title` 的属性被宿主当注解删掉」导致严格校验的上游 400：

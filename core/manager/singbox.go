@@ -32,7 +32,7 @@ func buildSingboxConfig(node ClashNode, listenPort uint16) ([]byte, error) {
 				map[string]any{"type": "https", "tag": "google-doh", "server": "8.8.8.8", "server_port": 443},
 			},
 			"strategy": "ipv4_only",
-			"final":     "ali-doh",
+			"final":    "ali-doh",
 		},
 		"route": map[string]any{
 			"final": "proxy",
@@ -185,6 +185,48 @@ func singboxOutbound(n ClashNode) (map[string]any, error) {
 		}
 		if tr := singTransport(n); tr != nil {
 			out["transport"] = tr
+		}
+		return out, nil
+	// http / socks 出站：用户手工导入的机房 / 家宽 / 内网代理（批量链接导入常见形态）。
+	// 凭据槽位与解析器约定一致：Cipher = username、Password = password；两者都空则不出凭据。
+	case "http", "https":
+		out := map[string]any{
+			"type":        "http",
+			"tag":         "proxy",
+			"server":      n.Server,
+			"server_port": n.Port,
+		}
+		if n.Username != "" {
+			out["username"] = n.Username
+		}
+		if n.Password != "" {
+			out["password"] = n.Password
+		}
+		if tlsOn(false) {
+			// https 代理：到代理本身走 TLS；sni 缺省用 server，证书名不符时由 skip-cert-verify 放行。
+			out["tls"] = map[string]any{
+				"enabled":     true,
+				"server_name": serverName(n.Server),
+				"insecure":    insecure(false),
+			}
+		}
+		return out, nil
+	case "socks", "socks5", "socks4":
+		out := map[string]any{
+			"type":        "socks",
+			"tag":         "proxy",
+			"server":      n.Server,
+			"server_port": n.Port,
+			"version":     "5",
+		}
+		if strings.EqualFold(n.NodeType, "socks4") {
+			out["version"] = "4"
+		}
+		if n.Username != "" {
+			out["username"] = n.Username
+		}
+		if n.Password != "" {
+			out["password"] = n.Password
 		}
 		return out, nil
 	case "ss", "shadowsocks":

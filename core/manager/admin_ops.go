@@ -31,7 +31,7 @@ func (m *Manager) nodeViews() []NodeView {
 	for _, n := range sf.ListNodes() {
 		out = append(out, NodeView{
 			Name: n.Name, NodeType: n.NodeType, Server: n.Server, Port: n.Port,
-			HasCred: n.Password != "" || n.UUID != "", Group: n.Group,
+			HasCred: nodeHasCredential(n), Group: n.Group,
 		})
 	}
 	return out

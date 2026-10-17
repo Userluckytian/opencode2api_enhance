@@ -5,6 +5,9 @@ set -euo pipefail
 # Windows=sing-box.exe，Linux/macOS=sing-box 无扩展名）。
 # opencode2api 本仓库用 Go 构建（build-release.sh 或 CI 内 go build），无需下载。
 #
+# 注意：Windows 资产只发布 .zip，本脚本按 target 自动选 .zip / .tar.gz。
+#       Windows 上若没有 bash/unzip，请改用 scripts/fetch-singbox.ps1。
+#
 # 用法：
 #   ./scripts/fetch-singbox.sh                     # 拉当前宿主平台（Linux/macOS/Windows 自动识别）
 #   ./scripts/fetch-singbox.sh linux-amd64         # 显式指定目标
@@ -43,18 +46,29 @@ mkdir -p "$BIN"
 
 for target in "${targets[@]}"; do
   target="${target/\//-}" # 兼容 linux/amd64 写法
-  url="https://github.com/SagerNet/sing-box/releases/download/v${SINGBOX_VERSION}/sing-box-${SINGBOX_VERSION}-${target}.tar.gz"
-  echo ">> fetch sing-box ${SINGBOX_VERSION} ${target}"
+  # Windows 资产只有 .zip（SagerNet 不为 windows 发布 .tar.gz，写死 .tar.gz 会 404）。
+  if [[ "$target" == windows-* ]]; then
+    ext="zip"
+  else
+    ext="tar.gz"
+  fi
+  url="https://github.com/SagerNet/sing-box/releases/download/v${SINGBOX_VERSION}/sing-box-${SINGBOX_VERSION}-${target}.${ext}"
+  echo ">> fetch sing-box ${SINGBOX_VERSION} ${target} (${ext})"
   tmp="$(mktemp -d)"
-  curl -fsSL --retry 3 "$url" -o "$tmp/sb.tgz"
-  tar -xzf "$tmp/sb.tgz" -C "$tmp"
+  archive="$tmp/sb.${ext}"
+  curl -fsSL --retry 3 "$url" -o "$archive"
+  if [[ "$ext" == "zip" ]]; then
+    unzip -oq "$archive" -d "$tmp"
+  else
+    tar -xzf "$archive" -C "$tmp"
+  fi
   bin_name="sing-box"
   [[ "$target" == windows-* ]] && bin_name="sing-box.exe"
-  src="$(find "$tmp" -maxdepth 2 -name sing-box -type f | head -n 1)"
+  src="$(find "$tmp" -maxdepth 2 -name "$bin_name" -type f | head -n 1)"
   if [[ -z "$src" ]]; then
-    echo "!! 未在包内找到 sing-box 可执行文件（$target）" >&2
+    echo "!! 未在包内找到 $bin_name 可执行文件（$target）" >&2
     rm -rf "$tmp"
-    continue
+    exit 1
   fi
   cp "$src" "$BIN/$bin_name"
   chmod +x "$BIN/$bin_name" 2>/dev/null || true

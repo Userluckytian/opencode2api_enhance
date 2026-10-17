@@ -290,6 +290,24 @@ func (m *Manager) subscriptionSourceByURL(url string) (SubscriptionSource, bool)
 	return SubscriptionSource{}, false
 }
 
+// groupOwner 返回占用分组的其他源描述。exceptPath / exceptURL 用于重载当前源时排除自身。
+func (m *Manager) groupOwner(group, exceptPath, exceptURL string) string {
+	if group == "" {
+		return ""
+	}
+	for _, source := range m.loadLocalProfiles() {
+		if source.Group == group && source.Path != exceptPath {
+			return "本地文件源 " + source.Path
+		}
+	}
+	for _, source := range m.loadSubscriptions() {
+		if source.Group == group && source.URL != exceptURL {
+			return "订阅源 " + source.URL
+		}
+	}
+	return ""
+}
+
 // importSubscriptionForSource 自动拉取路径：2026-08-16 决策——一律只进节点池
 // （target 值不影响，永不重建实例）；导入后把分组名持久化到源记录。
 func (m *Manager) importSubscriptionForSource(s SubscriptionSource) (int, error) {

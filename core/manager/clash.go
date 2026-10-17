@@ -1,6 +1,8 @@
 // clash 节点类型与可插拔接缝（P4-2 先定型，P4-3 填真实解析/生成）。
 package manager
 
+import "strings"
+
 // ClashNode 单个 clash 节点（serde 名与 Rust ClashNode 一致）。
 type ClashNode struct {
 	Name              string            `json:"name"`
@@ -8,6 +10,7 @@ type ClashNode struct {
 	Port              uint16            `json:"port"`
 	NodeType          string            `json:"type"`
 	Password          string            `json:"password,omitempty"`
+	Username          string            `json:"username,omitempty"` // http/socks 代理用户名（clash 节点原生字段）
 	UUID              string            `json:"uuid,omitempty"`
 	Cipher            string            `json:"cipher,omitempty"`
 	SNI               string            `json:"sni,omitempty"`
@@ -29,6 +32,24 @@ type ClashNode struct {
 	PublicKey         string            `json:"public-key,omitempty"`  // wireguard 对端公钥
 	AuthStr           string            `json:"auth-str,omitempty"`    // hysteria v1 认证串
 	Group             string            `json:"group,omitempty"`
+}
+
+// authlessProxyTypes 本身不需要凭据的代理类型：HTTP / SOCKS 代理可以完全无认证
+// （内网、局域网、机房白名单 IP 代理都是这种形态）。
+// 若不特判，「Password == "" && UUID == ""」会把它们误判成「无凭据节点」——
+// 前端打上「✗无凭据」红字、扫描时被直接跳过，用户导入的可用节点因此永远扫不出来。
+var authlessProxyTypes = map[string]bool{
+	"http": true, "https": true,
+	"socks": true, "socks5": true, "socks5h": true, "socks4": true,
+}
+
+// nodeHasCredential 节点是否具备连接凭据（含「该类型本就无需凭据」）。
+// 供节点列表（has_cred）与扫描过滤共用，避免两处口径漂移。
+func nodeHasCredential(n ClashNode) bool {
+	if n.Password != "" || n.UUID != "" {
+		return true
+	}
+	return authlessProxyTypes[strings.ToLower(n.NodeType)]
 }
 
 // SeamFuncs 汇聚 P4-3/4 才填充的可插拔能力（实例/探针/网关在启动时调用）。

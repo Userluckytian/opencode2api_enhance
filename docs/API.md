@@ -31,6 +31,55 @@
 > 旧版 `/api/config`、`/api/stats`、`/api/reload` 等内嵌管理路由已于 2026-08-12 移除，
 > 现行管理面统一为 `/api/admin/*`（前端由 dist/ 七页 UI 提供）。
 
+## 节点导入（管理）
+
+节点池的节点来源共四类：① Clash 外部控制 API（`clash_external_url`）② Clash Verge 默认 profiles 目录
+③ 本管理器的订阅缓存 ④ **本地代理文件**（用户显式指定路径，见下）。合并顺序与去重规则见
+`core/manager/clash_parse.go:ListNodesWithGroup`（外部 API 优先，其余来源补缺，最后按 `(group, name)` 排序）。
+
+### 批量粘贴代理链接
+
+`POST /api/admin/subscriptions/import-links`
+
+```json
+{
+  "text": "vless://uuid@host:443?security=tls&type=ws&path=%2Fws#香港\nhttp://user:pass@1.2.3.4:8080#新加坡\nsocks5://1.2.3.4:1080#日本",
+  "group": "我的手动节点"
+}
+```
+
+响应：
+
+```json
+{ "status": "ok", "imported": 3, "group": "我的手动节点", "skipped": 0, "errors": ["第 4 行：不支持的协议 ftp://"] }
+```
+
+- `text` 支持多行明文链接、整段 Clash YAML、base64 订阅文本、sing-box JSON（自动识别）。
+- 支持的协议：`http` / `https` / `socks` / `socks5` / `socks5h` / `socks4` / `vless` / `vmess` / `trojan` /
+  `ss` / `hysteria2`(`hy2`) / `hysteria`(`hy1`) / `tuic` / `anytls` / `wireguard`(`wg`)。
+- `group` 留空 → 自动 `手动导入N`（避开已有分组重名）。
+- 解析采用「先整体、失败再逐行」：整体解析失败时逐行兜底，坏行以 `第 N 行：原因` 记入 `errors`，
+  好行照常导入；若一条都没成功则返回 400。
+- 导入的分组会同时登记为一条订阅源（占位 URL `manual://<分组名>`），因此在「订阅管理」列表里可见、可删除
+  （删除会同步清理该分组节点与使用中的实例）。
+
+### 本地代理文件 / 目录
+
+| 路由 | 方法 | 说明 |
+| --- | --- | --- |
+| `/api/admin/local-profiles` | `GET` | 已登记的本地源列表 `{sources:[{path,group,kind,node_count,last_import,last_error}]}` |
+| `/api/admin/local-profiles/add` | `POST` | `{path, group?}` 导入（首次登记）→ `{status,path,group,imported,files}` |
+| `/api/admin/local-profiles/reload` | `POST` | `{path?}` 重载单个源；`path` 留空 = 重载全部 |
+| `/api/admin/local-profiles/remove` | `POST` | `{path}` 移除源并清理该分组节点 → `{status,removed,removed_nodes}` |
+
+- `path` 可为单文件（`.yaml` / `.yml` / `.txt`）或目录（取其下 **1 层**配置文件，不递归）。
+- 解析优先按 Clash YAML 的 `proxies`；无节点时回退到订阅文本解析（明文链接 / base64），
+  因此把链接列表存成 `.txt` 也能导入。
+- **只读不写**：不会修改用户磁盘上的配置文件；改文件后点「重载」即可刷新节点。
+- 节点写入订阅缓存（与订阅节点同源），因此可直接扫描、入池、按分组删除。
+- 移除源时若该分组仍被其它源/订阅共用，只删源记录、不清节点。
+- 单文件读取上限 32MB；目录内单文件失败不阻断其他文件（错误合并返回）。
+
 `GET /v1/models` 的返回会随鉴权模式变化：
 
 - `public` 只显示免费 Zen 模型。

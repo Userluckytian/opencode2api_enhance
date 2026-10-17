@@ -94,6 +94,11 @@ type Manager struct {
 	// 对同一实例重复 stop/start；配合 saveHealthRecords 临时文件+Rename 原子落盘。
 	healthMu sync.Mutex
 
+	// localProfileMu 串行化本地代理文件源的读写（load→merge→save 全程持锁）。
+	// 与 subscriptionCacheMu 同款理由：两个并发重载（用户点「重载全部」时又点单个源的
+	// 「重载」、或两个面板各发一次）会基于同一份旧快照写回，后写者把先写者刚登记的源抹掉。
+	localProfileMu sync.Mutex
+
 	// subscriptionCacheMu 串行化订阅缓存读写（load→merge→save 全程持锁，防止后台
 	// 自动导入与手动导入并发基于旧快照互相覆盖）；落盘用临时文件+Rename 原子替换。
 	subscriptionCacheMu sync.Mutex

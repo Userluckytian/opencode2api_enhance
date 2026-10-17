@@ -32,6 +32,7 @@ type SubscribeNode struct {
 	Port              uint16            `json:"port"`
 	NodeType          string            `json:"node_type"`
 	Password          string            `json:"password,omitempty"`
+	Username          string            `json:"username,omitempty"` // http/socks 代理用户名（无认证代理留空）
 	UUID              string            `json:"uuid,omitempty"`
 	Cipher            string            `json:"cipher,omitempty"`
 	SNI               string            `json:"sni,omitempty"`
@@ -330,6 +331,7 @@ func subscribeFromClash(n ClashNode) SubscribeNode {
 		Port:              n.Port,
 		NodeType:          n.NodeType,
 		Password:          password,
+		Username:          n.Username,
 		UUID:              n.UUID,
 		Cipher:            cipher,
 		SNI:               sni,
@@ -497,7 +499,26 @@ func parseURILink(line string) (SubscribeNode, bool, error) {
 		n, err := parseAnyTLS(strings.TrimPrefix(line, "anytls://"))
 		return n, true, err
 	case strings.HasPrefix(line, "socks://"):
-		n, err := parseSocks(strings.TrimPrefix(line, "socks://"))
+		n, err := parseSocks(strings.TrimPrefix(line, "socks://"), false)
+		return n, true, err
+	// socks5:// / socks5h:// / socks4:// 与 socks:// 同义（v2rayN / Clash 社区两种写法都会出现）。
+	// socks5h 表示 DNS 也走代理；sing-box 的 socks 出站默认由远端解析域名，无需额外字段。
+	case strings.HasPrefix(line, "socks5://"):
+		n, err := parseSocks(strings.TrimPrefix(line, "socks5://"), false)
+		return n, true, err
+	case strings.HasPrefix(line, "socks5h://"):
+		n, err := parseSocks(strings.TrimPrefix(line, "socks5h://"), false)
+		return n, true, err
+	case strings.HasPrefix(line, "socks4://"):
+		n, err := parseSocks(strings.TrimPrefix(line, "socks4://"), true)
+		return n, true, err
+	// http:// / https:// 代理链接（机房 / 家宽 HTTP 代理）。https 仅表示「到代理本身走 TLS」，
+	// sing-box http 出站的 TLS 由 tls.enabled 表达，故需要把 scheme 传进解析器。
+	case strings.HasPrefix(line, "http://"):
+		n, err := parseHTTPProxy(strings.TrimPrefix(line, "http://"), false)
+		return n, true, err
+	case strings.HasPrefix(line, "https://"):
+		n, err := parseHTTPProxy(strings.TrimPrefix(line, "https://"), true)
 		return n, true, err
 	}
 	return SubscribeNode{}, false, nil
@@ -565,7 +586,7 @@ func parseSingboxJSON(body string) ([]SubscribeNode, error) {
 			obfsPassword, _ = of["password"].(string)
 		}
 
-		var password, uuid, cipher string
+		var password, uuid, cipher, username string
 		switch nodeType {
 		case "vless":
 			uuid, _ = ob["uuid"].(string)
@@ -584,7 +605,7 @@ func parseSingboxJSON(body string) ([]SubscribeNode, error) {
 			password, _ = ob["private_key"].(string)
 		case "socks", "http":
 			password, _ = ob["password"].(string)
-			cipher, _ = ob["username"].(string)
+			username, _ = ob["username"].(string)
 		default:
 			continue
 		}
@@ -600,6 +621,7 @@ func parseSingboxJSON(body string) ([]SubscribeNode, error) {
 			Port:              port,
 			NodeType:          nodeType,
 			Password:          password,
+			Username:          username,
 			UUID:              uuid,
 			Cipher:            cipher,
 			SNI:               sni,
@@ -653,18 +675,18 @@ func parseVmess(rest string) (SubscribeNode, error) {
 		hdrs = map[string]string{"Host": h}
 	}
 	return SubscribeNode{
-		Name:     name,
-		Server:   server,
-		Port:     port,
-		NodeType: "vmess",
-		UUID:     asString(v["id"]),
-		Cipher:   asDefaultString(v["scy"], "auto"),
-		SNI:      asString(v["sni"]),
-		Network:  asDefaultString(v["net"], "tcp"),
-		WsPath:   asString(v["path"]),
+		Name:      name,
+		Server:    server,
+		Port:      port,
+		NodeType:  "vmess",
+		UUID:      asString(v["id"]),
+		Cipher:    asDefaultString(v["scy"], "auto"),
+		SNI:       asString(v["sni"]),
+		Network:   asDefaultString(v["net"], "tcp"),
+		WsPath:    asString(v["path"]),
 		WsHeaders: hdrs,
-		TLS:      tls,
-		Raw:      "vmess://" + rest,
+		TLS:       tls,
+		Raw:       "vmess://" + rest,
 	}, nil
 }
 
@@ -747,17 +769,17 @@ func parseTrojan(rest string) (SubscribeNode, error) {
 		hdrs = map[string]string{"Host": h}
 	}
 	return SubscribeNode{
-		Name:     nname,
-		Server:   server,
-		Port:     port,
-		NodeType: "trojan",
-		Password: password,
-		SNI:      params["sni"],
-		Network:  network,
-		WsPath:   params["path"],
+		Name:      nname,
+		Server:    server,
+		Port:      port,
+		NodeType:  "trojan",
+		Password:  password,
+		SNI:       params["sni"],
+		Network:   network,
+		WsPath:    params["path"],
 		WsHeaders: hdrs,
-		TLS:      tls,
-		Raw:      "trojan://" + rest,
+		TLS:       tls,
+		Raw:       "trojan://" + rest,
 	}, nil
 }
 
@@ -962,12 +984,14 @@ func parseAnyTLS(rest string) (SubscribeNode, error) {
 	}, nil
 }
 
-// parseSocks socks://user:pass@host:port#name。
-func parseSocks(rest string) (SubscribeNode, error) {
+// parseSocks socks://user:pass@host:port#name（socks5:// / socks5h:// / socks4:// 同义）。
+// 无认证写法 socks5://host:port 也合法（内网/局域网代理常见）：缺 @ 时整串当 hostport，凭据留空。
+// isV4 决定 NodeType（"socks4" / "socks"）——sing-box 出站的 version 字段据此生成。
+func parseSocks(rest string, isV4 bool) (SubscribeNode, error) {
 	auth, name := splitFragment(rest)
 	userinfo, hostport, ok := strings.Cut(auth, "@")
 	if !ok {
-		return SubscribeNode{}, fmt.Errorf("socks 链接缺少 @")
+		userinfo, hostport = "", auth
 	}
 	server, port, err := splitHostPort(hostport)
 	if err != nil {
@@ -977,19 +1001,63 @@ func parseSocks(rest string) (SubscribeNode, error) {
 	if u, p, ok := strings.Cut(userinfo, ":"); ok {
 		username, password = u, p
 	}
+	username = percentDecodeStrict(username)
+	password = percentDecodeStrict(password)
 	nname := name
 	if nname == "" {
 		nname = server
+	}
+	nodeType := "socks"
+	if isV4 {
+		nodeType = "socks4"
 	}
 	return SubscribeNode{
 		Name:     nname,
 		Server:   server,
 		Port:     port,
-		NodeType: "socks",
+		NodeType: nodeType,
 		Password: password,
-		Cipher:   username, // 用户名（ClashNode.cipher 槽复用）
+		Username: username,
 		TLS:      false,
 		Raw:      "socks://" + rest,
+	}, nil
+}
+
+// parseHTTPProxy http://user:pass@host:port#name（https:// 同义，tls=true）。
+// 用户名与密码分别落到 Username / Password（sing-box http 出站直接对应）。
+func parseHTTPProxy(rest string, tls bool) (SubscribeNode, error) {
+	auth, name := splitFragment(rest)
+	userinfo, hostport, ok := strings.Cut(auth, "@")
+	if !ok {
+		userinfo, hostport = "", auth
+	}
+	server, port, err := splitHostPort(hostport)
+	if err != nil {
+		return SubscribeNode{}, err
+	}
+	username, password := userinfo, ""
+	if u, p, ok := strings.Cut(userinfo, ":"); ok {
+		username, password = u, p
+	}
+	username = percentDecodeStrict(username)
+	password = percentDecodeStrict(password)
+	nname := name
+	if nname == "" {
+		nname = server
+	}
+	scheme := "http://"
+	if tls {
+		scheme = "https://"
+	}
+	return SubscribeNode{
+		Name:     nname,
+		Server:   server,
+		Port:     port,
+		NodeType: "http",
+		Password: password,
+		Username: username,
+		TLS:      tls,
+		Raw:      scheme + rest,
 	}, nil
 }
 
@@ -1020,6 +1088,26 @@ func percentDecode(s string) string {
 		} else {
 			out = append(out, s[i])
 		}
+	}
+	return string(out)
+}
+
+// percentDecodeStrict 只解 %XX，**不**把 `+` 当空格。
+// userinfo（用户名/密码）里 `+` 是字面字符——`+`→空格 只是 query/form 编码的约定，
+// 用它解密码会把 `a+b` 悄悄改成 `a b`，导致认证失败且极难排查。
+func percentDecodeStrict(s string) string {
+	var out []byte
+	for i := 0; i < len(s); i++ {
+		if s[i] == '%' && i+2 < len(s) {
+			if h, ok := hexVal(s[i+1]); ok {
+				if l, ok := hexVal(s[i+2]); ok {
+					out = append(out, h*16+l)
+					i += 2
+					continue
+				}
+			}
+		}
+		out = append(out, s[i])
 	}
 	return string(out)
 }
@@ -1228,6 +1316,7 @@ func toClashNode(n SubscribeNode) ClashNode {
 		Port:              n.Port,
 		NodeType:          n.NodeType,
 		Password:          n.Password,
+		Username:          n.Username,
 		UUID:              n.UUID,
 		Cipher:            n.Cipher,
 		SNI:               n.SNI,

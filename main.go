@@ -342,6 +342,13 @@ func registerHTTPRoutes(mux *http.ServeMux, managerInst *manager.Manager, plugin
 	mux.HandleFunc("/api/admin/subscriptions/add", loggingMiddleware(requireAuth(managerInst.SubscriptionsAddHandler())))
 	mux.HandleFunc("/api/admin/subscriptions/delete", loggingMiddleware(requireAuth(managerInst.SubscriptionsDeleteHandler())))
 	mux.HandleFunc("/api/admin/subscriptions/import", loggingMiddleware(requireAuth(managerInst.SubscriptionsImportHandler())))
+	// 批量粘贴代理链接导入（vless/vmess/trojan/ss/hy2/http/socks5 等，可自定义分组名）。
+	mux.HandleFunc("/api/admin/subscriptions/import-links", loggingMiddleware(requireAuth(managerInst.SubscriptionsImportLinksHandler())))
+	// 本地代理文件导入（Clash YAML 单文件 / 目录，用户显式指定路径）。
+	mux.HandleFunc("/api/admin/local-profiles", loggingMiddleware(requireAuth(managerInst.LocalProfilesListHandler())))
+	mux.HandleFunc("/api/admin/local-profiles/add", loggingMiddleware(requireAuth(managerInst.LocalProfilesAddHandler())))
+	mux.HandleFunc("/api/admin/local-profiles/remove", loggingMiddleware(requireAuth(managerInst.LocalProfilesRemoveHandler())))
+	mux.HandleFunc("/api/admin/local-profiles/reload", loggingMiddleware(requireAuth(managerInst.LocalProfilesReloadHandler())))
 	// 残留进程：探测 + 一键清除（孤儿实例 / 探针残留）。
 	mux.HandleFunc("/api/admin/processes/orphans", loggingMiddleware(requireAuth(managerInst.OrphanScanHandler())))
 	mux.HandleFunc("/api/admin/processes/orphans/kill", loggingMiddleware(requireAuth(managerInst.OrphanKillHandler())))

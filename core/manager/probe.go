@@ -273,7 +273,7 @@ func (c *ScanController) Start(opts ScanOptions) (ScanProgress, error) {
 		if len(filter) > 0 && !filter[n.Name] {
 			continue
 		}
-		if n.Password == "" && n.UUID == "" {
+		if !nodeHasCredential(n) {
 			continue
 		}
 		targets = append(targets, n)
