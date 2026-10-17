@@ -64,11 +64,11 @@ for target in "${targets[@]}"; do
   fi
   bin_name="sing-box"
   [[ "$target" == windows-* ]] && bin_name="sing-box.exe"
-  src="$(find "$tmp" -maxdepth 2 -name sing-box -type f | head -n 1)"
+  src="$(find "$tmp" -maxdepth 2 -name "$bin_name" -type f | head -n 1)"
   if [[ -z "$src" ]]; then
-    echo "!! 未在包内找到 sing-box 可执行文件（$target）" >&2
+    echo "!! 未在包内找到 $bin_name 可执行文件（$target）" >&2
     rm -rf "$tmp"
-    continue
+    exit 1
   fi
   cp "$src" "$BIN/$bin_name"
   chmod +x "$BIN/$bin_name" 2>/dev/null || true

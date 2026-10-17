@@ -217,32 +217,47 @@ func (m *Manager) ImportLocalProfile(path, group string) (imported int, fileCoun
 	}
 	nodes, fileCount, err := loadLocalProfileNodes(path)
 	if err != nil {
-		m.upsertLocalProfileSource(LocalProfileSource{Path: path, Kind: kindOf(isDir), LastError: err.Error()}, false)
+		_ = m.upsertLocalProfileSource(LocalProfileSource{Path: path, Kind: kindOf(isDir), LastError: err.Error()}, false)
 		return 0, fileCount, "", err
 	}
 
+	previous, existed := m.localProfileSourceByPath(path)
 	groupName = strings.TrimSpace(group)
 	if groupName == "" {
 		// 已有源记录的分组名优先（重载时保持原分组，不因文件名变化跳组）
-		if prev, ok := m.localProfileSourceByPath(path); ok && prev.Group != "" {
-			groupName = prev.Group
+		if existed && previous.Group != "" {
+			groupName = previous.Group
 		} else {
 			groupName = defaultGroupForPath(path, isDir)
 		}
 	}
+	if owner := m.groupOwner(groupName, path, ""); owner != "" {
+		return 0, fileCount, groupName, fmt.Errorf("分组 %q 已被%s使用，请换一个分组名", groupName, owner)
+	}
 	for i := range nodes {
 		nodes[i].Group = groupName
 	}
-	if err := m.saveSubscriptionCacheGrouped(nodes); err != nil {
-		return 0, fileCount, groupName, err
-	}
-	m.upsertLocalProfileSource(LocalProfileSource{
+	source := LocalProfileSource{
 		Path:       path,
 		Group:      groupName,
 		Kind:       kindOf(isDir),
 		NodeCount:  len(nodes),
 		LastImport: time.Now().Format(time.RFC3339),
-	}, true)
+	}
+	if err := m.upsertLocalProfileSource(source, true); err != nil {
+		return 0, fileCount, groupName, err
+	}
+	if err := m.saveSubscriptionCacheGrouped(nodes); err != nil {
+		if existed {
+			_ = m.upsertLocalProfileSource(previous, true)
+		} else {
+			_ = m.removeLocalProfileSourceOnly(path)
+		}
+		return 0, fileCount, groupName, err
+	}
+	if existed && previous.Group != "" && previous.Group != groupName && m.groupOwner(previous.Group, path, "") == "" {
+		_, _ = m.RemoveSubscriptionGroupNodes(previous.Group)
+	}
 	return len(nodes), fileCount, groupName, nil
 }
 
@@ -268,7 +283,7 @@ func (m *Manager) localProfileSourceByPath(path string) (LocalProfileSource, boo
 // replace=true 表示本次是成功导入（覆盖 NodeCount/LastImport 并清空 LastError）；
 // false 表示仅记录失败（保留已有成功信息，只更新 LastError）。
 // 整个 load→改→save 持 localProfileMu（并发重载时不会互相覆盖丢源）。
-func (m *Manager) upsertLocalProfileSource(src LocalProfileSource, replace bool) {
+func (m *Manager) upsertLocalProfileSource(src LocalProfileSource, replace bool) error {
 	m.localProfileMu.Lock()
 	defer m.localProfileMu.Unlock()
 	list := m.loadLocalProfilesLocked()
@@ -281,11 +296,23 @@ func (m *Manager) upsertLocalProfileSource(src LocalProfileSource, replace bool)
 		} else {
 			list[i].LastError = src.LastError
 		}
-		_ = m.saveLocalProfilesLocked(list)
-		return
+		return m.saveLocalProfilesLocked(list)
 	}
 	list = append(list, src)
-	_ = m.saveLocalProfilesLocked(list)
+	return m.saveLocalProfilesLocked(list)
+}
+
+func (m *Manager) removeLocalProfileSourceOnly(path string) error {
+	m.localProfileMu.Lock()
+	defer m.localProfileMu.Unlock()
+	list := m.loadLocalProfilesLocked()
+	kept := list[:0]
+	for _, source := range list {
+		if source.Path != path {
+			kept = append(kept, source)
+		}
+	}
+	return m.saveLocalProfilesLocked(kept)
 }
 
 // RemoveLocalProfile 移除本地文件源并清理其分组节点。
@@ -308,7 +335,7 @@ func (m *Manager) RemoveLocalProfile(path string) (removedNodes int, removed boo
 	if !found {
 		return 0, false, nil
 	}
-	if group != "" && !shared {
+	if group != "" && !shared && m.groupOwner(group, "", "") == "" {
 		n, err := m.RemoveSubscriptionGroupNodes(group)
 		if err != nil {
 			return 0, true, err

@@ -53,14 +53,25 @@ func (m *Manager) ImportLinks(text, group string) (imported int, groupName strin
 		nodes = parsed
 	}
 
+	sourceURL := manualSourceURLPrefix + groupName
+	if owner := m.groupOwner(groupName, "", sourceURL); owner != "" {
+		return 0, "", skipped, errs, fmt.Errorf("分组 %q 已被%s使用，请换一个分组名", groupName, owner)
+	}
 	for i := range nodes {
 		nodes[i].Group = groupName
 	}
+	_, existed := m.subscriptionSourceByURL(sourceURL)
+	if !existed {
+		if err := m.AddSubscription(sourceURL, 0, TargetPoolOnly, groupName); err != nil {
+			return 0, "", skipped, errs, err
+		}
+	}
 	if err := m.saveSubscriptionCacheGrouped(nodes); err != nil {
+		if !existed {
+			_, _ = m.RemoveSubscription(sourceURL)
+		}
 		return 0, "", skipped, errs, err
 	}
-	// 登记为一条「手动源」，让订阅列表可见、可删除（已存在则忽略重复错误）。
-	_ = m.AddSubscription(manualSourceURLPrefix+groupName, 0, TargetPoolOnly, groupName)
 	return len(nodes), groupName, skipped, errs, nil
 }
 
