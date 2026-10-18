@@ -42,8 +42,19 @@ func yamlParse(text string) (*yamlNode, error) {
 			continue
 		}
 		ind := indentOf(trimmed)
-		// 回退：弹出缩进 ≥ 当前行的帧
-		for len(stack) > 1 && stack[len(stack)-1].indent >= ind {
+		// 回退：弹出缩进 ≥ 当前行的帧。
+		// 例外：same-indent 列表项（Clash 常见的 `proxies:\n- name: ...`）必须保留
+		// 父容器的 pending/slice 帧，否则列表项会被误判为“父级是 map”。
+		isListItem := strings.HasPrefix(content, "- ") || content == "-"
+		for len(stack) > 1 {
+			top := stack[len(stack)-1]
+			if top.indent < ind {
+				break
+			}
+			if isListItem && top.indent == ind &&
+				(top.node.kind == kindPending || top.node.kind == kindSlice) {
+				break
+			}
 			stack = stack[:len(stack)-1]
 		}
 		// 解析 pending 容器（前一行 `key:` 空值）
