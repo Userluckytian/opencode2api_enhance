@@ -1,5 +1,16 @@
 # Changelog
 
+## v1.7.8-beta.6（2026-10-18，Beta）
+
+### 第二轮埋点：选路决策 + 尝试链 + Retry-After 驱动冷却
+
+- call_log 结构升到 **schema_version=3**：新增 `decision`（选路决策快照：healthy/direct/none/race + 池计数）与 `attempts`（逐次尝试链：节点/状态/耗时/错误类码/Retry-After/来源）以及 `policy_ver` 策略版本戳（当前 `b6-rate15x5`；改调参数字时更新，日志可按版本对照效果）。旧记录照常读取。
+- **429 冷却尊重上游 `Retry-After`**：单次 429 的 15s 临时冷却改为 max(15s, Retry-After)，封顶 600s，避免盲重试踩雷，也不会被异常大的头锁死。
+- 竞速路径同样产出结构化数据：每个落选候选记一条 attempt（race_loser），决策带候选数与健康池计数。
+- 错误分析视图：新增「429 选路决策分布」「策略版本 chips」；最近 429 明细表加决策与尝试链列；CSV 导出补 `decision_reason/attempts/policy_ver`。
+- 分层不变式：埋点类型/分类器/回退助手统一沉到 `core/contract`（厂商与网关共用）；厂商经 ctx 回流数据，`callOpenCodeAPI*` 与各 handler 签名零改动；未实现新可选接口的 transport 自动回退旧 Client/Mark 行为。
+- 测试：新增 contract 与 main 侧 10 组用例；修复 beta.5 调参后遗留的 4 个陈旧断言（429 阈值 3→5、冷却 45s→15s、账号类场景改用 401）。全量 `go test ./...`、`tsc`、`vite build` 通过。
+
 ## v1.7.8-beta.5（2026-10-18，Beta）
 
 ### 429 节点策略与可观测性（数据分析驱动）
