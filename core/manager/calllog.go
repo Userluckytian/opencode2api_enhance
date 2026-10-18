@@ -15,8 +15,8 @@ import (
 	"time"
 )
 
-// callLogAggregateTail 聚合读取时单个日志文件最多取末尾多少条（限制 IO）。
-const callLogAggregateTail = 5000
+// ReadCallLog 的 max 语义：<=0 = 读取全部历史；>0 = 只取最近 max 条。
+// 不再设置“每文件最多 5000 条”的硬窗口——日志页/过滤/聚合都按调用方请求读取。
 
 // CallLogEvent 单条事件。
 type CallLogEvent struct {
@@ -90,17 +90,16 @@ func (m *Manager) InstanceCallLogPath(name string) string {
 	return filepath.Join(m.paths.RuntimeDirOf(name), "call_log.jsonl")
 }
 
-// ReadCallLog 聚合读取最新 max 条：统一网关日志 + 各 Running 实例（含独享）
+// ReadCallLog 聚合读取调用日志：统一网关日志 + 各 Running 实例（含独享）
 // call_log.jsonl，按实例名标注 Source、按时间合并升序（旧→新，与既有 API 语义一致）。
-// 每个文件只取末尾 callLogAggregateTail 条限制 IO；缺失/损坏 → 跳过。
+// max<=0 = 全部历史；max>0 = 只取最近 max 条。缺失/损坏 → 跳过。
 // 多文件并发读取（semaphore ≤8），结果按下标收集后按「网关 → 实例顺序」拼接，
 // 保证同时间戳记录的稳定排序 tie-break 语义不因并发完成顺序而乱。
 func (m *Manager) ReadCallLog(max int) []CallLogRecord {
-	if max <= 0 {
-		max = 1
-	}
-	if max > 50000 {
-		max = 50000
+	allRequested := max <= 0
+	tail := max
+	if allRequested {
+		tail = 0
 	}
 	// 待读文件列表：下标 0 = 统一网关；其后按 ListInstances 顺序的 Running 实例。
 	type logFile struct {
@@ -126,7 +125,7 @@ func (m *Manager) ReadCallLog(max int) []CallLogRecord {
 		go func() {
 			defer wg.Done()
 			defer func() { <-sem }()
-			parts[i] = readCallLogFileTail(f.path, f.source, callLogAggregateTail)
+			parts[i] = readCallLogFileTail(f.path, f.source, tail)
 		}()
 	}
 	wg.Wait()
@@ -139,7 +138,7 @@ func (m *Manager) ReadCallLog(max int) []CallLogRecord {
 	sort.SliceStable(all, func(i, j int) bool {
 		return callLogTime(all[i].TS).Before(callLogTime(all[j].TS))
 	})
-	if len(all) > max {
+	if !allRequested && len(all) > max {
 		all = all[len(all)-max:]
 	}
 	// 无日志时返回空数组而非 nil（避免 JSON 序列化为 null，前端展开报 TypeError）
@@ -165,23 +164,28 @@ func callLogWindowBytes() int64 {
 	return 8 << 20
 }
 
-// readCallLogFileTail 读取单个日志文件的「有效尾部」：.1 轮转旧段 + 主文件。
-// .1 内容更旧在前、主文件在后，拼接后取最后 tail 条；缺失 .1 不报错（现状行为）。
-// 返回语义：按文件顺序、最后为最新、最多 tail 条；文件缺失 → nil。
+// readCallLogFileTail 读取单个日志文件的「有效记录」：.1 轮转旧段 + 主文件。
+// .1 内容更旧在前、主文件在后；tail<=0 = 全部，tail>0 = 最后 tail 条。
 func readCallLogFileTail(path, source string, tail int) []CallLogRecord {
 	prev := readCallLogFilePart(path+".1", source, tail)
 	main := readCallLogFilePart(path, source, tail)
 	merged := append(prev, main...)
-	if len(merged) > tail {
+	if tail > 0 && len(merged) > tail {
 		merged = merged[len(merged)-tail:]
 	}
 	return merged
 }
 
-// readCallLogFilePart 读取单个日志文件尾部最多 tail 条记录（保持旧→新文件顺序）。
-// 大文件只读末尾 callLogWindowBytes 字节窗口；窗口内记录不足 tail（行超长）时
-// 回退整读兜底（防丢数据）。
+// readCallLogFilePart 读取单个日志文件记录（保持旧→新文件顺序）。
+// tail<=0 = 全部；tail>0 = 末尾最多 tail 条（大文件只读末尾窗口）。
 func readCallLogFilePart(path, source string, tail int) []CallLogRecord {
+	if tail <= 0 {
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return nil
+		}
+		return parseCallLogRecords(data, source, 0)
+	}
 	st, err := os.Stat(path)
 	if err != nil {
 		return nil
@@ -241,10 +245,10 @@ func readLogTailWindow(path string, n int64) ([][]byte, bool) {
 	return lines, true
 }
 
-// parseCallLogRecords 解析整文件字节为记录，截尾最多 tail 条（保持文件顺序）。
+// parseCallLogRecords 解析整文件字节为记录；tail>0 时截尾最多 tail 条，tail<=0 全部。
 func parseCallLogRecords(data []byte, source string, tail int) []CallLogRecord {
 	records := parseLogLines(splitCallLog(data, '\n'), source)
-	if len(records) > tail {
+	if tail > 0 && len(records) > tail {
 		records = records[len(records)-tail:]
 	}
 	return records

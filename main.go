@@ -355,6 +355,8 @@ func registerHTTPRoutes(mux *http.ServeMux, managerInst *manager.Manager, plugin
 	// P1: 实例池链路质量（质量汇总视图 + 手动触发一轮探活）。
 	mux.HandleFunc("/api/admin/pool/quality", loggingMiddleware(requireAuth(managerInst.PoolQualityHandler())))
 	mux.HandleFunc("/api/admin/pool/quality/probe", loggingMiddleware(requireAuth(managerInst.PoolProbeTriggerHandler())))
+	mux.HandleFunc("/api/admin/pool/health", loggingMiddleware(requireAuth(poolHealthHandler)))
+	mux.HandleFunc("/api/admin/pool/reset-health", loggingMiddleware(requireAuth(poolResetHealthHandler)))
 	mux.HandleFunc("/api/admin/data/clean", loggingMiddleware(requireAuth(managerInst.DataCleanHandler())))
 	mux.HandleFunc("/api/admin/gateway/status", loggingMiddleware(requireAuth(managerInst.GatewayStatusHandler())))
 	mux.HandleFunc("/api/admin/gateway/models/refresh", loggingMiddleware(requireAuth(managerInst.GatewayModelsRefreshHandler())))

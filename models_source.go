@@ -7,6 +7,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/6Kmfi6HP/opencode2api/core/aggregator"
@@ -32,15 +33,38 @@ var chatRouterVar *chatRouter.Router
 // 单元测试替换 httpClient 时，经此桥自动生效。
 type rootTransport struct{}
 
+// noCandidateTotal / lastNoCandidateTS 记录免费层已配置代理但无可用节点的次数与时间。
+var (
+	noCandidateTotal  atomic.Int64
+	noCandidateLastTS atomic.Int64
+)
+
+// activeSocks5Configured 报告是否显式配置了 active_socks5（非空）。
+func activeSocks5Configured() bool {
+	socks5Mu.RLock()
+	defer socks5Mu.RUnlock()
+	return strings.TrimSpace(activeSocks5) != ""
+}
+
 func (rootTransport) Client(tier contract.Tier, streaming bool) (*http.Client, string) {
 	tt := TierFree
 	if tier == contract.TierPaid {
 		tt = TierPaid
 	}
+	var client *http.Client
+	var addr string
 	if streaming {
-		return getStreamingHTTPClientForTierWithProxy(tt)
+		client, addr = getStreamingHTTPClientForTierWithProxy(tt)
+	} else {
+		client, addr = getHTTPClientForTierWithProxy(tt)
 	}
-	return getHTTPClientForTierWithProxy(tt)
+	// 免费层：已显式配置代理但无可用节点 → 返回哨兵 client，绝不构造空代理或直连。
+	if tt == TierFree && addr == "" && activeSocks5Configured() {
+		noCandidateTotal.Add(1)
+		noCandidateLastTS.Store(time.Now().UnixNano())
+		return contract.NoCandidateClient(), ""
+	}
+	return client, addr
 }
 
 func (rootTransport) Mark(proxyAddr string, status int, reqErr error) {
@@ -164,13 +188,13 @@ func vendorParams(t string) map[string]any {
 	switch t {
 	case "opencode":
 		return map[string]any{
-			opencode.ParamTransport:        rootTransport{},
-			opencode.ParamAdminPassword:    adminPassword,
-			opencode.ParamRaceCopies:       int(poolRaceCopies.Load()),
-			opencode.ParamRaceBudgetMS:     int(raceBudgetMS.Load()),
-			opencode.ParamRacePressureLow:  poolRacePressureLow.Load().(float64),
-			opencode.ParamRacePressureHigh: poolRacePressureHigh.Load().(float64),
-			opencode.ParamRateLimitCooldownSec:  int(rateLimitCooldownSec.Load()),
+			opencode.ParamTransport:              rootTransport{},
+			opencode.ParamAdminPassword:          adminPassword,
+			opencode.ParamRaceCopies:             int(poolRaceCopies.Load()),
+			opencode.ParamRaceBudgetMS:           int(raceBudgetMS.Load()),
+			opencode.ParamRacePressureLow:        poolRacePressureLow.Load().(float64),
+			opencode.ParamRacePressureHigh:       poolRacePressureHigh.Load().(float64),
+			opencode.ParamRateLimitCooldownSec:   int(rateLimitCooldownSec.Load()),
 			opencode.ParamRateLimitBackoffBaseMS: int(rateLimitBackoffBaseMS.Load()),
 			opencode.ParamRateLimitBackoffCapMS:  int(rateLimitBackoffCapMS.Load()),
 		}

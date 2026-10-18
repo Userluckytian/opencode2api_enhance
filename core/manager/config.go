@@ -18,20 +18,20 @@ const DefaultPassword = "123456"
 
 // Config 应用级配置（字段与 Rust Config 一一对应，JSON 名一致）。
 type Config struct {
-	BaseURL             string `json:"base_url"`
-	DefaultPassword     string `json:"default_password"`
-	ClashExternalURL    string `json:"clash_external_url"`
-	ClashAuthToken      string `json:"clash_auth_token"`
-	TimeoutTTFTMinMS    int64  `json:"timeout_ttft_min_ms,omitempty"`
-	TimeoutTTFTMaxMS    int64  `json:"timeout_ttft_max_ms,omitempty"`
-	TimeoutSilenceMinMS int64  `json:"timeout_silence_min_ms,omitempty"`
-	TimeoutSilenceMaxMS int64  `json:"timeout_silence_max_ms,omitempty"`
-	PreContentSilenceMinMS int64 `json:"timeout_precontent_silence_min_ms,omitempty"`
-	PreContentSilenceMaxMS int64 `json:"timeout_precontent_silence_max_ms,omitempty"`
-	FailoverProbeMin    int64  `json:"failover_probe_min,omitempty"`
-	FailoverProbeMax    int64  `json:"failover_probe_max,omitempty"`
-	CallLogMax          int64  `json:"call_log_max,omitempty"`
-	ShowNodePrefix      bool   `json:"show_node_prefix,omitempty"`
+	BaseURL                string `json:"base_url"`
+	DefaultPassword        string `json:"default_password"`
+	ClashExternalURL       string `json:"clash_external_url"`
+	ClashAuthToken         string `json:"clash_auth_token"`
+	TimeoutTTFTMinMS       int64  `json:"timeout_ttft_min_ms,omitempty"`
+	TimeoutTTFTMaxMS       int64  `json:"timeout_ttft_max_ms,omitempty"`
+	TimeoutSilenceMinMS    int64  `json:"timeout_silence_min_ms,omitempty"`
+	TimeoutSilenceMaxMS    int64  `json:"timeout_silence_max_ms,omitempty"`
+	PreContentSilenceMinMS int64  `json:"timeout_precontent_silence_min_ms,omitempty"`
+	PreContentSilenceMaxMS int64  `json:"timeout_precontent_silence_max_ms,omitempty"`
+	FailoverProbeMin       int64  `json:"failover_probe_min,omitempty"`
+	FailoverProbeMax       int64  `json:"failover_probe_max,omitempty"`
+	CallLogMax             int64  `json:"call_log_max,omitempty"`
+	ShowNodePrefix         bool   `json:"show_node_prefix,omitempty"`
 	// UiPollIntervalSec 界面轮询间隔（秒，U3）：nil = 未设置（默认 5），
 	// 显式 0 = 关闭轮询，1~60 可配。指针区分「未设置」与「显式 0」，
 	// 使 0 = 关轮询能落盘持久生效（ConfigGet/ConfigView 不再把 0 归一为默认 5）。
@@ -53,10 +53,10 @@ type Config struct {
 	// 实例池链路探活（性能模式 P1）：间隔（秒）、单次超时（秒）、质量窗口（分钟），
 	// <=0 时用默认值（45s / 3s / 10min）；
 	// PoolProbeEnabled 未设置（nil）默认开启。
-	PoolProbeIntervalSec int    `json:"pool_probe_interval_sec,omitempty"`
-	PoolProbeTimeoutSec  int    `json:"pool_probe_timeout_sec,omitempty"`
-	PoolQualityWindowMin int    `json:"pool_quality_window_min,omitempty"`
-	PoolProbeEnabled     *bool  `json:"pool_probe_enabled,omitempty"`
+	PoolProbeIntervalSec int   `json:"pool_probe_interval_sec,omitempty"`
+	PoolProbeTimeoutSec  int   `json:"pool_probe_timeout_sec,omitempty"`
+	PoolQualityWindowMin int   `json:"pool_quality_window_min,omitempty"`
+	PoolProbeEnabled     *bool `json:"pool_probe_enabled,omitempty"`
 	// ProbeSoloEnabled 是否对独享实例（未入池）也做链路质量探测（默认 true；false = 只探测池成员）。
 	ProbeSoloEnabled *bool `json:"probe_solo_enabled,omitempty"`
 
@@ -67,8 +67,11 @@ type Config struct {
 	PoolHalfOpenIntervalSec int   `json:"pool_halfopen_interval_sec,omitempty"`
 	PoolPerformanceMode     *bool `json:"pool_performance_mode,omitempty"`
 	// 链路类坏池自动恢复间隔（秒，S3，<=0 用默认 300）：链路类坏池（如 503）到期放行
-	// 1 次探测，成功清 / 失败重新坏池；账号类（401/402/429）永久禁用不受此配置影响。
+	// 1 次探测，成功清 / 失败重新坏池；认证类（401）永久禁用；
+	// 额度类（402/429）走 quota_bad_pool_reset_sec。
 	BadPoolResetSec int `json:"bad_pool_reset_sec,omitempty"`
+	// 额度类坏池（402/429）首次冷却秒数（秒，默认 600，允许 60~1800）。
+	QuotaBadPoolResetSec int `json:"quota_bad_pool_reset_sec,omitempty"`
 	// 请求级竞速并行数上限（P2b/S5）：一次请求并行扇出 N 个候选出口，首个成功者胜
 	// （<=0 用默认 2；1 = 关闭）。S5 起为上限，实际副本由压力系数动态决定。
 	PoolRaceCopies int `json:"pool_race_copies,omitempty"`
@@ -374,6 +377,8 @@ func (m *Manager) ConfigGet(key string) (string, error) {
 		return strconv.Itoa(cfg.PoolHalfOpenIntervalSec), nil
 	case "bad_pool_reset_sec":
 		return strconv.Itoa(cfg.BadPoolResetSec), nil
+	case "quota_bad_pool_reset_sec":
+		return strconv.Itoa(quotaBadPoolResetSecOf(cfg)), nil
 	case "pool_performance_mode":
 		return strconv.FormatBool(poolPerfModeEnabled(cfg)), nil
 	case "pool_race_copies":
@@ -614,6 +619,18 @@ func (m *Manager) ConfigSet(key, value string) error {
 			return errors.New("bad_pool_reset_sec 需 >= 0")
 		}
 		cfg.BadPoolResetSec = int(v)
+	case "quota_bad_pool_reset_sec":
+		v, err := parseInt()
+		if err != nil {
+			return err
+		}
+		if v < 0 {
+			return errors.New("quota_bad_pool_reset_sec 需 >= 0")
+		}
+		if v > 0 && (v < 60 || v > 1800) {
+			return errors.New("quota_bad_pool_reset_sec 需为 0（默认 600）或 60~1800")
+		}
+		cfg.QuotaBadPoolResetSec = int(v)
 	case "pool_performance_mode":
 		b, err := strconv.ParseBool(value)
 		if err != nil {
@@ -795,21 +812,21 @@ func (m *Manager) ConfigSet(key, value string) error {
 
 // ConfigView 是前端 /api/admin/config 的响应形态（密码脱敏）。
 type ConfigView struct {
-	BaseURL                 string  `json:"base_url"`
-	DefaultPassword         string  `json:"default_password"`
-	HasPassword             bool    `json:"has_password"`
-	ClashExternalURL        string  `json:"clash_external_url"`
-	HasClashToken           bool    `json:"has_clash_token"`
-	TimeoutTTFTMinMS        int64   `json:"timeout_ttft_min_ms"`
-	TimeoutTTFTMaxMS        int64   `json:"timeout_ttft_max_ms"`
-	TimeoutSilenceMinMS     int64   `json:"timeout_silence_min_ms"`
-	TimeoutSilenceMaxMS     int64   `json:"timeout_silence_max_ms"`
-	PreContentSilenceMinMS  int64   `json:"timeout_precontent_silence_min_ms"`
-	PreContentSilenceMaxMS  int64   `json:"timeout_precontent_silence_max_ms"`
-	FailoverProbeMin        int64   `json:"failover_probe_min"`
-	FailoverProbeMax        int64   `json:"failover_probe_max"`
-	CallLogMax              int64   `json:"call_log_max"`
-	ShowNodePrefix          bool    `json:"show_node_prefix"`
+	BaseURL                string `json:"base_url"`
+	DefaultPassword        string `json:"default_password"`
+	HasPassword            bool   `json:"has_password"`
+	ClashExternalURL       string `json:"clash_external_url"`
+	HasClashToken          bool   `json:"has_clash_token"`
+	TimeoutTTFTMinMS       int64  `json:"timeout_ttft_min_ms"`
+	TimeoutTTFTMaxMS       int64  `json:"timeout_ttft_max_ms"`
+	TimeoutSilenceMinMS    int64  `json:"timeout_silence_min_ms"`
+	TimeoutSilenceMaxMS    int64  `json:"timeout_silence_max_ms"`
+	PreContentSilenceMinMS int64  `json:"timeout_precontent_silence_min_ms"`
+	PreContentSilenceMaxMS int64  `json:"timeout_precontent_silence_max_ms"`
+	FailoverProbeMin       int64  `json:"failover_probe_min"`
+	FailoverProbeMax       int64  `json:"failover_probe_max"`
+	CallLogMax             int64  `json:"call_log_max"`
+	ShowNodePrefix         bool   `json:"show_node_prefix"`
 	// OpencodeClientVersion 免费通道上报的客户端版本（空 = 自动探测）
 	OpencodeClientVersion   string  `json:"opencode_client_version"`
 	UiPollIntervalSec       int     `json:"ui_poll_interval_sec"`
@@ -826,6 +843,7 @@ type ConfigView struct {
 	PoolBreakerThreshold    int     `json:"pool_breaker_threshold"`
 	PoolHalfOpenIntervalSec int     `json:"pool_halfopen_interval_sec"`
 	BadPoolResetSec         int     `json:"bad_pool_reset_sec"`
+	QuotaBadPoolResetSec    int     `json:"quota_bad_pool_reset_sec"`
 	PoolPerformanceMode     bool    `json:"pool_performance_mode"`
 	PoolRaceCopies          int     `json:"pool_race_copies"`
 	RaceBudgetMS            int     `json:"race_budget_ms"`
@@ -842,7 +860,7 @@ type ConfigView struct {
 	HasGatewayKey           bool    `json:"has_gateway_key"`
 	GatewayKey              string  `json:"gateway_key"`
 	// 统一网关监听端口（0 = 未设置，用环境槽位/默认 40080）
-	GatewayPort             uint16  `json:"gateway_port"`
+	GatewayPort uint16 `json:"gateway_port"`
 }
 
 // ConfigViewOf 生成前端视图（密码与 clash token 脱敏为掩码）。
@@ -887,6 +905,7 @@ func (m *Manager) ConfigViewOf() ConfigView {
 		PoolBreakerThreshold:    poolBreakerThresholdOf(cfg),
 		PoolHalfOpenIntervalSec: poolHalfOpenIntervalOf(cfg),
 		BadPoolResetSec:         badPoolResetSecOf(cfg),
+		QuotaBadPoolResetSec:    quotaBadPoolResetSecOf(cfg),
 		PoolPerformanceMode:     poolPerfModeEnabled(cfg),
 		PoolRaceCopies:          poolRaceCopiesOf(cfg),
 		RaceBudgetMS:            poolRaceBudgetMSOf(cfg),
@@ -922,7 +941,7 @@ func uiPollIntervalSecOf(cfg Config) int {
 }
 
 // effectiveGatewayKey 生效的统一网关密钥：优先环境变量 OPCODE2API_GATEWAY_KEY
-//（systemd EnvironmentFile / 自定义部署注入，与 OPCODE2API_GATEWAY_PORT 同级），
+// （systemd EnvironmentFile / 自定义部署注入，与 OPCODE2API_GATEWAY_PORT 同级），
 // 其次 config.gateway_key，否则回退默认 unifiedGatewayKey（"sk-unified-local"）。
 func effectiveGatewayKey(cfg Config) string {
 	if s := strings.TrimSpace(os.Getenv("OPCODE2API_GATEWAY_KEY")); s != "" {

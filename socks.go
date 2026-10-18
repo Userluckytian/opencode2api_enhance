@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"math/rand/v2"
 	"net"
 	"net/http"
 	"sync"
@@ -173,6 +174,7 @@ var socks5RRIndex uint32
 //   - smart（默认）：failover 游标逻辑 + 健康计数/坏池/超时切换完整容错
 //   - failover：成功不动游标、失败才切换（无健康计数附加层）
 //   - round_robin：轮询分发
+//
 // G5：配置热重载原子写（applyConfig Store），请求路径无锁 Load；默认 "smart" 写于 init。
 var routeMode atomic.Value
 
@@ -210,36 +212,55 @@ const badThreshold = 3
 
 // badPoolResetSec 链路类坏池自动恢复间隔（秒，默认 300；S3）。
 // 链路类坏池（如 503 服务不可用）到期后放行 1 次探测，成功清状态 / 失败重新坏池；
-// 账号类（401/402/429）不自动恢复（badUntil 零值永久禁用）。
+// 账号类（401）不自动恢复（badUntil 零值永久禁用）；额度类（402/429）走 quotaBadPoolResetSec。
 // G5：配置热重载原子写（applyConfig Store），请求路径无锁 Load；默认值写于 init。
 var badPoolResetSec atomic.Int64
+
+// quotaBadPoolResetSec 额度类坏池（402/429）首次冷却秒数（默认 600，允许 60~1800）。
+// 额度类属于可恢复坏池：到期后放行 1 个恢复探测；再次 429 按 base×2^(badCount-阈值)
+// 递增，上限 1800s，并附加 0~60s 随机抖动避免全池同时探测。
+// G5：配置热重载原子写（applyConfig Store），请求路径无锁 Load；默认值写于 init。
+var quotaBadPoolResetSec atomic.Int64
+
+// quotaBadPoolResetMaxSec 额度类坏池冷却上限（秒）。
+const quotaBadPoolResetMaxSec = 1800
 
 func init() {
 	routeMode.Store("smart")
 	badPoolResetSec.Store(300)
+	quotaBadPoolResetSec.Store(600)
 }
 
 type socks5HealthState struct {
 	failures  int
 	until     time.Time
 	badReason string // 非空 = 已进坏池（如 "429：最大额度上限"），不再选用
+	badClass  string // auth / quota / link（坏池分类）
 	badCount  int    // 连续坏状态码计数
-	// badUntil 链路类坏池到期时间（到期放行 1 次探测）；零值 = 账号类，永久禁用。
+	// badUntil 链路类/额度类坏池到期时间（到期放行 1 次探测）；零值 = 认证类，永久禁用。
 	badUntil time.Time
-	// badProbeUsed 链路类坏池到期后的半开放行配额是否已消费（1 次/quota）。
+	// badProbeUsed 链路类/额度类坏池到期后的半开放行配额是否已消费（1 次/quota）。
 	badProbeUsed bool
 }
 
-// badPoolAccountClass 区分坏池分类：
-//   - 账号类 = 额度/认证（401/402/429）：不自动恢复，badUntil 零值永久禁用，
-//     避免反复试探打上游烧额度（用户手动处理 / 重启生效）；
-//   - 链路类 = 其余坏状态码（如 503 服务不可用）：自动恢复，到期放行 1 次探测。
-func badPoolAccountClass(status int) bool {
+// badPoolClass 坏池分类：
+//   - auth：认证类（401）→ 永久禁用（badUntil 零值）；
+//   - quota：额度类（402/429）→ 长冷却，到期放行 1 个恢复探测；
+//   - link：链路类（503 等）→ 短冷却，保持现状。
+func badPoolClass(status int) string {
 	switch status {
-	case http.StatusUnauthorized, http.StatusPaymentRequired, http.StatusTooManyRequests:
-		return true
+	case http.StatusUnauthorized:
+		return "auth"
+	case http.StatusPaymentRequired, http.StatusTooManyRequests:
+		return "quota"
 	}
-	return false
+	return "link"
+}
+
+// badPoolAccountClass 兼容旧语义：认证类 + 额度类均视为账号类（永久/长冷却，不走链路短冷却）。
+func badPoolAccountClass(status int) bool {
+	c := badPoolClass(status)
+	return c == "auth" || c == "quota"
 }
 
 // badPoolResetDuration 链路类坏池恢复间隔生效时长。
@@ -250,8 +271,35 @@ func badPoolResetDuration() time.Duration {
 	return time.Duration(badPoolResetSec.Load()) * time.Second
 }
 
-// badPoolProbeReady 非消费式检查：链路类坏池已过期且探测配额未消费。
-// 零值 badUntil（账号类）永不放行；调用方需持有 socks5HealthMu。
+// quotaBadPoolResetDuration 额度类坏池冷却时长：base × 2^(badCount-阈值)，上限 1800s，附 0~60s 抖动。
+func quotaBadPoolResetDuration(badCount int) time.Duration {
+	base := quotaBadPoolResetSec.Load()
+	if base <= 0 {
+		base = 600
+	}
+	exp := badCount - badThreshold
+	if exp < 0 {
+		exp = 0
+	}
+	// 防止溢出：badCount 极大时直接用上限。
+	mult := 1 << exp
+	if exp > 10 {
+		mult = 1 << 10
+	}
+	secs := int64(base) * int64(mult)
+	if secs > quotaBadPoolResetMaxSec {
+		secs = quotaBadPoolResetMaxSec
+	}
+	jitter := int64(rand.IntN(61)) // 0~60s
+	total := secs + jitter
+	if total > quotaBadPoolResetMaxSec+60 {
+		total = quotaBadPoolResetMaxSec + 60
+	}
+	return time.Duration(total) * time.Second
+}
+
+// badPoolProbeReady 非消费式检查：链路类/额度类坏池已过期且探测配额未消费。
+// 零值 badUntil（认证类）永不放行；调用方需持有 socks5HealthMu。
 func badPoolProbeReady(state socks5HealthState, now time.Time) bool {
 	if state.badReason == "" || state.badUntil.IsZero() {
 		return false
@@ -337,14 +385,17 @@ func markSocks5Result(addr string, status int, requestErr error) {
 		state.badCount++
 		if state.badCount >= badThreshold {
 			state.badReason = reason
-			if badPoolAccountClass(status) {
+			state.badClass = badPoolClass(status)
+			switch state.badClass {
+			case "auth":
 				state.badUntil = time.Time{}
-			} else {
-				// 重新进坏池也重置计时（失败重新坏池语义）。
+			case "quota":
+				state.badUntil = time.Now().Add(quotaBadPoolResetDuration(state.badCount))
+			default:
 				state.badUntil = time.Now().Add(badPoolResetDuration())
 			}
 			state.badProbeUsed = false
-			slog.Warn("proxy entered bad pool", "addr", addr, "reason", reason, "count", state.badCount, "account", badPoolAccountClass(status))
+			slog.Warn("proxy entered bad pool", "addr", addr, "reason", reason, "count", state.badCount, "class", state.badClass)
 		}
 		// 坏状态码也标记临时冷却（后续请求跳过，避免连续踩雷）
 		state.failures++
@@ -365,9 +416,13 @@ func markSocks5Result(addr string, status int, requestErr error) {
 				cooldown = 2 * time.Minute
 			}
 			state.until = time.Now().Add(cooldown)
-			// 链路类坏池节点的探测失败 → 重新坏池（重置计时），避免探针配额耗尽后饿死。
+			// 链路类/额度类坏池节点的探测失败 → 重新坏池（重置计时），避免探针配额耗尽后饿死。
 			if state.badReason != "" && !state.badUntil.IsZero() {
-				state.badUntil = time.Now().Add(badPoolResetDuration())
+				if state.badClass == "quota" {
+					state.badUntil = time.Now().Add(quotaBadPoolResetDuration(state.badCount))
+				} else {
+					state.badUntil = time.Now().Add(badPoolResetDuration())
+				}
 				state.badProbeUsed = false
 			}
 			socks5Health[addr] = state

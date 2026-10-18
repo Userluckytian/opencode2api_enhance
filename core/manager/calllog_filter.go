@@ -62,7 +62,7 @@ func (f *CallLogFilter) matches(r *CallLogRecord) bool {
 
 // ReadCallLogFiltered 读全量日志 → 过滤 → 最新在前 → 分页。
 func (m *Manager) ReadCallLogFiltered(f *CallLogFilter) []CallLogRecord {
-	all := m.ReadCallLog(50000)
+	all := m.ReadCallLog(0)
 	out := make([]CallLogRecord, 0, len(all))
 	for i := range all {
 		if f.matches(&all[i]) {
@@ -100,11 +100,11 @@ type CallLogAggregate struct {
 
 // AggregateCallLog 按节点组合聚合条数/错误数/最近时间。
 func (m *Manager) AggregateCallLog() []CallLogAggregate {
-	all := m.ReadCallLog(50000)
+	all := m.ReadCallLog(0)
 	type acc struct {
-		total   int
-		errors  int
-		lastTS  string
+		total  int
+		errors int
+		lastTS string
 	}
 	m2 := map[string]*acc{}
 	var order []string

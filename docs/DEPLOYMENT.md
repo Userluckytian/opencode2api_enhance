@@ -47,7 +47,7 @@ sudo systemctl status opencode2api
 | `timeout_ttft_min_ms` / `timeout_ttft_max_ms` | int | 首字超时切换区间（毫秒，0 = 默认） |
 | `timeout_silence_min_ms` / `timeout_silence_max_ms` | int | 静默超时切换区间（毫秒，0 = 默认） |
 | `failover_probe_min` / `failover_probe_max` | int | 故障转移探测区间（0 = 默认） |
-| `call_log_max` | int | 调用日志保留上限 |
+| `call_log_max` | int | 内存环形日志/回放保留上限（不影响日志页展示全部历史；日志页默认读取全部） |
 | `show_node_prefix` | bool | 对话流是否展示「节点 · 模型」前缀 |
 | `gateway_port` | int | 统一网关监听端口（0 = 回退槽位默认，release 槽位 +80） |
 | `gateway_key` | string | 统一网关鉴权密钥（空 = 默认 `sk-unified-local`；设置须 ≥8 字符） |
@@ -56,6 +56,8 @@ sudo systemctl status opencode2api
 | `health_check_interval_sec` | int | 健康巡检间隔（秒，0 = 关闭巡检） |
 | `health_restart_threshold` | int | 连续失败 N 次自动重启（0 = 不自动重启） |
 | `log_filter_keywords` | string | 调用日志过滤关键词（逗号分隔） |
+| `bad_pool_reset_sec` | int | 链路类坏池自动恢复间隔（秒，默认 300） |
+| `quota_bad_pool_reset_sec` | int | 额度类（429/402）坏池首次冷却秒数（默认 600，允许 60~1800） |
 
 环境变量（优先级高于配置文件）：
 

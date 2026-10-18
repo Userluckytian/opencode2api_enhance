@@ -140,6 +140,14 @@ func badPoolResetSecOf(cfg Config) int {
 	return 300
 }
 
+// quotaBadPoolResetSecOf 额度类坏池首次冷却生效值（秒，<=0 用默认 600）。
+func quotaBadPoolResetSecOf(cfg Config) int {
+	if cfg.QuotaBadPoolResetSec > 0 {
+		return cfg.QuotaBadPoolResetSec
+	}
+	return 600
+}
+
 // poolPerfModeEnabled 性能模式开关生效值（未显式设置默认开启）。
 func poolPerfModeEnabled(cfg Config) bool {
 	if cfg.PoolPerformanceMode != nil {

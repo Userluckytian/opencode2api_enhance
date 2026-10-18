@@ -19,6 +19,8 @@ const (
 	RouteVerdictDirectConfigMissing = "direct_config_missing"
 	// RouteVerdictDirectUnexpected 免费层且 SOCKS 已配置，却仍然直连 → 异常，需排查。
 	RouteVerdictDirectUnexpected = "direct_unexpected"
+	// RouteVerdictNoHealthyNode 免费层已配置代理但无可用节点 → 池空，返回 503。
+	RouteVerdictNoHealthyNode = "no_healthy_node"
 )
 
 // socksProxyConfigured 报告本进程当前是否配置了 SOCKS 出站代理。
@@ -46,7 +48,19 @@ func socksProxyConfigured() bool {
 //	节点全空 + free + SOCKS 未配置  → direct_config_missing
 //	节点全空 + free + SOCKS 已配置  → direct_unexpected
 //	其余（tier 为空等）            → ""（前端降级为 '-'）
-func routeVerdict(nodes []string, tier string, socksConfigured bool) string {
+//
+// routeVerdict 判定路由结论（纯函数：无锁、无全局状态，可单测）。
+//
+// nodes 必须是未被兜底改写的原始节点列表（recordCall 把空节点换成「直连」之前的值）；
+// tier 取值同 tierOfAuth："free" / "paid"，其它值（含空串）视为无法判定。
+//
+//	存在非空节点                    → proxied
+//	节点全空 + paid                 → direct_by_design
+//	节点全空 + free + SOCKS 未配置  → direct_config_missing
+//	节点全空 + free + SOCKS 已配置  → direct_unexpected
+//	节点全空 + free + SOCKS 已配置 且 errMsg 含 no healthy proxy node → no_healthy_node
+//	其余（tier 为空等）            → ""（前端降级为 '-'）
+func routeVerdict(nodes []string, tier string, socksConfigured bool, errMsg string) string {
 	for _, n := range nodes {
 		if strings.TrimSpace(n) != "" {
 			return RouteVerdictProxied
@@ -57,6 +71,10 @@ func routeVerdict(nodes []string, tier string, socksConfigured bool) string {
 		return RouteVerdictDirectByDesign
 	case "free":
 		if socksConfigured {
+			low := strings.ToLower(errMsg)
+			if strings.Contains(low, "no healthy proxy node") || strings.Contains(low, "no_healthy_node") {
+				return RouteVerdictNoHealthyNode
+			}
 			return RouteVerdictDirectUnexpected
 		}
 		return RouteVerdictDirectConfigMissing

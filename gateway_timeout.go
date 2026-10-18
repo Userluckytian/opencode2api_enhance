@@ -532,7 +532,7 @@ func recordCall(rec CallRecord) {
 	// 「直连」字符串，就再也分不出「本来就没有节点」与「节点名恰好叫直连」。
 	// 调用方已显式给值时不覆盖（留出未来更精确判定的入口）。
 	if rec.RouteVerdict == "" {
-		rec.RouteVerdict = routeVerdict(rec.Nodes, rec.Tier, socksProxyConfigured())
+		rec.RouteVerdict = routeVerdict(rec.Nodes, rec.Tier, socksProxyConfigured(), rec.ErrMsg)
 	}
 	direct := "直连"
 	for i := range rec.Nodes {
@@ -599,9 +599,9 @@ func setTimeoutConfigFromApp(cfg AppConfig) {
 
 // resumeStreamResult 描述一次流式转发的最终结果
 type resumeStreamResult struct {
-	OK         bool   // 是否成功完成（读到 [DONE] 或 EOF）
-	Switched   bool   // 是否发生过节点切换
-	PromptTok  int64  // 最终 usage
+	OK         bool  // 是否成功完成（读到 [DONE] 或 EOF）
+	Switched   bool  // 是否发生过节点切换
+	PromptTok  int64 // 最终 usage
 	Completion int64
 	ErrMsg     string
 	DoneAt     time.Time
@@ -619,6 +619,7 @@ type resumeStreamResult struct {
 //   - initial: 初始上游响应（可能为 nil，此时直接尝试重连）
 //   - keepReasoning: 是否保留 reasoning 内容
 //   - callRec: 调用日志记录（追加事件）
+//
 // isSwitchableStreamError 判断流中上游错误事件是否属于「可切换」故障（5xx/限流/额度）。
 // 可切换 → 中断续写换 key/节点；否则仅结束当前流（转发错误后正常收尾，不续写）。
 func isSwitchableStreamError(status, errMsg string) bool {
@@ -740,16 +741,16 @@ func streamWithResume(w http.ResponseWriter, r *http.Request, upstreamBody []byt
 					}
 				}
 				if resLine.err != nil {
-				if resLine.err == io.EOF {
-					// 正常 EOF：若见过 [DONE] 视为成功，否则视为中断
-					if !doneSeen {
-						interrupted = true
-						resumeable = false // 上游自己结束了流（无 [DONE]）→ 已吐内容则不再续写
-						res.ErrMsg = "EOF without [DONE]"
-						callRec.Events = append(callRec.Events, CallEvent{Type: "stream_interrupt", Node: proxyAddr, Detail: "EOF without [DONE]", At: time.Now()})
+					if resLine.err == io.EOF {
+						// 正常 EOF：若见过 [DONE] 视为成功，否则视为中断
+						if !doneSeen {
+							interrupted = true
+							resumeable = false // 上游自己结束了流（无 [DONE]）→ 已吐内容则不再续写
+							res.ErrMsg = "EOF without [DONE]"
+							callRec.Events = append(callRec.Events, CallEvent{Type: "stream_interrupt", Node: proxyAddr, Detail: "EOF without [DONE]", At: time.Now()})
+						}
+						break readLoop
 					}
-					break readLoop
-				}
 					interrupted = true
 					res.ErrMsg = resLine.err.Error()
 					callRec.Events = append(callRec.Events, CallEvent{Type: "stream_error", Node: proxyAddr, Detail: resLine.err.Error(), At: time.Now()})
@@ -849,20 +850,20 @@ func streamWithResume(w http.ResponseWriter, r *http.Request, upstreamBody []byt
 					if u, ok := obj["usage"].(map[string]any); ok {
 						lastUsage = u
 					}
-						if chs, ok := obj["choices"].([]any); ok && len(chs) > 0 {
-							if first, ok := chs[0].(map[string]any); ok {
-								if fr, ok := first["finish_reason"].(string); ok && fr != "" {
-									sawFinish = true
+					if chs, ok := obj["choices"].([]any); ok && len(chs) > 0 {
+						if first, ok := chs[0].(map[string]any); ok {
+							if fr, ok := first["finish_reason"].(string); ok && fr != "" {
+								sawFinish = true
+							}
+							if delta, ok := first["delta"].(map[string]any); ok {
+								if c, ok := delta["content"].(string); ok {
+									accumulated += c
 								}
-								if delta, ok := first["delta"].(map[string]any); ok {
-									if c, ok := delta["content"].(string); ok {
-										accumulated += c
-									}
-									// reasoning_content 不拼入 accumulated：续写时仅把可见内容
-									// 作为 assistant 上下文，避免思维链泄露到续写消息/用户可见内容
-								}
+								// reasoning_content 不拼入 accumulated：续写时仅把可见内容
+								// 作为 assistant 上下文，避免思维链泄露到续写消息/用户可见内容
 							}
 						}
+					}
 				} else {
 					sseDebugf("[%s] !! JSON parse fail on data payload: %q", reqID, dataStr)
 				}

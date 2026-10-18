@@ -267,10 +267,17 @@ func (v *Vendor) call(ctx context.Context, msg *contract.Message, streaming bool
 		if err != nil {
 			// G32：客户端断开（ctx.Canceled）不是节点链路失败——all-fail 竞速返回的
 			// Canceled 连带真实 addr 在此会被误标冷却/熔断，统一排除；真实网络错误仍标记。
-			if !errors.Is(err, context.Canceled) {
+			if !errors.Is(err, context.Canceled) && !errors.Is(err, contract.ErrNoHealthyNode) {
 				tr.Mark(proxyAddr, 0, err)
 			}
 			lastErr = err
+			// 池空：不重试、不 Mark（addr 为空），映射为 503 no_healthy_node。
+			if errors.Is(err, contract.ErrNoHealthyNode) {
+				lastStatus = http.StatusServiceUnavailable
+				lastBody = []byte(`{"error":{"message":"no healthy proxy node","type":"no_healthy_node"}}`)
+				lastProxyAddr = ""
+				break
+			}
 			retryCount++
 			continue
 		}

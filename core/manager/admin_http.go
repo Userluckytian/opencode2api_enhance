@@ -97,13 +97,13 @@ func (m *Manager) ResetStatsHandler() http.HandlerFunc {
 	}
 }
 
-// CallLogHandler GET 调用日志（?limit=）。
+// CallLogHandler GET 调用日志（?limit=；缺省 0 = 全部历史）。
 func (m *Manager) CallLogHandler() http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if !requireMethod(w, r, http.MethodGet) {
 			return
 		}
-		limit := 5000
+		limit := 0 // 0 = 全部
 		if s := r.URL.Query().Get("limit"); s != "" {
 			if n := parsePositiveInt(s); n > 0 {
 				limit = n

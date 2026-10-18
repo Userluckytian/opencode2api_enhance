@@ -1,5 +1,21 @@
 # Changelog
 
+## Unreleased (2026-10-18)
+
+### 调用日志与统计一致性
+
+- 日志页/过滤/聚合不再固定只读最近 5000 条：`/api/admin/call-log` 默认 `limit=0` 读取全部历史，显式 `limit>0` 仍按尾窗口读取。
+- `call_log_max` 语义收敛为“内存环形日志/回放上限”，不再限制日志页展示；日志页与统计页默认拉取全部历史（历史硬上限仍受 64MB 轮转约束）。
+- 重置统计时记录 `stats_reset_at` 时间点；按天视图、日期列表与趋势只统计该时间点之后的调用日志，不再出现“累计 Token 已清零、按天仍有旧数据”。
+
+### P1 节点池自愈
+
+- 429/402 不再永久禁用：改为额度类长冷却（600s 起、指数退避≤1800s、0~60s 抖动），到期放行 1 个恢复探测。
+- 免费层已配置代理但无可用节点时返回 HTTP 503 `no_healthy_node`，不再构造空代理地址。
+- 新增 `GET /api/admin/pool/health` 与 `POST /api/admin/pool/reset-health`。
+- 新增配置 `quota_bad_pool_reset_sec`（管理器透传到网关）。
+- call log 新增 `route_verdict=no_healthy_node`。
+
 ## v1.7.7（2026-10-17，正式发布）
 
 ### 🔧 构建工具

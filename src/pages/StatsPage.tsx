@@ -151,17 +151,23 @@ export default function StatsPage({
   // M9: 轮询代次守卫——load/loadDates 各记一代，响应后比对，过期响应丢弃（不叠加、旧快照不覆盖新状态）
   const loadGen = useRef(0)
   const datesGen = useRef(0)
+  // 最近一次“重置统计”的时间点（毫秒；0 = 从未重置）：日期列表/趋势只统计之后的日志。
+  const resetAtRef = useRef(0)
 
   // 提取调用日志中出现过的日期（新→旧）供按天筛选，同时聚合迷你条图数据
   const loadDates = useCallback(async () => {
     const gen = ++datesGen.current
     try {
-      const recs = await api.getCallLog(5000)
+      const recs = await api.getCallLog()
       if (gen !== datesGen.current) return
       const s = new Set<string>()
       const bySrc = new Map<string, { ok: number; fail: number }>()
       const byDay = new Map<string, { total: number; ok: number }>()
       for (const l of recs) {
+        if (resetAtRef.current > 0) {
+          const ts = Date.parse(l.ts)
+          if (!Number.isNaN(ts) && ts < resetAtRef.current) continue
+        }
         const d = (l.ts || '').slice(0, 10)
         if (d) s.add(d)
         const ok = l.status === 'ok'
@@ -201,6 +207,17 @@ export default function StatsPage({
       setDayTrend([])
     }
   }, [])
+
+  // 累计统计的 reset_at 变化时重新聚合日期/趋势：按天视图从重置时刻起算，
+  // 避免“累计 Token 已清零、日期列表仍显示旧数据”。
+  useEffect(() => {
+    const v = stats?.reset_at ? Date.parse(stats.reset_at) : 0
+    const next = Number.isNaN(v) ? 0 : v
+    if (next !== resetAtRef.current) {
+      resetAtRef.current = next
+      void loadDates()
+    }
+  }, [stats, loadDates])
 
   // 选择日期 → 拉取当日聚合；切回全部 → 恢复累计视图
   const doSelectDay = async (d: string) => {

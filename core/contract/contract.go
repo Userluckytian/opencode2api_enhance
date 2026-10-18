@@ -6,6 +6,7 @@ package contract
 
 import (
 	"context"
+	"errors"
 	"io"
 	"net/http"
 )
@@ -150,7 +151,21 @@ func (DirectTransport) Client(_ Tier, _ bool) (*http.Client, string) {
 // Mark 实现 Transport（无操作）。
 func (DirectTransport) Mark(string, int, error) {}
 
-// ErrRules 描述厂商可重试/可切换/进坏账的状态码语义。
+// ErrNoHealthyNode 免费层已配置代理但没有可用节点时的哨兵错误。
+var ErrNoHealthyNode = errors.New("no healthy proxy node")
+
+// NoCandidateClient 返回一个 HTTP 客户端，其 RoundTripper 恒返回 ErrNoHealthyNode。
+// 用于池空场景，避免构造空代理地址或落到本机直连。
+func NoCandidateClient() *http.Client {
+	return &http.Client{Transport: noHealthyNodeTransport{}}
+}
+
+type noHealthyNodeTransport struct{}
+
+func (noHealthyNodeTransport) RoundTrip(*http.Request) (*http.Response, error) {
+	return nil, ErrNoHealthyNode
+}
+
 // 现状（opencode）的 401/402/429/503 是写死的，这里按厂商差异化。
 type ErrRules struct {
 	Retryable  []int // 该状态码整体可重试（如 429/502/503/504）

@@ -52,6 +52,9 @@ type StatsSummary struct {
 	TotalCompletionTokens int64          `json:"total_completion_tokens"`
 	TotalTokens           int64          `json:"total_tokens"`
 	Instances             []InstanceStat `json:"instances"`
+	// ResetAt 最近一次“重置统计”的时间点（RFC3339；空 = 从未重置）。
+	// 按天视图（StatsByDay / 前端日期趋势）只统计该时间点之后的调用日志。
+	ResetAt string `json:"reset_at,omitempty"`
 }
 
 // GoStatsData / GoNodeStatsData 与 main 包写盘结构一致。
@@ -156,6 +159,9 @@ func (m *Manager) AggregateStats() StatsSummary {
 		sum.TotalCompletionTokens += inst.CompletionTokens
 		sum.TotalTokens += inst.TotalTokens
 	}
+	if t := m.statsResetAt(); !t.IsZero() {
+		sum.ResetAt = t.Format(time.RFC3339)
+	}
 	return sum
 }
 
@@ -242,6 +248,34 @@ type ResetStatsResult struct {
 	ResetCount   int      `json:"reset_count"`
 	DeletedCount int      `json:"deleted_count"`
 	Failed       []string `json:"failed"`
+	// ResetAt 本次重置时间点（RFC3339）；按天视图从该时刻起算。
+	ResetAt string `json:"reset_at,omitempty"`
+}
+
+// statsResetAtPath 统计重置时间点文件（runtime/stats_reset_at）。
+func (m *Manager) statsResetAtPath() string {
+	return filepath.Join(m.paths.RuntimeDir, "stats_reset_at")
+}
+
+// statsResetAt 读取最近一次统计重置时间点；缺失/损坏返回零值。
+func (m *Manager) statsResetAt() time.Time {
+	data, err := os.ReadFile(m.statsResetAtPath())
+	if err != nil {
+		return time.Time{}
+	}
+	t, err := time.Parse(time.RFC3339, strings.TrimSpace(string(data)))
+	if err != nil {
+		return time.Time{}
+	}
+	return t
+}
+
+// writeStatsResetAt 原子写入统计重置时间点。
+func (m *Manager) writeStatsResetAt(t time.Time) error {
+	if err := os.MkdirAll(m.paths.RuntimeDir, 0o755); err != nil {
+		return err
+	}
+	return writeFileAtomic(m.statsResetAtPath(), []byte(t.Format(time.RFC3339)))
 }
 
 // writeEmptyStatsFile 覆写为空统计文件（与 Rust 语义一致）。
@@ -389,6 +423,15 @@ func (m *Manager) ResetStats(clearDeleted bool) ResetStatsResult {
 				}
 			}
 		}
+	}
+
+	// 记录重置时间点：按天视图只统计此刻之后的调用日志，避免“累计已清零、
+	// 按天视图仍显示旧数据”的两套数据源不一致。
+	now := time.Now()
+	if err := m.writeStatsResetAt(now); err != nil {
+		res.Failed = append(res.Failed, "统计重置时间点写入失败: "+err.Error())
+	} else {
+		res.ResetAt = now.Format(time.RFC3339)
 	}
 	return res
 }

@@ -457,7 +457,7 @@ func applyPoolResult(addr string, status int, requestErr error) {
 // ---- 质量加权路由 ----
 
 // pickWeightedProxy 性能模式下的节点选择：
-//   - 坏池节点：账号类（401/402/429）永久剔除；链路类（如 503）到期放行 1 次探测
+//   - 坏池节点：认证类（401）永久剔除；额度类（402/429）与链路类（503 等）到期放行 1 次探测
 //   - 冷却中节点剔除（冷却兜底保留，全池不可用时回退）
 //   - 熔断中节点剔除；到期后放行 1 个半开探测，成功即恢复
 //   - 质量分：down 剔除、flaky 跳过、degraded 降权、healthy 优先；同档按分排序
@@ -475,7 +475,7 @@ func pickWeightedProxy(proxies []Socks5Proxy, start int) Socks5Proxy {
 	type cand struct {
 		proxy  Socks5Proxy
 		score  int
-		tier   int // 2 = healthy 档，1 = degraded 档
+		tier   int     // 2 = healthy 档，1 = degraded 档
 		jitter float64 // [0,3) 同分/同档随机扰动（仅 smart 模式；避免连续选中同一高分节点）
 	}
 	var cands []cand
@@ -492,7 +492,7 @@ func pickWeightedProxy(proxies []Socks5Proxy, start int) Socks5Proxy {
 		proxy := proxies[(start+offset)%len(proxies)]
 		state := socks5Health[proxy.Addr]
 		if state.badReason != "" {
-			// 坏池：账号类永久剔除；链路类到期记入探针（结束统一消费，
+			// 坏池：认证类永久剔除；额度类/链路类到期记入探针（结束统一消费，
 			// 避免熔断 halfOpen 优先返回时浪费已消费的坏池配额）。
 			if badProbe.Addr == "" && badPoolProbeReady(state, now) {
 				badProbe = proxy
@@ -590,8 +590,8 @@ type raceCandidate struct {
 	proxy       Socks5Proxy
 	score       int
 	tier        int
-	scoreJitter float64   // [0,3) 随机扰动，排序时与 score 相加
-	inflight    int       // L1：候选构建时的 in-flight 快照（比较器只读局部，零锁）
+	scoreJitter float64 // [0,3) 随机扰动，排序时与 score 相加
+	inflight    int     // L1：候选构建时的 in-flight 快照（比较器只读局部，零锁）
 }
 
 // raceCandidates 请求级竞速候选：返回至多 n 个可用代理
@@ -630,8 +630,8 @@ func raceCandidates(n int) []Socks5Proxy {
 	for _, proxy := range proxies {
 		state := socks5Health[proxy.Addr]
 		if state.badReason != "" {
-			// S3：链路类坏池已过期 → 记入兜底探针（候选不足时才放行，此处分类型检查
-			// 不消费配额，避免候选充足时抢走单发路径的恢复探测）。账号类永不参与。
+			// S3：链路类/额度类坏池已过期 → 记入兜底探针（候选不足时才放行，此处分类型检查
+			// 不消费配额，避免候选充足时抢走单发路径的恢复探测）。认证类永不参与。
 			if badPoolProbe.Addr == "" && badPoolProbeReady(state, now) {
 				badPoolProbe = proxy
 			}

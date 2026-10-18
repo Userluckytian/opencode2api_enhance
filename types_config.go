@@ -26,8 +26,8 @@ type AppConfig struct {
 	// 已连接但未吐可见内容（子代理/工具调用长思考）时的静默超时，默认 30s。
 	PreContentSilenceMinMS int `json:"timeout_precontent_silence_min_ms,omitempty"`
 	PreContentSilenceMaxMS int `json:"timeout_precontent_silence_max_ms,omitempty"`
-	ProbeMin     int `json:"failover_probe_min,omitempty"`
-	ProbeMax     int `json:"failover_probe_max,omitempty"`
+	ProbeMin               int `json:"failover_probe_min,omitempty"`
+	ProbeMax               int `json:"failover_probe_max,omitempty"`
 	// 调用日志保留上限（条）
 	CallLogMax int `json:"call_log_max,omitempty"`
 	// 界面轮询间隔（秒，U3）：nil = 未设置（默认 5），显式 0 = 关闭轮询，1~60 可配。
@@ -49,8 +49,11 @@ type AppConfig struct {
 	// 半开间隔：熔断节点按该周期（秒）放行 1 个探测请求，成功即恢复（默认 60）。
 	PoolHalfOpenIntervalSec int `json:"pool_halfopen_interval_sec,omitempty"`
 	// 链路类坏池自动恢复间隔（秒，S3，默认 300）：链路类坏池（如 503）到期后放行 1 次
-	// 探测，成功清状态 / 失败重新坏池；账号类（401/402/429）永久禁用不受此配置影响。
+	// 探测，成功清状态 / 失败重新坏池；认证类（401）永久禁用不受此配置影响。
 	BadPoolResetSec int `json:"bad_pool_reset_sec,omitempty"`
+	// 额度类坏池（402/429）首次冷却秒数（秒，默认 600，允许 60~1800）：到期后放行 1 个
+	// 恢复探测；再次 429 按 base×2^(badCount-阈值) 递增，上限 1800s，附加 0~60s 抖动。
+	QuotaBadPoolResetSec int `json:"quota_bad_pool_reset_sec,omitempty"`
 	// 请求级竞速并行数上限（P2b/S5）：一次请求并行扇出 N 个候选出口，首个成功者胜
 	// （默认 2；1 = 关闭竞速）。S5 起为上限，实际副本由压力系数动态决定。
 	PoolRaceCopies int `json:"pool_race_copies,omitempty"`

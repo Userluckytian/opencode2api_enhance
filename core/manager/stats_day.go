@@ -28,13 +28,21 @@ func newDayStats(day string) DayStats {
 }
 
 // StatsByDay 聚合指定日期（YYYY-MM-DD）的调用日志；空日返回全量。
+// 只统计最近一次“重置统计”时间点之后的记录：重置后累计 Token 已清零，
+// 按天视图也必须从同一时间点起算，避免两套数据源不一致。
 func (m *Manager) StatsByDay(day string) DayStats {
 	out := newDayStats(day)
 	models := map[string]*GoModelStats{}
 	nodes := map[string]*GoNodeStat{}
-	for _, rec := range m.ReadCallLog(50000) {
+	resetAt := m.statsResetAt()
+	for _, rec := range m.ReadCallLog(0) {
 		if day != "" && !strings.HasPrefix(rec.TS, day) {
 			continue
+		}
+		if !resetAt.IsZero() {
+			if t := callLogTime(rec.TS); !t.IsZero() && t.Before(resetAt) {
+				continue
+			}
 		}
 		out.TotalRequests++
 		if rec.Status == "ok" {

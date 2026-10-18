@@ -280,16 +280,7 @@ export default function LogsPage({
   // 前端分页：最新在前，第 1 页 = 最新一页
   const [page, setPage] = useState(1)
 
-  // 拉取量跟随 call_log_max（设置页可调）：上限保持 5000；call_log_max<=0 或读配置失败回退默认 5000
-  const fetchLimitRef = useRef(5000)
-  useEffect(() => {
-    api
-      .configGet()
-      .then((c) => {
-        fetchLimitRef.current = c.call_log_max > 0 ? Math.min(c.call_log_max, 5000) : 5000
-      })
-      .catch(() => {})
-  }, [])
+  // 日志页读取全部历史（不再用 call_log_max 做展示上限；该配置仅约束内存环形缓冲/回放）。
 
   // G31: toast 用 ref 封装（App 的 showToast 每次渲染重建）——load 依赖不含 toast，轮询定时器不因 toast 重启
   const toastRef = useRef(toast)
@@ -301,7 +292,7 @@ export default function LogsPage({
     async (silent = true) => {
       const gen = ++loadGen.current
       try {
-        const recs = await api.getCallLog(fetchLimitRef.current)
+        const recs = await api.getCallLog()
         if (gen !== loadGen.current) return
         // 最新在前（后端无日志时可能返回 null → 归一为空数组，避免 TypeError）
         setLogs([...(Array.isArray(recs) ? recs : [])].reverse())

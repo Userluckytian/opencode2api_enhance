@@ -106,7 +106,9 @@ func (m *Manager) buildOpenCodeCfg(singboxPort uint16, probe bool) ([]byte, erro
 }
 
 // BuildOpenCodeCfgFor 导出包装（main 装配实例接缝用）。
-func (m *Manager) BuildOpenCodeCfgFor(port uint16) ([]byte, error) { return m.buildOpenCodeCfg(port, false) }
+func (m *Manager) BuildOpenCodeCfgFor(port uint16) ([]byte, error) {
+	return m.buildOpenCodeCfg(port, false)
+}
 
 // buildRouterCfg 统一网关路由配置：多 sing-box 出口 + route_mode + 超时区间。
 func (m *Manager) buildRouterCfg(singboxPorts []uint16, portNames map[uint16]string, routeMode string) ([]byte, error) {
@@ -155,6 +157,8 @@ func (m *Manager) buildRouterCfg(singboxPorts []uint16, portNames map[uint16]str
 	applyIf("pool_halfopen_interval_sec", int64(appCfg.PoolHalfOpenIntervalSec))
 	// S3 链路类坏池自动恢复间隔（秒；>0 才写，未配置子进程用默认 300）。
 	applyIf("bad_pool_reset_sec", int64(appCfg.BadPoolResetSec))
+	// 额度类坏池首次冷却（秒；>0 才写，未配置子进程用默认 600）。
+	applyIf("quota_bad_pool_reset_sec", int64(appCfg.QuotaBadPoolResetSec))
 	if appCfg.PoolPerformanceMode != nil {
 		cfg["pool_performance_mode"] = *appCfg.PoolPerformanceMode
 	}

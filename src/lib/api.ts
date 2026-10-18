@@ -325,6 +325,7 @@ export type RouteVerdict =
   | "direct_by_design"
   | "direct_config_missing"
   | "direct_unexpected"
+  | "no_healthy_node"
 
 export type CallLogRecord = {
   req_id: string
@@ -491,6 +492,8 @@ export type StatsSummary = {
   total_completion_tokens: number
   total_tokens: number
   instances: InstanceStat[]
+  /** 最近一次“重置统计”的时间点（RFC3339）；空 = 从未重置 */
+  reset_at?: string
 }
 
 export type ResetStatsResult = {
@@ -500,6 +503,8 @@ export type ResetStatsResult = {
   deleted_count: number
   /** 失败明细 */
   failed: string[]
+  /** 本次重置时间点（RFC3339）；按天视图从该时刻起算 */
+  reset_at?: string
 }
 
 /** 单日统计（统计页按天查看：按统一网关调用日志聚合） */
@@ -831,7 +836,7 @@ export const api = {
   resetStats: (clearDeleted?: boolean) =>
     req<ResetStatsResult>('POST', '/stats/reset', undefined, { clearDeleted: clearDeleted ?? undefined }),
 
-  // 全流程调用日志
+  // 全流程调用日志（limit 省略或 0 = 全部历史）
   getCallLog: (limit?: number) =>
     req<CallLogRecord[]>('GET', '/call-log', undefined, { limit: limit ?? undefined }),
   /** 清空全部调用日志 */

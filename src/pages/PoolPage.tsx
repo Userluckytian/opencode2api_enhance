@@ -482,7 +482,7 @@ export default memo(function PoolPage({
       return
     }
     if (f.call_log_max < 100) {
-      toast('日志保留上限至少 100 条', false)
+      toast('内存/回放日志上限至少 100 条', false)
       return
     }
     setSavingTimeout(true)
@@ -1433,7 +1433,7 @@ export default memo(function PoolPage({
                   />
                 </div>
                 <div className="flex items-center gap-3">
-                  <label className="text-[13px] text-zinc-700 flex-1 min-w-0 whitespace-nowrap">调用日志保留上限（默认 5000）</label>
+                  <label className="text-[13px] text-zinc-700 flex-1 min-w-0 whitespace-nowrap">调用日志内存/回放上限（默认 5000，不影响日志页全量展示）</label>
                   <input
                     type="number"
                     min={100}
