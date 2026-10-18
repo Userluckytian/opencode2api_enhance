@@ -1,5 +1,12 @@
 # Changelog
 
+## v1.7.8-beta.3（2026-10-18，Beta）
+
+### 本地代理文件导入
+
+- 修复 Clash 配置常见的同缩进列表写法（`proxies:` 下一行直接 `- name: ...`）被解析器误判为“列表项父级是 map”的问题；这类配置现在可以正常导入。
+- 实测一个 68 个 proxy 的 Clash YAML 可解析出 67 个可导入节点；补充回归测试 `TestParseClashSameIndentList`。
+
 ## v1.7.8-beta.2（2026-10-18，Beta）
 
 ### 订阅导入弹窗
