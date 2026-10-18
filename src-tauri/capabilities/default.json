@@ -21,6 +21,7 @@
     "core:window:allow-set-title",
     "core:window:allow-unminimize",
     "core:event:default",
-    "core:tray:default"
+    "core:tray:default",
+    "dialog:allow-open"
   ]
 }

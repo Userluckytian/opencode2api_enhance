@@ -13,9 +13,11 @@ import {
   X,
   ChevronDown,
   FolderOpen,
+  FileText,
   Link2,
   RotateCw,
 } from 'lucide-react'
+import { open as openDialog } from '@tauri-apps/plugin-dialog'
 import {
   api,
   type LocalProfileSource,
@@ -81,22 +83,22 @@ export default function NodesPage({
   const [subWaitSec, setSubWaitSec] = useState(0)
   const [importingUrl, setImportingUrl] = useState<string | null>(null) // 正在拉取的订阅
   const [deletingUrl, setDeletingUrl] = useState<string | null>(null) // 正在删除的订阅
-  // 新增订阅表单
-  const [addOpen, setAddOpen] = useState(false)
+  // 导入方式 Tab（订阅 URL / 批量链接 / 本地文件）
+  const [importTab, setImportTab] = useState<'url' | 'links' | 'files'>('url')
   const [addUrl, setAddUrl] = useState('')
   const [addInterval, setAddInterval] = useState(30)
   const [addName, setAddName] = useState('') // 可选：手动指定分组名（固定）
 
   // 批量链接导入（vless/vmess/trojan/ss/hy2/http/socks5 等，粘贴多行）
-  const [linksOpen, setLinksOpen] = useState(false)
   const [linksText, setLinksText] = useState('')
   const [linksGroup, setLinksGroup] = useState('')
   const [linksBusy, setLinksBusy] = useState(false)
   // 本地代理文件导入（Clash YAML 单文件 / 目录）
-  const [filesOpen, setFilesOpen] = useState(false)
   const [filePath, setFilePath] = useState('')
   const [fileGroup, setFileGroup] = useState('')
   const [fileBusy, setFileBusy] = useState(false)
+  const [manualPath, setManualPath] = useState(false)
+  const [fileReloadAllBusy, setFileReloadAllBusy] = useState(false)
   const [fileSources, setFileSources] = useState<LocalProfileSource[]>([])
   const [fileReloadingPath, setFileReloadingPath] = useState<string | null>(null)
   const [fileRemovingPath, setFileRemovingPath] = useState<string | null>(null)
@@ -180,7 +182,6 @@ export default function NodesPage({
               toast(`订阅已添加，但首次拉取失败：${rr.error}`, false)
             } else {
               toast(`已导入 ${rr.imported} 个节点到节点池`, true)
-              setAddOpen(false)
               setAddUrl('')
               setAddName('')
               setAddInterval(30)
@@ -196,14 +197,12 @@ export default function NodesPage({
       if (r.error) {
         // 返回 error：源已保存但首次拉取失败，提示稍后重试
         toast(`订阅已添加，但首次拉取失败：${r.error}`, false)
-        setAddOpen(false)
         setAddUrl('')
         setAddName('')
         setAddInterval(30)
         await loadSubs()
       } else {
         toast(`已导入 ${r.imported} 个节点到节点池`, true)
-        setAddOpen(false)
         setAddUrl('')
         setAddName('')
         setAddInterval(30)
@@ -265,6 +264,55 @@ export default function NodesPage({
     }
   }
 
+  // 原生文件/目录选择器：仅桌面壳可用；Web 版无法拿到真实路径，退回路径输入。
+  const guessGroupFromPath = (p: string) => {
+    const trimmed = p.replace(/[\\/]+$/, '')
+    const base = trimmed.split(/[\\/]/).pop() || ''
+    return /\.[^.\\/]+$/.test(base) ? base.replace(/\.[^.]+$/, '') : base
+  }
+
+  const handlePickFile = async () => {
+    try {
+      const selected = await openDialog({
+        multiple: false,
+        directory: false,
+        filters: [{ name: 'Clash 配置', extensions: ['yaml', 'yml', 'txt'] }],
+      })
+      if (typeof selected === 'string' && selected) {
+        setFilePath(selected)
+        if (!fileGroup.trim()) setFileGroup(guessGroupFromPath(selected))
+      }
+    } catch (e) {
+      toast('无法打开文件选择器：' + String(e), false)
+    }
+  }
+
+  const handlePickDir = async () => {
+    try {
+      const selected = await openDialog({ multiple: false, directory: true })
+      if (typeof selected === 'string' && selected) {
+        setFilePath(selected)
+        if (!fileGroup.trim()) setFileGroup(guessGroupFromPath(selected))
+      }
+    } catch (e) {
+      toast('无法打开目录选择器：' + String(e), false)
+    }
+  }
+
+  const handleReloadAllFiles = async () => {
+    setFileReloadAllBusy(true)
+    try {
+      const r = await api.localProfilesReload()
+      toast(`已重载 ${r.reloaded ?? 0} 个本地源，导入 ${r.imported} 个节点`, true)
+      await loadLocalProfiles()
+      await loadNodes()
+    } catch (e) {
+      toast(String(e), false)
+    } finally {
+      setFileReloadAllBusy(false)
+    }
+  }
+
   // 本地代理文件导入：用户本机已有的 Clash 配置（单文件 / 目录）。
   // 后端只读不写；导入后节点进订阅缓存，与订阅节点同源（可扫描、可入池、可按组删除）。
   const handleImportFile = async () => {
@@ -278,6 +326,7 @@ export default function NodesPage({
       toast(`已从 ${r.files} 个文件导入 ${r.imported} 个节点到「${r.group}」`, true)
       setFilePath('')
       setFileGroup('')
+      setManualPath(false)
       await loadLocalProfiles()
       await loadSubs()
       await loadNodes()
@@ -974,21 +1023,35 @@ export default function NodesPage({
               </button>
             </div>
             <p className="text-[12px] text-zinc-400">
-              四类来源：① 订阅 URL（后台按各自间隔自动拉取）② 批量粘贴代理链接 ③ 本机已有的 Clash 配置文件 ④ 设置页的 Clash 外部控制。
-              解析支持 Clash YAML / base64 / v2ray 链接（vmess/vless/trojan/ss/hysteria2/hysteria/tuic/anytls/wireguard）与
-              http / socks5 代理；重复节点自动跳过。导入只进节点池（不自动建实例），需要实例时在节点池勾选后手动添加。
+              导入代理节点到节点池：订阅 URL、批量链接或本机 Clash 配置文件。重复节点自动跳过；
+              导入只进节点池，不会自动创建实例。
             </p>
 
-            {/* 新增订阅 */}
-            <button
-              type="button"
-              onClick={() => setAddOpen(!addOpen)}
-              className="flex items-center gap-1.5 px-4 py-2 rounded-lg text-[13px] text-zinc-700 bg-white border border-zinc-200 hover:bg-zinc-50"
-            >
-              <ChevronDown size={14} />
-              新增订阅
-            </button>
-            {addOpen && (
+            {/* 导入方式 Tab：订阅 URL / 批量链接 / 本地文件 */}
+            <div className="flex items-center gap-1 p-1 bg-zinc-100 rounded-xl">
+              {([
+                { key: 'url', label: '订阅 URL', icon: <Rss size={14} /> },
+                { key: 'links', label: '批量链接', icon: <Link2 size={14} /> },
+                { key: 'files', label: '本地文件', icon: <FolderOpen size={14} /> },
+              ] as const).map((t) => (
+                <button
+                  key={t.key}
+                  type="button"
+                  onClick={() => setImportTab(t.key)}
+                  className={clsx(
+                    'flex-1 flex items-center justify-center gap-1.5 px-3 py-2 rounded-lg text-[12px] transition-colors',
+                    importTab === t.key
+                      ? 'bg-white text-zinc-900 shadow-sm font-medium'
+                      : 'text-zinc-500 hover:text-zinc-800',
+                  )}
+                >
+                  {t.icon}
+                  {t.label}
+                </button>
+              ))}
+            </div>
+
+            {importTab === 'url' && (
               <div className="border border-zinc-200 rounded-xl p-4 space-y-4">
                 <div className="flex items-center gap-3">
                   <label className="text-[13px] text-zinc-700 flex-1 min-w-0 whitespace-nowrap">订阅 URL</label>
@@ -1035,8 +1098,15 @@ export default function NodesPage({
                     {subBusy ? <Loader2 size={14} className="animate-spin" /> : null}
                     {subBusy ? '导入中…' : '确定'}
                   </button>
-                  <button onClick={() => setAddOpen(false)} className="px-4 py-2 rounded-lg text-[13px] text-zinc-600 hover:bg-zinc-100">
-                    取消
+                  <button
+                    onClick={() => {
+                      setAddUrl('')
+                      setAddName('')
+                      setAddInterval(30)
+                    }}
+                    className="px-4 py-2 rounded-lg text-[13px] text-zinc-600 hover:bg-zinc-100"
+                  >
+                    清空
                   </button>
                 </div>
                 {/* P3: 确定按钮等待反馈——不确定进度条 + 已等待 N 秒（10s 看门狗） */}
@@ -1057,17 +1127,7 @@ export default function NodesPage({
               </div>
             )}
 
-            {/* 批量链接导入：粘贴多行代理链接（http/socks5/vless/vmess/hy2/trojan/ss…） */}
-            <button
-              type="button"
-              onClick={() => setLinksOpen(!linksOpen)}
-              className="flex items-center gap-1.5 px-4 py-2 rounded-lg text-[13px] text-zinc-700 bg-white border border-zinc-200 hover:bg-zinc-50"
-            >
-              <ChevronDown size={14} className={clsx('transition-transform', !linksOpen && '-rotate-90')} />
-              <Link2 size={14} />
-              批量链接导入
-            </button>
-            {linksOpen && (
+            {importTab === 'links' && (
               <div className="border border-zinc-200 rounded-xl p-4 space-y-4">
                 <p className="text-[12px] text-zinc-400">
                   每行一条代理链接，支持 http / https / socks5 / socks4 / vless / vmess / trojan / ss / hysteria2（hy2）/ hysteria / tuic / anytls / wireguard；
@@ -1110,44 +1170,102 @@ export default function NodesPage({
                   </button>
                   <button
                     onClick={() => {
-                      setLinksOpen(false)
                       setLinksText('')
                       setLinksGroup('')
                     }}
                     className="px-4 py-2 rounded-lg text-[13px] text-zinc-600 hover:bg-zinc-100"
                   >
-                    取消
+                    清空
                   </button>
                 </div>
               </div>
             )}
 
-            {/* 本地代理文件：读取本机已有的 Clash 配置文件（单文件 / 目录） */}
-            <button
-              type="button"
-              onClick={() => setFilesOpen(!filesOpen)}
-              className="flex items-center gap-1.5 px-4 py-2 rounded-lg text-[13px] text-zinc-700 bg-white border border-zinc-200 hover:bg-zinc-50"
-            >
-              <ChevronDown size={14} className={clsx('transition-transform', !filesOpen && '-rotate-90')} />
-              <FolderOpen size={14} />
-              本地代理文件
-            </button>
-            {filesOpen && (
+            {importTab === 'files' && (
               <div className="border border-zinc-200 rounded-xl p-4 space-y-4">
-                <p className="text-[12px] text-zinc-400">
-                  填写本机已有的 Clash 配置文件路径（.yaml / .yml / .txt）或配置文件所在目录（取其下 1 层配置文件）。
-                  只读不写，不会改动你的原始配置；改了磁盘文件后点「重载」即可刷新节点。
-                </p>
-                <div className="flex items-center gap-3">
-                  <label className="text-[13px] text-zinc-700 shrink-0 whitespace-nowrap">文件 / 目录路径</label>
-                  <input
-                    type="text"
-                    placeholder="D:\clash\config.yaml 或 D:\clash\profiles"
-                    value={filePath}
-                    onChange={(e) => setFilePath(e.target.value)}
-                    className="flex-1 min-w-0 px-3 py-2 border rounded-lg text-[13px] font-mono"
-                  />
-                </div>
+                {isDesktop ? (
+                  <>
+                    <div className="rounded-xl border-2 border-dashed border-zinc-200 bg-zinc-50/60 p-5 text-center space-y-3">
+                      <div className="mx-auto w-10 h-10 rounded-full bg-white border border-zinc-200 flex items-center justify-center text-zinc-500">
+                        <FolderOpen size={18} />
+                      </div>
+                      <div className="text-[13px] font-medium text-zinc-800">选择本机 Clash 配置</div>
+                      <div className="text-[11px] text-zinc-400">
+                        支持 .yaml / .yml / .txt；选择目录时只读取其下 1 层配置。只读，不会改动原文件。
+                      </div>
+                      <div className="flex items-center justify-center gap-2">
+                        <button
+                          type="button"
+                          onClick={() => void handlePickFile()}
+                          disabled={fileBusy}
+                          className="flex items-center gap-1.5 bg-white border border-zinc-200 text-zinc-700 rounded-lg px-3 py-2 text-[12px] hover:bg-zinc-50 disabled:opacity-60"
+                        >
+                          <FileText size={14} />
+                          选择文件…
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => void handlePickDir()}
+                          disabled={fileBusy}
+                          className="flex items-center gap-1.5 bg-white border border-zinc-200 text-zinc-700 rounded-lg px-3 py-2 text-[12px] hover:bg-zinc-50 disabled:opacity-60"
+                        >
+                          <FolderOpen size={14} />
+                          选择目录…
+                        </button>
+                      </div>
+                    </div>
+
+                    {filePath && (
+                      <div className="flex items-center gap-2 px-3 py-2 rounded-lg bg-white border border-zinc-200">
+                        <FileText size={14} className="text-teal-600 shrink-0" />
+                        <span className="flex-1 min-w-0 text-[12px] font-mono text-zinc-700 truncate" title={filePath}>
+                          {filePath}
+                        </span>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setFilePath('')
+                            setFileGroup('')
+                          }}
+                          className="text-[11px] text-zinc-400 hover:text-zinc-700 shrink-0"
+                        >
+                          清除
+                        </button>
+                      </div>
+                    )}
+
+                    <button
+                      type="button"
+                      onClick={() => setManualPath(!manualPath)}
+                      className="text-[11px] text-zinc-400 hover:text-zinc-600"
+                    >
+                      {manualPath ? '收起手动输入' : '高级：手动输入路径'}
+                    </button>
+                    {manualPath && (
+                      <input
+                        type="text"
+                        placeholder="D:\clash\config.yaml 或 D:\clash\profiles"
+                        value={filePath}
+                        onChange={(e) => setFilePath(e.target.value)}
+                        className="w-full px-3 py-2 border rounded-lg text-[12px] font-mono"
+                      />
+                    )}
+                  </>
+                ) : (
+                  <div className="space-y-2">
+                    <p className="text-[12px] text-zinc-400">
+                      Web 版无法访问浏览器所在机器的文件路径；请填写运行 opencode2api 服务的机器上可访问的路径。
+                    </p>
+                    <input
+                      type="text"
+                      placeholder="服务器上的路径，例如 /home/user/clash/config.yaml"
+                      value={filePath}
+                      onChange={(e) => setFilePath(e.target.value)}
+                      className="w-full px-3 py-2 border rounded-lg text-[12px] font-mono"
+                    />
+                  </div>
+                )}
+
                 <div className="flex items-center gap-3">
                   <label
                     className="text-[13px] text-zinc-700 flex-1 min-w-0 whitespace-nowrap"
@@ -1157,39 +1275,49 @@ export default function NodesPage({
                   </label>
                   <input
                     type="text"
-                    placeholder="留空用文件名 / 目录名"
+                    placeholder={filePath ? guessGroupFromPath(filePath) : '留空用文件名 / 目录名'}
                     value={fileGroup}
                     onChange={(e) => setFileGroup(e.target.value)}
                     className="flex-1 min-w-0 px-3 py-2 border rounded-lg text-[13px]"
                   />
                 </div>
+
                 <div className="flex items-center gap-3 pt-1">
                   <button
                     type="button"
                     onClick={() => void handleImportFile()}
-                    disabled={fileBusy}
-                    className="flex items-center gap-1.5 bg-green-600 text-white rounded-lg px-4 py-2 text-[13px] hover:bg-green-700 disabled:opacity-60 disabled:cursor-not-allowed"
+                    disabled={fileBusy || !filePath.trim()}
+                    className="flex items-center gap-1.5 bg-green-600 text-white rounded-lg px-4 py-2 text-[13px] hover:bg-green-700 disabled:opacity-50 disabled:cursor-not-allowed"
                   >
-                    {fileBusy ? <Loader2 size={14} className="animate-spin" /> : <FolderOpen size={14} />}
+                    {fileBusy ? <Loader2 size={14} className="animate-spin" /> : <FileText size={14} />}
                     {fileBusy ? '导入中…' : '导入'}
                   </button>
                   <button
                     onClick={() => {
-                      setFilesOpen(false)
                       setFilePath('')
                       setFileGroup('')
+                      setManualPath(false)
                     }}
                     className="px-4 py-2 rounded-lg text-[13px] text-zinc-600 hover:bg-zinc-100"
                   >
-                    取消
+                    清空
                   </button>
                 </div>
 
                 {/* 已登记的本地源列表（重载 / 删除） */}
                 {fileSources.length > 0 && (
                   <div className="border border-zinc-100 rounded-lg overflow-hidden">
-                    <div className="px-3 py-2 bg-zinc-50 border-b border-zinc-100 text-[12px] text-zinc-500">
-                      已导入的本地源（{fileSources.length}）
+                    <div className="px-3 py-2 bg-zinc-50 border-b border-zinc-100 text-[12px] text-zinc-500 flex items-center justify-between">
+                      <span>已导入的本地源（{fileSources.length}）</span>
+                      <button
+                        type="button"
+                        onClick={() => void handleReloadAllFiles()}
+                        disabled={fileReloadAllBusy}
+                        className="flex items-center gap-1 text-[11px] text-teal-700 hover:text-teal-800 disabled:opacity-60"
+                      >
+                        {fileReloadAllBusy ? <Loader2 size={12} className="animate-spin" /> : <RotateCw size={12} />}
+                        {fileReloadAllBusy ? '重载中…' : '重载全部'}
+                      </button>
                     </div>
                     <div className="divide-y divide-zinc-50">
                       {fileSources.map((src) => (
@@ -1200,6 +1328,7 @@ export default function NodesPage({
                             </div>
                             <div className="text-[11px] text-zinc-400 mt-0.5">
                               分组：{src.group} · {src.kind === 'dir' ? '目录' : '单文件'} · {src.node_count} 个节点
+                              {src.last_import ? ` · ${new Date(src.last_import).toLocaleString()}` : ''}
                               {src.last_error ? <span className="text-red-500"> · 上次失败：{src.last_error}</span> : null}
                             </div>
                           </div>
