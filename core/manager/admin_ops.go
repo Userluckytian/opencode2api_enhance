@@ -186,6 +186,14 @@ func (m *Manager) InstancesStartHandler() http.HandlerFunc {
 			writeErr(w, http.StatusInternalServerError, err.Error())
 			return
 		}
+		// 启动/停止会改变池成员（Running + JoinGateway），必须重新生成网关配置；
+		// 否则后启动的实例不会进入 socks5_proxies，故障切换时无备选节点。
+		if inst, ok := m.FindInstance(name); ok && inst.JoinGateway {
+			if err := m.Gateway().sync(m.Run()); err != nil {
+				writeErr(w, http.StatusInternalServerError, "同步网关失败: "+err.Error())
+				return
+			}
+		}
 		writeJSON(w, map[string]any{"status": "ok"})
 	}
 }
@@ -201,9 +209,17 @@ func (m *Manager) InstancesStopHandler() http.HandlerFunc {
 			writeErr(w, http.StatusBadRequest, err.Error())
 			return
 		}
+		inst, _ := m.FindInstance(name)
+		wasMember := inst.JoinGateway
 		if err := m.StopInstance(m.Run(), name); err != nil {
 			writeErr(w, http.StatusInternalServerError, err.Error())
 			return
+		}
+		if wasMember {
+			if err := m.Gateway().sync(m.Run()); err != nil {
+				writeErr(w, http.StatusInternalServerError, "同步网关失败: "+err.Error())
+				return
+			}
 		}
 		writeJSON(w, map[string]any{"status": "ok"})
 	}
@@ -440,6 +456,12 @@ func (m *Manager) BatchStartHandler() http.HandlerFunc {
 		res := opResult(m.BatchStart(m.Run(), toStart))
 		res.Skipped = skipped
 		res.SkippedCount = len(skipped)
+		if len(toStart) > 0 {
+			if err := m.Gateway().sync(m.Run()); err != nil {
+				writeErr(w, http.StatusInternalServerError, "同步网关失败: "+err.Error())
+				return
+			}
+		}
 		writeJSON(w, res)
 	}
 }
@@ -457,7 +479,14 @@ func (m *Manager) BatchStopHandler() http.HandlerFunc {
 			writeErr(w, http.StatusBadRequest, "bad body")
 			return
 		}
-		writeJSON(w, opm(m.BatchStop(m.Run(), req.Names)))
+		res := opm(m.BatchStop(m.Run(), req.Names))
+		if len(req.Names) > 0 {
+			if err := m.Gateway().sync(m.Run()); err != nil {
+				writeErr(w, http.StatusInternalServerError, "同步网关失败: "+err.Error())
+				return
+			}
+		}
+		writeJSON(w, res)
 	}
 }
 
@@ -474,7 +503,14 @@ func (m *Manager) BatchDeleteHandler() http.HandlerFunc {
 			writeErr(w, http.StatusBadRequest, "bad body")
 			return
 		}
-		writeJSON(w, opm(m.BatchDelete(m.Run(), req.Names)))
+		res := opm(m.BatchDelete(m.Run(), req.Names))
+		if len(req.Names) > 0 {
+			if err := m.Gateway().sync(m.Run()); err != nil {
+				writeErr(w, http.StatusInternalServerError, "同步网关失败: "+err.Error())
+				return
+			}
+		}
+		writeJSON(w, res)
 	}
 }
 

@@ -84,7 +84,7 @@ func NewGateway(m *Manager, port uint16) *Gateway {
 }
 
 // ApplyKey 更新网关密钥并立即生效：更新内存密码，若网关子进程正在运行则热重启
-//（stopChild + startChild 以新密钥拉起；不触碰任何实例）。
+// （stopChild + startChild 以新密钥拉起；不触碰任何实例）。
 func (g *Gateway) ApplyKey(pwd string, runner Runner) error {
 	if runner == nil {
 		runner = &realRunner{}
@@ -104,7 +104,7 @@ func (g *Gateway) ApplyKey(pwd string, runner Runner) error {
 }
 
 // ApplyPort 更新网关监听端口并立即生效：更新内存端口，若网关子进程正在运行则热重启
-//（stopChild + startChild 以新端口拉起；不触碰任何实例）。
+// （stopChild + startChild 以新端口拉起；不触碰任何实例）。
 func (g *Gateway) ApplyPort(port uint16, runner Runner) error {
 	// 防御：0 = 未设置/非法，不应用（调用方应先经 managerGatewayPort 解析出有效端口）。
 	if port == 0 {
@@ -238,7 +238,17 @@ func (g *Gateway) sync(runner Runner) error {
 	if len(ports) == 0 {
 		g.stopChild(runner)
 		g.clearModels()
-		return nil
+		// 清掉陈旧池配置：否则网关下次被拉起时仍会加载上一次的节点列表，
+		// 出现“实例都停了/换了，池里还是旧节点”的假切换来源。
+		cfg, err := g.m.buildRouterCfg(nil, map[uint16]string{}, g.RouteMode())
+		if err != nil {
+			return err
+		}
+		dir := g.gatewayDir()
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			return err
+		}
+		return WriteFileAtomic(filepath.Join(dir, "opencode2api.json"), cfg, 0o644)
 	}
 
 	cfg, err := g.m.buildRouterCfg(ports, portNames, g.RouteMode())
