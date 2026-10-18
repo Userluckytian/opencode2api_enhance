@@ -10,6 +10,8 @@ import (
 	"sort"
 	"strings"
 	"time"
+
+	"github.com/6Kmfi6HP/opencode2api/core/contract"
 )
 
 func chatCompletionsHandler(w http.ResponseWriter, r *http.Request) {
@@ -97,6 +99,11 @@ func chatCompletionsHandler(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// 选路埋点回流：厂商在 Chat/ChatStream 内经 ctx 上的 sink 回写决策快照与尝试链；
+	// 调用返回后读出写入 callRec（recordCall 前），供日志视图与离线策略挖掘。
+	instSink := contract.NewInstrumentSink()
+	callCtx = contract.WithInstrumentSink(callCtx, instSink)
+
 	if req.Stream {
 		// L6：进程级流并发上限——超限直接 503（defer 覆盖所有返回路径释放名额）。
 		if !tryAcquireStream() {
@@ -112,6 +119,7 @@ func chatCompletionsHandler(w http.ResponseWriter, r *http.Request) {
 		}
 		defer releaseStream()
 		upResp, status, hdr, proxyAddr, err := callOpenCodeAPIStream(callCtx, upstreamBody, req.Model, &auth)
+		callRec.Decision, callRec.Attempts = instSink.Snapshot()
 		callRec.Nodes = append(callRec.Nodes, proxyAddr)
 		if err != nil || status < 200 || status >= 300 {
 			callRec.Status = "fail"
@@ -143,8 +151,9 @@ func chatCompletionsHandler(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Connection", "keep-alive")
 		w.WriteHeader(http.StatusOK)
 		// 流内超时 + 断点续写切换（阶段1验证过的核心逻辑）
-		res := streamWithResume(w, r, upstreamBody, req.Model, auth, upResp, proxyAddr, keepReasoning, &callRec)
+		res := streamWithResume(w, r.WithContext(callCtx), upstreamBody, req.Model, auth, upResp, proxyAddr, keepReasoning, &callRec)
 		callRec.DurationMS = time.Since(startTime).Milliseconds()
+		callRec.Decision, callRec.Attempts = instSink.Snapshot()
 		if autoDec == nil {
 			recordModelFeedback(req.Model, lastNode(callRec), res.OK, callRec.DurationMS)
 		}
@@ -171,6 +180,7 @@ func chatCompletionsHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	respBody, status, hdr, proxyAddr, err := callOpenCodeAPI(callCtx, upstreamBody, req.Model, auth)
+	callRec.Decision, callRec.Attempts = instSink.Snapshot()
 	callRec.Nodes = append(callRec.Nodes, proxyAddr)
 	if err != nil || status < 200 || status >= 300 {
 		callRec.Status = "fail"

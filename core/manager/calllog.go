@@ -78,6 +78,12 @@ type CallLogRecord struct {
 	Pool *contract.PoolSnapshot `json:"pool,omitempty"`
 	// NodeState 本次失败节点的健康状态快照。
 	NodeState *contract.NodeState `json:"node_state,omitempty"`
+	// Decision 传输层本次选路决策快照。
+	Decision *contract.Decision `json:"decision,omitempty"`
+	// Attempts 本次请求的结构化尝试链。
+	Attempts []contract.Attempt `json:"attempts,omitempty"`
+	// PolicyVer 选路/冷却策略版本戳。
+	PolicyVer string `json:"policy_ver,omitempty"`
 }
 
 // StatusText 状态前缀（前端着色用）。

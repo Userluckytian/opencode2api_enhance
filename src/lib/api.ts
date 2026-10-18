@@ -384,6 +384,29 @@ export type CallLogRecord = {
     bad_count?: number
     cooldown_until?: string
   }
+  /** 选路决策快照（reason: healthy/cooldown_fallback/race_win/direct/none…） */
+  decision?: {
+    node: string
+    reason: string
+    candidate_count?: number
+    available_count?: number
+    cooling?: number
+    bad_quota?: number
+    bad_auth?: number
+    breaker_open?: number
+  }
+  /** 本次请求的结构化尝试链 */
+  attempts?: Array<{
+    node: string
+    status: number
+    error_class?: string
+    error_code?: string
+    duration_ms: number
+    retry_after_ms?: number
+    reason?: string
+  }>
+  /** 选路/冷却策略版本戳 */
+  policy_ver?: string
 }
 
 // ─── 统一网关（实例池） ─────────────────────────────────────────────

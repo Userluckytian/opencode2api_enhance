@@ -233,6 +233,10 @@ var rateLimitNodeCooldownSec atomic.Int64
 // 避免 1~9 条的短突发就把节点隔离很久）。
 const rateLimitBadThreshold = 5
 
+// rateLimitRetryAfterCapSec 上游 Retry-After 驱动的节点冷却封顶（Duration，600s）：
+// 尊重上游退避指示，但异常大的头不至于把节点锁死过久（比坏池 reset 上限同量级）。
+const rateLimitRetryAfterCapSec = 600 * time.Second
+
 func init() {
 	routeMode.Store("smart")
 	badPoolResetSec.Store(300)
@@ -385,6 +389,13 @@ func pickHealthyProxy(proxies []Socks5Proxy, start int) Socks5Proxy {
 //   - 其他失败：临时冷却（连接错→20s、429→45s、连续 3 次→2min）；
 //     链路类坏池节点探测失败 → 重新坏池（重置计时）。
 func markSocks5Result(addr string, status int, requestErr error) {
+	markSocks5ResultWithRetry(addr, status, requestErr, 0)
+}
+
+// markSocks5ResultWithRetry 与 markSocks5Result 同，但 429 时尊重上游 Retry-After：
+// retryAfterMS>0 时节点冷却取 max(默认 15s, Retry-After)，封顶 600s，避免被上游
+// 长时间锁死的同时优先按上游指示退避（比盲目 15s 后再踩雷更省额度）。
+func markSocks5ResultWithRetry(addr string, status int, requestErr error, retryAfterMS int64) {
 	if addr == "" {
 		return
 	}
@@ -422,6 +433,17 @@ func markSocks5Result(addr string, status int, requestErr error) {
 		if status == http.StatusTooManyRequests {
 			if s := rateLimitNodeCooldownSec.Load(); s > 0 {
 				cooldown = time.Duration(s) * time.Second
+			}
+			// 上游给了明确的 Retry-After：按其时长冷却（封顶 rateLimitRetryAfterCapSec，
+			// 防止一个异常大的头把节点锁死过久），取二者较大值。
+			if retryAfterMS > 0 {
+				ra := time.Duration(retryAfterMS) * time.Millisecond
+				if ra > rateLimitRetryAfterCapSec {
+					ra = rateLimitRetryAfterCapSec
+				}
+				if ra > cooldown {
+					cooldown = ra
+				}
 			}
 		}
 		state.until = time.Now().Add(cooldown)

@@ -164,6 +164,12 @@ type CallRecord struct {
 	Pool *contract.PoolSnapshot `json:"pool,omitempty"`
 	// NodeState 本次失败节点的健康状态快照。
 	NodeState *contract.NodeState `json:"node_state,omitempty"`
+	// Decision 传输层本次选路决策快照（healthy/cooldown_fallback/race_win/direct/none… + 池计数）。
+	Decision *contract.Decision `json:"decision,omitempty"`
+	// Attempts 本次请求的结构化尝试链（每节点/状态/耗时/错误码）。
+	Attempts []contract.Attempt `json:"attempts,omitempty"`
+	// PolicyVer 选路/冷却策略版本戳，用于对比策略调整前后效果。
+	PolicyVer string `json:"policy_ver,omitempty"`
 }
 
 func CallStatusText(rec CallRecord) string {
@@ -552,7 +558,10 @@ func recordCall(rec CallRecord) {
 		return
 	}
 	if rec.SchemaVersion == 0 {
-		rec.SchemaVersion = 2
+		rec.SchemaVersion = 3
+	}
+	if rec.PolicyVer == "" {
+		rec.PolicyVer = callPolicyVer
 	}
 	// 路由结论必须在下方「空节点兜底成『直连』」之前判定：Nodes 一旦被改写成
 	// 「直连」字符串，就再也分不出「本来就没有节点」与「节点名恰好叫直连」。

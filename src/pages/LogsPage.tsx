@@ -886,6 +886,25 @@ const ERR_CLASS_LABELS: Record<string, string> = {
   other: '其它',
 }
 
+const DECISION_LABELS: Record<string, string> = {
+  healthy: '健康选路',
+  cooldown_fallback: '冷却回退',
+  badpool_probe: '坏池探测',
+  race: '节点竞速',
+  direct: '直连',
+  none: '无可用节点',
+  legacy: '旧日志(无决策)',
+}
+
+/** 尝试链紧凑渲染：节点尾段:状态 → …；tooltip 给全量。 */
+function attemptsChain(r: CallLogRecord): string {
+  const a = r.attempts
+  if (!a || a.length === 0) return ''
+  return a
+    .map((x) => `${(x.node || '直连').split('@').pop() || '直连'}:${x.status}${x.duration_ms >= 1000 ? `(${(x.duration_ms / 1000).toFixed(1)}s)` : ''}`)
+    .join(' → ')
+}
+
 /** 错误分析视图：429 频率与恢复、错误码/类分布、失败时池快照、CSV 导出。
  *  优先用 schema_version=2 的结构化字段，旧记录回退到正则文本匹配。 */
 function ErrorAnalysisView({ logs }: { logs: CallLogRecord[] }) {
@@ -937,6 +956,8 @@ function ErrorAnalysisView({ logs }: { logs: CallLogRecord[] }) {
     const byClass = new Map<string, number>()
     const byCode = new Map<string, number>()
     const failClasses = new Map<string, number>()
+    const byDecision = new Map<string, number>()
+    const policyVers = new Map<string, number>()
     let poolAvail = 0
     let poolBad = 0
     let poolN = 0
@@ -946,6 +967,8 @@ function ErrorAnalysisView({ logs }: { logs: CallLogRecord[] }) {
       byNode.set(d.node, (byNode.get(d.node) || 0) + 1)
       byClass.set(d.classKey, (byClass.get(d.classKey) || 0) + 1)
       byCode.set(d.codeKey, (byCode.get(d.codeKey) || 0) + 1)
+      byDecision.set(d.r.decision?.reason || 'legacy', (byDecision.get(d.r.decision?.reason || 'legacy') || 0) + 1)
+      if (d.r.policy_ver) policyVers.set(d.r.policy_ver, (policyVers.get(d.r.policy_ver) || 0) + 1)
       if (d.r.pool) {
         poolAvail += d.r.pool.available
         poolBad += d.r.pool.bad_quota + d.r.pool.bad_auth + d.r.pool.bad_link
@@ -976,6 +999,8 @@ function ErrorAnalysisView({ logs }: { logs: CallLogRecord[] }) {
       byClass: [...byClass].sort((a, b) => b[1] - a[1]),
       byCode: [...byCode].sort((a, b) => b[1] - a[1]).slice(0, 10),
       failClasses: [...failClasses].sort((a, b) => b[1] - a[1]),
+      byDecision: [...byDecision].sort((a, b) => b[1] - a[1]),
+      policyVers: [...policyVers].sort((a, b) => b[1] - a[1]),
       poolAvail,
       poolBad,
       poolN,
@@ -994,13 +1019,14 @@ function ErrorAnalysisView({ logs }: { logs: CallLogRecord[] }) {
   const maxHour = Math.max(1, ...stats.hourly.map((h) => h[1]))
 
   const exportCsv = () => {
-    const head = ['ts', 'req_id', 'model', 'node', 'upstream_status', 'error_class', 'error_code', 'retry_after_ms', 'recovery_s', 'pool_available', 'pool_bad', 'err_msg']
+    const head = ['ts', 'req_id', 'model', 'node', 'upstream_status', 'error_class', 'error_code', 'retry_after_ms', 'recovery_s', 'pool_available', 'pool_bad', 'decision_reason', 'attempts', 'policy_ver', 'err_msg']
     const esc = (v: unknown) => `"${String(v ?? '').replace(/"/g, '""')}"`
     const lines = [head.join(',')]
     for (const d of [...stats.detail].reverse()) {
       const r = d.r
+      const atts = (r.attempts || []).map((a) => `${a.node || '直连'}:${a.status}${a.error_code ? '/' + a.error_code : ''}`).join('|')
       lines.push(
-        [r.ts, r.req_id, r.model, d.node, r.upstream_status ?? '', r.error_class ?? '', r.error_code ?? '', r.retry_after_ms ?? '', d.rec != null ? d.rec.toFixed(1) : '', r.pool?.available ?? '', r.pool ? r.pool.bad_quota + r.pool.bad_auth + r.pool.bad_link : '', r.err_msg ?? ''].map(esc).join(','),
+        [r.ts, r.req_id, r.model, d.node, r.upstream_status ?? '', r.error_class ?? '', r.error_code ?? '', r.retry_after_ms ?? '', d.rec != null ? d.rec.toFixed(1) : '', r.pool?.available ?? '', r.pool ? r.pool.bad_quota + r.pool.bad_auth + r.pool.bad_link : '', r.decision?.reason ?? '', atts, r.policy_ver ?? '', r.err_msg ?? ''].map(esc).join(','),
       )
     }
     const blob = new Blob(['' + lines.join('\n')], { type: 'text/csv;charset=utf-8' })
@@ -1012,7 +1038,7 @@ function ErrorAnalysisView({ logs }: { logs: CallLogRecord[] }) {
     URL.revokeObjectURL(url)
   }
 
-  const hasStructured = stats.detail.some((d) => d.r.schema_version === 2)
+  const hasStructured = stats.detail.some((d) => (d.r.schema_version ?? 0) >= 2)
 
   return (
     <div className="space-y-4">
@@ -1031,7 +1057,7 @@ function ErrorAnalysisView({ logs }: { logs: CallLogRecord[] }) {
           </button>
         </div>
         <div className="text-[12px] text-zinc-400 mb-4">
-          优先使用 call_log 的结构化字段（schema v2：error_class/error_code/upstream_status/retry_after_ms/pool）；旧记录回退文本匹配。可用于评估节点策略与离线挖掘。
+          优先使用 call_log 的结构化字段（schema v3：error_class/error_code/upstream_status/retry_after_ms/pool/decision/attempts/policy_ver）；旧记录回退文本匹配。可用于评估节点策略与离线挖掘。
         </div>
         <div className="flex flex-wrap gap-5 text-sm">
           <span className="text-zinc-600">总请求 <b className="text-zinc-900">{stats.total}</b></span>
@@ -1047,6 +1073,15 @@ function ErrorAnalysisView({ logs }: { logs: CallLogRecord[] }) {
         {stats.poolN > 0 && (
           <div className="mt-2 text-[12px] text-zinc-500">
             失败时池快照均值：可用 {Math.round(stats.poolAvail / stats.poolN)} · 坏池 {Math.round(stats.poolBad / stats.poolN)}（样本 {stats.poolN}）
+          </div>
+        )}
+        {stats.policyVers.length > 0 && (
+          <div className="mt-2 flex flex-wrap items-center gap-1.5 text-[12px] text-zinc-500">
+            <span>429 记录的策略版本：</span>
+            {stats.policyVers.map(([v, n]) => (
+              <span key={v} className="px-2 py-0.5 rounded-full bg-zinc-100 text-zinc-600 font-mono text-[11px]">{v} ×{n}</span>
+            ))}
+            <span className="text-zinc-400">（对比不同版本参数的 429 率与恢复时间即可离线调参）</span>
           </div>
         )}
       </div>
@@ -1115,6 +1150,30 @@ function ErrorAnalysisView({ logs }: { logs: CallLogRecord[] }) {
         </div>
       </div>
 
+      {/* 429 选路决策分布 */}
+      <div className="bg-white rounded-2xl border border-zinc-200 p-5">
+        <div className="text-[14px] font-semibold text-zinc-900 mb-3">429 选路决策分布</div>
+        {stats.byDecision.length === 0 ? (
+          <div className="py-8 text-center text-zinc-400 text-sm">暂无数据（旧日志无 decision 字段；新版本失败记录自带选路决策快照）</div>
+        ) : (
+          <table className="w-full text-[13px]">
+            <tbody>
+              {stats.byDecision.map(([reason, n]) => (
+                <tr key={reason} className="border-b border-zinc-50">
+                  <td className="py-1.5 pr-3 text-zinc-700 whitespace-nowrap">{DECISION_LABELS[reason] || reason}</td>
+                  <td className="py-1.5 pr-3 text-right tabular-nums w-16 text-zinc-600">{n}</td>
+                  <td className="py-1.5">
+                    <div className="h-1.5 bg-zinc-100 rounded-full overflow-hidden">
+                      <div className="h-full bg-indigo-400 rounded-full" style={{ width: `${(n / stats.n429) * 100}%` }} />
+                    </div>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
+      </div>
+
       {/* 429 按小时 */}
       <div className="bg-white rounded-2xl border border-zinc-200 p-5">
         <div className="text-[14px] font-semibold text-zinc-900 mb-3">429 按小时分布</div>
@@ -1172,7 +1231,7 @@ function ErrorAnalysisView({ logs }: { logs: CallLogRecord[] }) {
         {stats.detail.length === 0 ? (
           <div className="py-8 text-center text-zinc-400 text-sm">无 429 记录</div>
         ) : (
-          <table className="w-full text-[13px] min-w-[720px]">
+          <table className="w-full text-[13px] min-w-[960px]">
             <thead>
               <tr className="text-left text-[12px] text-zinc-500 border-b border-zinc-100">
                 <th className="py-2 pr-3 font-medium">时间</th>
@@ -1182,7 +1241,9 @@ function ErrorAnalysisView({ logs }: { logs: CallLogRecord[] }) {
                 <th className="py-2 pr-3 font-medium">错误码</th>
                 <th className="py-2 pr-3 font-medium text-right">Retry-After</th>
                 <th className="py-2 pr-3 font-medium text-right">恢复</th>
-                <th className="py-2 font-medium">池(可用/坏)</th>
+                <th className="py-2 pr-3 font-medium">池(可用/坏)</th>
+                <th className="py-2 pr-3 font-medium">决策</th>
+                <th className="py-2 font-medium">尝试链</th>
               </tr>
             </thead>
             <tbody>
@@ -1195,7 +1256,9 @@ function ErrorAnalysisView({ logs }: { logs: CallLogRecord[] }) {
                   <td className="py-1.5 pr-3 text-zinc-700 truncate max-w-[160px]" title={d.r.error_code}>{d.r.error_code ?? '—'}</td>
                   <td className="py-1.5 pr-3 text-right tabular-nums text-zinc-600">{d.r.retry_after_ms ? `${Math.round(d.r.retry_after_ms / 1000)}s` : '—'}</td>
                   <td className="py-1.5 pr-3 text-right tabular-nums">{d.rec != null ? <span className={d.rec <= 30 ? 'text-teal-600' : 'text-amber-600'}>{d.rec.toFixed(0)}s</span> : '—'}</td>
-                  <td className="py-1.5 text-zinc-600">{d.r.pool ? `${d.r.pool.available}/${d.r.pool.bad_quota + d.r.pool.bad_auth + d.r.pool.bad_link}` : '—'}</td>
+                  <td className="py-1.5 pr-3 text-zinc-600">{d.r.pool ? `${d.r.pool.available}/${d.r.pool.bad_quota + d.r.pool.bad_auth + d.r.pool.bad_link}` : '—'}</td>
+                  <td className="py-1.5 pr-3 whitespace-nowrap text-zinc-600">{d.r.decision ? (DECISION_LABELS[d.r.decision.reason] || d.r.decision.reason) : '—'}</td>
+                  <td className="py-1.5 text-zinc-500 text-[12px] truncate max-w-[260px]" title={attemptsChain(d.r)}>{attemptsChain(d.r) || '—'}</td>
                 </tr>
               ))}
             </tbody>

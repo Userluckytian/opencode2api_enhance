@@ -86,6 +86,8 @@ type Reply struct {
 	Status   int         // HTTP 状态码
 	Headers  http.Header // 响应头（透传安全头）
 	NodeAddr string      // 实际使用的出口节点地址（供统计/节点前缀；直连为空）
+	Attempts []Attempt   // 本次请求的结构化尝试链（可为空）
+	Decision *Decision   // 选路决策快照（可为空）
 }
 
 // Stream 是流式响应的封装：ReadCloser + 状态码 + 实际出口节点地址。
@@ -93,6 +95,8 @@ type Stream struct {
 	io.ReadCloser
 	Status   int
 	NodeAddr string
+	Attempts []Attempt // 本次请求的结构化尝试链（可为空）
+	Decision *Decision // 选路决策快照（可为空）
 }
 
 // Tier 描述一个请求所属层：免费层（通常走代理池）或付费层（直连）。
@@ -150,6 +154,11 @@ func (DirectTransport) Client(_ Tier, _ bool) (*http.Client, string) {
 
 // Mark 实现 Transport（无操作）。
 func (DirectTransport) Mark(string, int, error) {}
+
+// Pick 实现 Picker：直连固定返回 DefaultClient 与 direct 决策。
+func (DirectTransport) Pick(_ Tier, _ bool) (*http.Client, Decision) {
+	return http.DefaultClient, Decision{Reason: "direct"}
+}
 
 // ErrNoHealthyNode 免费层已配置代理但没有可用节点时的哨兵错误。
 var ErrNoHealthyNode = errors.New("no healthy proxy node")

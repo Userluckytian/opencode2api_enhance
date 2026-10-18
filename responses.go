@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/6Kmfi6HP/opencode2api/core/contract"
 	"github.com/6Kmfi6HP/opencode2api/core/protocol"
 )
 
@@ -870,6 +871,10 @@ func responsesHandler(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// 选路埋点回流：厂商经 ctx 上的 sink 回写决策快照与尝试链（与 chat_handler 同语义）。
+	instSink := contract.NewInstrumentSink()
+	callCtx = contract.WithInstrumentSink(callCtx, instSink)
+
 	if respReq.Stream {
 		// L6：进程级流并发上限——超限直接 503（defer 覆盖所有返回路径释放名额）。
 		if !tryAcquireStream() {
@@ -885,6 +890,7 @@ func responsesHandler(w http.ResponseWriter, r *http.Request) {
 		}
 		defer releaseStream()
 		upResp, status, hdr, proxyAddr, err := callOpenCodeAPIStream(callCtx, upstreamBody, chatReq.Model, &auth)
+		callRec.Decision, callRec.Attempts = instSink.Snapshot()
 		callRec.Nodes = append(callRec.Nodes, proxyAddr)
 		if err != nil || status < 200 || status >= 300 {
 			callRec.Status = "fail"
@@ -932,6 +938,7 @@ func responsesHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	respBody, status, hdr, proxyAddr, err := callOpenCodeAPI(callCtx, upstreamBody, chatReq.Model, auth)
+	callRec.Decision, callRec.Attempts = instSink.Snapshot()
 	callRec.Nodes = append(callRec.Nodes, proxyAddr)
 	if err != nil || status < 200 || status >= 300 {
 		callRec.Status = "fail"

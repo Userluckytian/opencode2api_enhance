@@ -189,6 +189,34 @@ type callResult struct {
 	status   int           // 最后一次 HTTP 状态（0 = 未获得响应）
 	headers  http.Header   // 最后一次响应头（仅非流式路径保留）
 	nodeAddr string        // 实际出口节点地址（直连为空）
+	decision contract.Decision
+	attempts []contract.Attempt
+}
+
+// markFn 是带 Retry-After 的结果上报函数（contract.MarkResult 的偏应用形态），
+// 由 call 构造并透传给 raceDo/raceMarkOutcome/raceDrain。
+type markFn = func(addr string, status int, reqErr error, retryAfterMS int64)
+
+// attemptLog 收集一次 call 的结构化尝试链：主循环与 raceDrain 收尾 goroutine
+// 共享，需加锁；snapshot 返回副本。
+type attemptLog struct {
+	mu   sync.Mutex
+	list []contract.Attempt
+}
+
+func (l *attemptLog) add(a contract.Attempt) {
+	l.mu.Lock()
+	l.list = append(l.list, a)
+	l.mu.Unlock()
+}
+
+func (l *attemptLog) snapshot() []contract.Attempt {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if len(l.list) == 0 {
+		return nil
+	}
+	return append([]contract.Attempt(nil), l.list...)
 }
 
 // call 是 Chat / ChatStream 的公共实现：同一套会话/认证/重试/401/端点语义。
@@ -230,6 +258,8 @@ func (v *Vendor) call(ctx context.Context, msg *contract.Message, streaming bool
 	var lastProxyAddr string
 	var lastErr error
 	var retryCount, retry401Count, retry429Count int
+	var decision contract.Decision
+	attemptsLog := &attemptLog{}
 
 	for retryCount <= maxRetries {
 		var up *http.Request
@@ -247,42 +277,61 @@ func (v *Vendor) call(ctx context.Context, msg *contract.Message, streaming bool
 		// （竞速候选由 raceDo 内部按候选派生 ctx，不在此列）。
 		up = up.WithContext(ctx)
 		tr := v.transport()
+		mark := func(addr string, status int, reqErr error, retryAfterMS int64) {
+			contract.MarkResult(tr, addr, status, reqErr, retryAfterMS)
+		}
 		// P2b 请求级竞速：首轮并行扇出 N 个候选，首个 2xx（流式 = 首个 chunk 到达）胜出。
 		// G1：付费层（TierPaid）跳过竞速直接走单发（与单发路径一致，付费 token 不走代理池扇出）。
 		racer, hasRacer := tr.(contract.Racer)
 		var client *http.Client
 		var resp *http.Response
 		var proxyAddr string
+		start := time.Now()
 		if retryCount == 0 && a.tier() == contract.TierFree && hasRacer && v.raceCopies() > 1 && !v.inRateLimitCooldown() {
-			resp, proxyAddr, err = v.raceDo(ctx, racer, up, streaming, a.tier(), v.raceCopies(), tr.Mark)
+			resp, proxyAddr, err = v.raceDo(ctx, racer, up, streaming, a.tier(), v.raceCopies(), mark, attemptsLog)
 			if err == nil && resp == nil {
 				// 竞速无候选：退化普通单发。
-				client, proxyAddr = tr.Client(a.tier(), streaming)
+				client, proxyAddr, decision = contract.PickTransport(tr, a.tier(), streaming)
+				start = time.Now()
 				resp, err = client.Do(up)
+			} else {
+				decision = contract.Decision{Node: proxyAddr, Reason: "race", CandidateCount: v.raceCopies()}
+				if pc, ok := tr.(contract.PoolCounter); ok {
+					decision.AvailableCount, decision.Cooling, decision.BadQuota, decision.BadAuth, decision.BreakerOpen = pc.PoolCounts()
+				}
 			}
 		} else {
-			client, proxyAddr = tr.Client(a.tier(), streaming)
+			client, proxyAddr, decision = contract.PickTransport(tr, a.tier(), streaming)
 			resp, err = client.Do(up)
 		}
+		elapsedMS := time.Since(start).Milliseconds()
 		if err != nil {
 			// G32：客户端断开（ctx.Canceled）不是节点链路失败——all-fail 竞速返回的
 			// Canceled 连带真实 addr 在此会被误标冷却/熔断，统一排除；真实网络错误仍标记。
 			if !errors.Is(err, context.Canceled) && !errors.Is(err, contract.ErrNoHealthyNode) {
-				tr.Mark(proxyAddr, 0, err)
+				mark(proxyAddr, 0, err, 0)
 			}
+			attemptsLog.add(contract.Attempt{
+				Node: proxyAddr, Status: 0, ErrorClass: "transport",
+				ErrorCode: contract.TruncateRunes(err.Error(), 120), DurationMS: elapsedMS,
+			})
 			lastErr = err
 			// 池空：不重试、不 Mark（addr 为空），映射为 503 no_healthy_node。
 			if errors.Is(err, contract.ErrNoHealthyNode) {
 				lastStatus = http.StatusServiceUnavailable
 				lastBody = []byte(`{"error":{"message":"no healthy proxy node","type":"no_healthy_node"}}`)
 				lastProxyAddr = ""
+				decision.Reason = "none"
 				break
 			}
 			retryCount++
 			continue
 		}
 		if resp.StatusCode >= 200 && resp.StatusCode < 300 {
-			tr.Mark(proxyAddr, resp.StatusCode, nil)
+			mark(proxyAddr, resp.StatusCode, nil, 0)
+			attemptsLog.add(contract.Attempt{
+				Node: proxyAddr, Status: resp.StatusCode, DurationMS: elapsedMS, Reason: "ok",
+			})
 			// 诊断：记录上游响应 Content-Type，便于排查非 JSON/SSE 响应。
 			ct := resp.Header.Get("Content-Type")
 			if !strings.HasPrefix(ct, "application/json") && !strings.HasPrefix(ct, "text/event-stream") && ct != "" {
@@ -291,9 +340,9 @@ func (v *Vendor) call(ctx context.Context, msg *contract.Message, streaming bool
 			}
 			if streaming {
 				if useResponses {
-					return &callResult{stream: v.wrapResponsesSSE(resp.Body, modelID), status: resp.StatusCode, nodeAddr: proxyAddr}, nil
+					return &callResult{stream: v.wrapResponsesSSE(resp.Body, modelID), status: resp.StatusCode, nodeAddr: proxyAddr, decision: decision, attempts: attemptsLog.snapshot()}, nil
 				}
-				return &callResult{stream: resp.Body, status: resp.StatusCode, nodeAddr: proxyAddr}, nil
+				return &callResult{stream: resp.Body, status: resp.StatusCode, nodeAddr: proxyAddr, decision: decision, attempts: attemptsLog.snapshot()}, nil
 			}
 			b, readErr := io.ReadAll(resp.Body)
 			resp.Body.Close()
@@ -313,11 +362,19 @@ func (v *Vendor) call(ctx context.Context, msg *contract.Message, streaming bool
 			} else if isSSEBody(b) {
 				b = aggregateChatSSE(b, modelID)
 			}
-			return &callResult{body: b, status: resp.StatusCode, headers: resp.Header, nodeAddr: proxyAddr}, nil
+			return &callResult{body: b, status: resp.StatusCode, headers: resp.Header, nodeAddr: proxyAddr, decision: decision, attempts: attemptsLog.snapshot()}, nil
 		}
 		errBody, _ := io.ReadAll(resp.Body)
 		resp.Body.Close()
-		tr.Mark(proxyAddr, resp.StatusCode, nil)
+		retryAfter := contract.RetryAfterMS(resp.Header)
+		mark(proxyAddr, resp.StatusCode, nil, retryAfter)
+		// 本候选（单发 / 竞速全败返回的首个失败）由 call 统一上报与记录；
+		// 竞速其余落选候选已在 raceDo 内部逐个上报（G6），不在这里重复。
+		class, code, _ := contract.ClassifyUpstreamError(resp.StatusCode, errBody)
+		attemptsLog.add(contract.Attempt{
+			Node: proxyAddr, Status: resp.StatusCode, ErrorClass: class, ErrorCode: code,
+			DurationMS: elapsedMS, RetryAfterMS: retryAfter, Reason: "upstream_error",
+		})
 		slog.Error("opencode upstream error", "model", modelID, "status", resp.StatusCode, "body", string(errBody))
 		lastBody = errBody
 		lastStatus = resp.StatusCode
@@ -355,7 +412,7 @@ func (v *Vendor) call(ctx context.Context, msg *contract.Message, streaming bool
 		}
 		if streaming {
 			// 非可重试状态：把错误体包装成流返回（上游错误透传，不重试）。
-			return &callResult{stream: io.NopCloser(bytes.NewReader(lastBody)), status: lastStatus, nodeAddr: lastProxyAddr}, nil
+			return &callResult{stream: io.NopCloser(bytes.NewReader(lastBody)), status: lastStatus, nodeAddr: lastProxyAddr, decision: decision, attempts: attemptsLog.snapshot()}, nil
 		}
 		break
 	}
@@ -366,11 +423,11 @@ func (v *Vendor) call(ctx context.Context, msg *contract.Message, streaming bool
 	}
 	if streaming {
 		if lastStatus != 0 {
-			return &callResult{stream: io.NopCloser(bytes.NewReader(lastBody)), status: lastStatus, nodeAddr: lastProxyAddr}, nil
+			return &callResult{stream: io.NopCloser(bytes.NewReader(lastBody)), status: lastStatus, nodeAddr: lastProxyAddr, decision: decision, attempts: attemptsLog.snapshot()}, nil
 		}
 		return nil, fmt.Errorf("all models failed")
 	}
-	return &callResult{body: lastBody, status: lastStatus, headers: lastHeader, nodeAddr: lastProxyAddr}, lastErr
+	return &callResult{body: lastBody, status: lastStatus, headers: lastHeader, nodeAddr: lastProxyAddr, decision: decision, attempts: attemptsLog.snapshot()}, lastErr
 }
 
 // raceCopies 返回竞速并行数（配置上限 >0 生效，否则 1 = 关闭竞速）。
@@ -491,16 +548,18 @@ type prefixReadCloser struct {
 
 // raceOutcome 是竞速中单个候选的结果。
 type raceOutcome struct {
-	resp *http.Response
-	addr string
-	err  error
-	idx  int // 候选下标：赢家锁流后只取消其它候选，保留赢家流
+	resp   *http.Response
+	addr   string
+	err    error
+	idx    int   // 候选下标：赢家锁流后只取消其它候选，保留赢家流
+	durMS  int64 // 该候选从发出到落定的耗时（供尝试链）
 }
 
 // raceMarkOutcome 上报单个落选候选的最终结果（G6）：真实失败（非 2xx / 传输错误）才记；
 // 赢家与全败时返回给调用方的候选不上报（由 call 统一标记，避免重复）；
 // 被本竞速取消（ctx 已取消）的候选不算失败——它可能只是较慢的健康节点，误记会污染池健康。
-func raceMarkOutcome(mark func(string, int, error), o raceOutcome) {
+// 同时向 attempts 尝试链记录该候选（供埋点回流/离线挖掘）。
+func raceMarkOutcome(mark markFn, attempts *attemptLog, o raceOutcome) {
 	if o.err == nil && o.resp != nil && o.resp.StatusCode >= 200 && o.resp.StatusCode < 300 {
 		return
 	}
@@ -508,10 +567,17 @@ func raceMarkOutcome(mark func(string, int, error), o raceOutcome) {
 		return
 	}
 	status := 0
+	var retryAfterMS int64
 	if o.resp != nil {
 		status = o.resp.StatusCode
+		retryAfterMS = contract.RetryAfterMS(o.resp.Header)
 	}
-	mark(o.addr, status, o.err)
+	class, code, _ := contract.ClassifyUpstreamError(status, nil)
+	attempts.add(contract.Attempt{
+		Node: o.addr, Status: status, ErrorClass: class, ErrorCode: code,
+		DurationMS: o.durMS, RetryAfterMS: retryAfterMS, Reason: "race_loser",
+	})
+	mark(o.addr, status, o.err, retryAfterMS)
 }
 
 // raceDo 请求级竞速：并行扇出至多 copies 个候选出口，首个 2xx（流式 = 首个 chunk 到达）胜出，其余取消。
@@ -519,7 +585,7 @@ func raceMarkOutcome(mark func(string, int, error), o raceOutcome) {
 // 返回（nil, "", nil）表示无候选——调用方应退化普通单发。
 // tier 透传给 CandidateClients（G1：付费层直连，不进入代理池竞速）。
 // mark 上报落选候选的失败结果（G6：池健康/冷却可见；赢家与全败返回的候选由 call 统一标记，避免重复）。
-func (v *Vendor) raceDo(ctx context.Context, racer contract.Racer, req *http.Request, streaming bool, tier contract.Tier, copies int, mark func(string, int, error)) (*http.Response, string, error) {
+func (v *Vendor) raceDo(ctx context.Context, racer contract.Racer, req *http.Request, streaming bool, tier contract.Tier, copies int, mark markFn, attempts *attemptLog) (*http.Response, string, error) {
 	clients, addrs := racer.CandidateClients(tier, streaming, copies)
 	// G14：契约未强制 clients/addrs 等长——按下标访问（addrs[i]）前按短者截断，
 	// 防止某 transport 实现返回不等长列表时越界 panic 拖崩整个网关进程。
@@ -564,17 +630,19 @@ func (v *Vendor) raceDo(ctx context.Context, racer contract.Racer, req *http.Req
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()
+			t0 := time.Now()
+			dur := func() int64 { return time.Since(t0).Milliseconds() }
 			r := req.Clone(rctx[i])
 			if bodyBytes != nil {
 				r.Body = io.NopCloser(bytes.NewReader(bodyBytes))
 			}
 			resp, err := clients[i].Do(r)
 			if err != nil {
-				results <- raceOutcome{err: err, addr: addrs[i], idx: i}
+				results <- raceOutcome{err: err, addr: addrs[i], idx: i, durMS: dur()}
 				return
 			}
 			if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-				results <- raceOutcome{resp: resp, addr: addrs[i], idx: i}
+				results <- raceOutcome{resp: resp, addr: addrs[i], idx: i, durMS: dur()}
 				return
 			}
 			if streaming {
@@ -594,7 +662,7 @@ func (v *Vendor) raceDo(ctx context.Context, racer contract.Racer, req *http.Req
 					fbTimer.Stop()
 					if rerr != nil && n == 0 {
 						resp.Body.Close()
-						results <- raceOutcome{err: rerr, addr: addrs[i], idx: i}
+						results <- raceOutcome{err: rerr, addr: addrs[i], idx: i, durMS: dur()}
 						return
 					}
 				case <-rctx[i].Done():
@@ -602,13 +670,13 @@ func (v *Vendor) raceDo(ctx context.Context, racer contract.Racer, req *http.Req
 					fbTimer.Stop()
 					resp.Body.Close()
 					<-fbDone
-					results <- raceOutcome{err: rctx[i].Err(), addr: addrs[i], idx: i}
+					results <- raceOutcome{err: rctx[i].Err(), addr: addrs[i], idx: i, durMS: dur()}
 					return
 				case <-fbTimer.C:
 					// 候选首字节超时：关流解除挂起的读取，等读 goroutine 退出后上报。
 					resp.Body.Close()
 					<-fbDone
-					results <- raceOutcome{err: fmt.Errorf("stream first byte timeout"), addr: addrs[i], idx: i}
+					results <- raceOutcome{err: fmt.Errorf("stream first byte timeout"), addr: addrs[i], idx: i, durMS: dur()}
 					return
 				}
 				resp.Body = &prefixReadCloser{
@@ -616,7 +684,7 @@ func (v *Vendor) raceDo(ctx context.Context, racer contract.Racer, req *http.Req
 					Closer: resp.Body,
 				}
 			}
-			results <- raceOutcome{resp: resp, addr: addrs[i], idx: i}
+			results <- raceOutcome{resp: resp, addr: addrs[i], idx: i, durMS: dur()}
 		}(i)
 	}
 
@@ -647,9 +715,9 @@ func (v *Vendor) raceDo(ctx context.Context, racer contract.Racer, req *http.Req
 				}
 				// G6：赢家锁流前已落定的首个失败此时确认落选，补报（赢家由 call 统一标记）。
 				if firstFail != nil {
-					raceMarkOutcome(mark, *firstFail)
+					raceMarkOutcome(mark, attempts, *firstFail)
 				}
-				go raceDrain(&wg, results, mark)
+				go raceDrain(&wg, results, mark, attempts)
 				return o.resp, o.addr, nil
 			}
 			f := o
@@ -658,13 +726,13 @@ func (v *Vendor) raceDo(ctx context.Context, racer contract.Racer, req *http.Req
 				firstFail = &f
 			} else {
 				// G6：后续失败候选必为落选，立即上报池健康。
-				raceMarkOutcome(mark, o)
+				raceMarkOutcome(mark, attempts, o)
 			}
 			if atomic.AddInt32(&done, 1) == int32(len(clients)) {
 				cancelAll()
 				// 全败逐个上报：首个失败返回给 call()（由其统一标记），
 				// 其余候选已在循环中上报；raceDrain 收尾通道余量。
-				go raceDrain(&wg, results, mark)
+				go raceDrain(&wg, results, mark, attempts)
 				if firstFail.err != nil {
 					return nil, firstFail.addr, firstFail.err
 				}
@@ -675,9 +743,9 @@ func (v *Vendor) raceDo(ctx context.Context, racer contract.Racer, req *http.Req
 			cancelAll()
 			// G6：预算前已落定的失败补报（无返回候选，全部算落选）。
 			if firstFail != nil {
-				raceMarkOutcome(mark, *firstFail)
+				raceMarkOutcome(mark, attempts, *firstFail)
 			}
-			go raceDrain(&wg, results, mark)
+			go raceDrain(&wg, results, mark, attempts)
 			return nil, "", fmt.Errorf("race budget exceeded")
 		}
 	}
@@ -685,7 +753,7 @@ func (v *Vendor) raceDo(ctx context.Context, racer contract.Racer, req *http.Req
 
 // raceDrain 竞速收尾：等所有候选 goroutine 退出后关闭落选响应的 Body（防连接泄漏），
 // 并把余下落选候选的失败结果上报池健康（G6；主循环已上报的不在此列）。
-func raceDrain(wg *sync.WaitGroup, results chan raceOutcome, mark func(string, int, error)) {
+func raceDrain(wg *sync.WaitGroup, results chan raceOutcome, mark markFn, attempts *attemptLog) {
 	wg.Wait()
 	for {
 		select {
@@ -693,7 +761,7 @@ func raceDrain(wg *sync.WaitGroup, results chan raceOutcome, mark func(string, i
 			if o.resp != nil {
 				o.resp.Body.Close()
 			}
-			raceMarkOutcome(mark, o)
+			raceMarkOutcome(mark, attempts, o)
 		default:
 			return
 		}
@@ -718,7 +786,8 @@ func (v *Vendor) Chat(ctx context.Context, msg *contract.Message) (*contract.Rep
 	if res == nil {
 		return nil, err
 	}
-	return &contract.Reply{Body: res.body, Status: res.status, Headers: res.headers, NodeAddr: res.nodeAddr}, err
+	emitInstrument(ctx, res)
+	return &contract.Reply{Body: res.body, Status: res.status, Headers: res.headers, NodeAddr: res.nodeAddr, Attempts: res.attempts, Decision: &res.decision}, err
 }
 
 // ChatStream 实现 contract.Vendor（流式 SSE）。
@@ -730,7 +799,17 @@ func (v *Vendor) ChatStream(ctx context.Context, msg *contract.Message) (*contra
 	if res == nil {
 		return nil, err
 	}
-	return &contract.Stream{ReadCloser: res.stream, Status: res.status, NodeAddr: res.nodeAddr}, nil
+	emitInstrument(ctx, res)
+	return &contract.Stream{ReadCloser: res.stream, Status: res.status, NodeAddr: res.nodeAddr, Attempts: res.attempts, Decision: &res.decision}, nil
+}
+
+// emitInstrument 把本次决策与尝试链回写到 ctx 上的 sink（若有），供 main 侧 recordCall 读取。
+func emitInstrument(ctx context.Context, res *callResult) {
+	s := contract.SinkFromContext(ctx)
+	if s == nil || res == nil {
+		return
+	}
+	s.Record(res.decision, res.attempts)
 }
 
 // ---------------------------------------------------------------- Anthropic 兼容

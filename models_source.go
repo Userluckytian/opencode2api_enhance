@@ -71,6 +71,38 @@ func (rootTransport) Mark(proxyAddr string, status int, reqErr error) {
 	markSocks5Result(proxyAddr, status, reqErr)
 }
 
+// MarkWithRetry 实现 contract.MarkRetry：透传上游 Retry-After 到节点冷却。
+func (rootTransport) MarkWithRetry(proxyAddr string, status int, reqErr error, retryAfterMS int64) {
+	markSocks5ResultWithRetry(proxyAddr, status, reqErr, retryAfterMS)
+}
+
+// PoolCounts 实现 contract.PoolCounter：竞速等旁路决策回填池计数。
+func (rootTransport) PoolCounts() (available, cooling, badQuota, badAuth, breakerOpen int) {
+	snap := snapshotPoolHealth()
+	return snap.Available, snap.Cooling, snap.BadQuota, snap.BadAuth, snap.BreakerOpen
+}
+
+// Pick 实现 contract.Picker：在 Client 选路基础上补结构化决策快照（reason + 池计数），
+// 供埋点回流与离线策略挖掘。语义与 Client 完全一致（同一次选路，不重复挑选）。
+func (t rootTransport) Pick(tier contract.Tier, streaming bool) (*http.Client, contract.Decision) {
+	c, addr := t.Client(tier, streaming)
+	reason := "healthy"
+	switch {
+	case tier == contract.TierPaid:
+		reason = "direct"
+	case addr == "":
+		// 免费层无出口：显式配置过代理但池空 → none（NoCandidateClient）；否则直连。
+		if activeSocks5Configured() {
+			reason = "none"
+		} else {
+			reason = "direct"
+		}
+	}
+	dec := contract.Decision{Node: addr, Reason: reason}
+	dec.AvailableCount, dec.Cooling, dec.BadQuota, dec.BadAuth, dec.BreakerOpen = t.PoolCounts()
+	return c, dec
+}
+
 // ---- S5 contract.RaceTracker：每节点 in-flight 上报 + 健康节点规模 ----
 
 // HealthyNodeCount 实现 contract.RaceTracker：可竞速健康节点数（压力系数分母）。
