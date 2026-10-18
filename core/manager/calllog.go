@@ -13,6 +13,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/6Kmfi6HP/opencode2api/core/contract"
 )
 
 // ReadCallLog 的 max 语义：<=0 = 读取全部历史；>0 = 只取最近 max 条。
@@ -24,6 +26,11 @@ type CallLogEvent struct {
 	Node   string `json:"node,omitempty"`
 	Detail string `json:"detail,omitempty"`
 	At     string `json:"at,omitempty"`
+	// 结构化错误元数据（数据分析视图/离线挖掘）。
+	Status       int    `json:"status,omitempty"`
+	ErrorClass   string `json:"error_class,omitempty"`
+	ErrorCode    string `json:"error_code,omitempty"`
+	RetryAfterMS int64  `json:"retry_after_ms,omitempty"`
 }
 
 // CallLogRecord 单条调用记录（字段与 main 包 CallRecord 一致）。
@@ -55,6 +62,22 @@ type CallLogRecord struct {
 	KeyTail string `json:"key_tail,omitempty"`
 	// TraceID 分布式追踪 ID（阶段3），与 main 包 CallRecord.TraceID 镜像；omitempty 保持旧记录兼容。
 	TraceID string `json:"trace_id,omitempty"`
+	// SchemaVersion call_log 结构化字段版本（2 = 含错误分类/池快照）。
+	SchemaVersion int `json:"schema_version,omitempty"`
+	// UpstreamStatus 最后一次上游 HTTP 状态码（网络错误/未拿到响应为 0）。
+	UpstreamStatus int `json:"upstream_status,omitempty"`
+	// ErrorClass 错误大类：rate_limit / quota / auth / upstream / transport / protocol / other。
+	ErrorClass string `json:"error_class,omitempty"`
+	// ErrorCode 上游错误体中的 error.type / error.code。
+	ErrorCode string `json:"error_code,omitempty"`
+	// ErrorMessage 上游错误消息（截断）。
+	ErrorMessage string `json:"error_message,omitempty"`
+	// RetryAfterMS 上游 Retry-After 头的毫秒值（0 = 未提供）。
+	RetryAfterMS int64 `json:"retry_after_ms,omitempty"`
+	// Pool 失败时的池状态快照。
+	Pool *contract.PoolSnapshot `json:"pool,omitempty"`
+	// NodeState 本次失败节点的健康状态快照。
+	NodeState *contract.NodeState `json:"node_state,omitempty"`
 }
 
 // StatusText 状态前缀（前端着色用）。

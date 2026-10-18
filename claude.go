@@ -121,7 +121,7 @@ func claudeMessagesHandler(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		defer releaseStream()
-		upResp, status, _, proxyAddr, err := callOpenCodeAPIStream(callCtx, upstreamBody, chatReq.Model, &auth)
+		upResp, status, hdr, proxyAddr, err := callOpenCodeAPIStream(callCtx, upstreamBody, chatReq.Model, &auth)
 		callRec.Nodes = append(callRec.Nodes, proxyAddr)
 		if err != nil || status < 200 || status >= 300 {
 			callRec.Status = "fail"
@@ -133,7 +133,7 @@ func claudeMessagesHandler(w http.ResponseWriter, r *http.Request) {
 			}
 			callRec.ErrMsg = upstreamErrMsg(status, err, errBody)
 			callRec.DurationMS = time.Since(startTime).Milliseconds()
-			callRec.Events = append(callRec.Events, CallEvent{Type: "upstream_error", Node: proxyAddr, Detail: callRec.ErrMsg, At: time.Now()})
+			attachUpstreamError(&callRec, status, errBody, hdr, proxyAddr)
 			if autoDec == nil {
 				recordModelFeedback(chatReq.Model, proxyAddr, false, callRec.DurationMS)
 			}
@@ -159,13 +159,13 @@ func claudeMessagesHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	respBody, status, _, proxyAddr, err := callOpenCodeAPI(callCtx, upstreamBody, chatReq.Model, auth)
+	respBody, status, hdr, proxyAddr, err := callOpenCodeAPI(callCtx, upstreamBody, chatReq.Model, auth)
 	callRec.Nodes = append(callRec.Nodes, proxyAddr)
 	if err != nil || status < 200 || status >= 300 {
 		callRec.Status = "fail"
 		callRec.ErrMsg = upstreamErrMsg(status, err, respBody)
 		callRec.DurationMS = time.Since(startTime).Milliseconds()
-		callRec.Events = append(callRec.Events, CallEvent{Type: "upstream_error", Node: proxyAddr, Detail: callRec.ErrMsg, At: time.Now()})
+		attachUpstreamError(&callRec, status, respBody, hdr, proxyAddr)
 		if autoDec != nil && len(respBody) > 0 && isContextLimitError(respBody) {
 			learnContextFailure(displayModelName(autoDec.FinalModel), autoDec.EstTokens)
 		}

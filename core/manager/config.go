@@ -627,8 +627,8 @@ func (m *Manager) ConfigSet(key, value string) error {
 		if v < 0 {
 			return errors.New("quota_bad_pool_reset_sec 需 >= 0")
 		}
-		if v > 0 && (v < 60 || v > 1800) {
-			return errors.New("quota_bad_pool_reset_sec 需为 0（默认 600）或 60~1800")
+		if v > 0 && (v < 10 || v > 600) {
+			return errors.New("quota_bad_pool_reset_sec 需为 0（默认 60）或 10~600")
 		}
 		cfg.QuotaBadPoolResetSec = int(v)
 	case "pool_performance_mode":

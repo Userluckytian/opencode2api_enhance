@@ -145,11 +145,11 @@ func applyConfig(cfg AppConfig) {
 	}
 	if cfg.QuotaBadPoolResetSec > 0 {
 		v := cfg.QuotaBadPoolResetSec
-		if v < 60 {
-			v = 60
+		if v < 10 {
+			v = 10
 		}
-		if v > 1800 {
-			v = 1800
+		if v > 600 {
+			v = 600
 		}
 		quotaBadPoolResetSec.Store(int64(v))
 	}

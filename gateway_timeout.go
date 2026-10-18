@@ -15,6 +15,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/6Kmfi6HP/opencode2api/core/contract"
 )
 
 // ======================== 流内超时配置（区间随机） ========================
@@ -115,6 +117,11 @@ type CallEvent struct {
 	Node   string    `json:"node,omitempty"`
 	Detail string    `json:"detail,omitempty"`
 	At     time.Time `json:"at"`
+	// 结构化错误元数据（数据分析视图/离线挖掘；旧记录省略）。
+	Status       int    `json:"status,omitempty"`
+	ErrorClass   string `json:"error_class,omitempty"`
+	ErrorCode    string `json:"error_code,omitempty"`
+	RetryAfterMS int64  `json:"retry_after_ms,omitempty"`
 }
 
 type CallRecord struct {
@@ -141,6 +148,22 @@ type CallRecord struct {
 	RouteVerdict string `json:"route_verdict,omitempty"`
 	// TraceID 分布式追踪 ID（阶段3）：入站 X-Trace-ID 复用或由 req_id 生成，贯穿同一请求全链路日志与跨进程传播；omitempty 保持旧记录兼容。
 	TraceID string `json:"trace_id,omitempty"`
+	// SchemaVersion call_log 结构化字段版本（2 = 含错误分类/池快照）。
+	SchemaVersion int `json:"schema_version,omitempty"`
+	// UpstreamStatus 最后一次上游 HTTP 状态码（网络错误/未拿到响应为 0）。
+	UpstreamStatus int `json:"upstream_status,omitempty"`
+	// ErrorClass 错误大类：rate_limit / quota / auth / upstream / transport / protocol / other。
+	ErrorClass string `json:"error_class,omitempty"`
+	// ErrorCode 上游错误体中的 error.type / error.code（如 rate_limit_exceeded）。
+	ErrorCode string `json:"error_code,omitempty"`
+	// ErrorMessage 上游错误消息（截断，供人工排查）。
+	ErrorMessage string `json:"error_message,omitempty"`
+	// RetryAfterMS 上游 Retry-After 头的毫秒值（0 = 未提供）。
+	RetryAfterMS int64 `json:"retry_after_ms,omitempty"`
+	// Pool 失败时的池状态快照。
+	Pool *contract.PoolSnapshot `json:"pool,omitempty"`
+	// NodeState 本次失败节点的健康状态快照。
+	NodeState *contract.NodeState `json:"node_state,omitempty"`
 }
 
 func CallStatusText(rec CallRecord) string {
@@ -527,6 +550,9 @@ func initCallLog() {
 func recordCall(rec CallRecord) {
 	if !callLogEnabled {
 		return
+	}
+	if rec.SchemaVersion == 0 {
+		rec.SchemaVersion = 2
 	}
 	// 路由结论必须在下方「空节点兜底成『直连』」之前判定：Nodes 一旦被改写成
 	// 「直连」字符串，就再也分不出「本来就没有节点」与「节点名恰好叫直连」。

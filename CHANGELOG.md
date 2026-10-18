@@ -1,5 +1,15 @@
 # Changelog
 
+## v1.7.8-beta.5（2026-10-18，Beta）
+
+### 429 节点策略与可观测性（数据分析驱动）
+
+- 429 处理细化：单次 429 仅 **15 秒**临时冷却；连续 **5 次**才进额度坏池；坏池首次冷却 **60 秒**（60→120→240→480→600 封顶，+0~15s 抖动）。依据 2026-10-18 生产日志：429 恢复中位数约 14s、86% 在 60s 内、多为短突发。
+- 新增 `quota_bad_pool_reset_sec` 语义调整为默认 60（10~600），并补 `rateLimitNodeCooldownSec`（内部默认 15）。
+- call_log 新增结构化错误字段（`schema_version=2`）：`upstream_status / error_class / error_code / error_message / retry_after_ms / pool / node_state`；事件也带 `status/error_class/error_code/retry_after_ms`。旧记录不受影响。
+- 日志页新增 **「错误分析」** 视图：429 频率与恢复分布、错误码/类分布、失败时池快照、最近 429 明细，并支持 **CSV 导出**，便于策略调参与离线挖掘。
+- 新增回归测试：429 冷却/阈值/退避、错误分类、错误分析视图相关。
+
 ## v1.7.8-beta.4（2026-10-18，Beta）
 
 ### 节点池与切换日志

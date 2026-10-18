@@ -313,6 +313,10 @@ export type CallLogEvent = {
   node?: string
   detail?: string
   at?: string
+  status?: number
+  error_class?: string
+  error_code?: string
+  retry_after_ms?: number
 }
 
 /**
@@ -348,6 +352,38 @@ export type CallLogRecord = {
   serving_port?: string
   /** 实际使用的 key 末 4 位；写入侧尚未接线，当前恒为空 */
   key_tail?: string
+  /** call_log 结构化字段版本（2 = 含错误分类/池快照）；旧记录无此字段 */
+  schema_version?: number
+  /** 最后一次上游 HTTP 状态码（网络错误/未拿到响应为 0） */
+  upstream_status?: number
+  /** 错误大类：rate_limit / quota / auth / upstream / transport / protocol / other */
+  error_class?: string
+  /** 上游 error.type / error.code（如 rate_limit_exceeded） */
+  error_code?: string
+  /** 上游错误消息（截断） */
+  error_message?: string
+  /** 上游 Retry-After 头毫秒值（0 = 未提供） */
+  retry_after_ms?: number
+  /** 失败时的池快照 */
+  pool?: {
+    total: number
+    available: number
+    cooling: number
+    bad_quota: number
+    bad_auth: number
+    bad_link: number
+    breaker_open: number
+    selected?: string
+    selected_state?: string
+  }
+  /** 本次失败节点的健康状态 */
+  node_state?: {
+    addr: string
+    class?: string
+    reason?: string
+    bad_count?: number
+    cooldown_until?: string
+  }
 }
 
 // ─── 统一网关（实例池） ─────────────────────────────────────────────

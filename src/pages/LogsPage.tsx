@@ -5,6 +5,7 @@ import {
   ChevronDown,
   ChevronLeft,
   ChevronRight,
+  Download,
   Filter,
   Inbox,
   Loader2,
@@ -276,8 +277,8 @@ export default function LogsPage({
   const [onlyIssues, setOnlyIssues] = useState(false)
   // 按天筛选：'' = 全部日期
   const [dateFilter, setDateFilter] = useState('')
-  // 视图切换：日志列表 / 时段分析 / 节点分析
-  const [view, setView] = useState<'list' | 'hour' | 'node'>('list')
+  // 视图切换：日志列表 / 时段分析 / 节点分析 / 错误分析
+  const [view, setView] = useState<'list' | 'hour' | 'node' | 'error'>('list')
   const [expanded, setExpanded] = useState<Set<string>>(new Set())
   // 关键词过滤（main 功能 M4：匹配 model/path/err_msg/req_id）
   const [keyword, setKeyword] = useState('')
@@ -437,6 +438,7 @@ export default function LogsPage({
             ['list', '日志列表'],
             ['hour', '时段分析'],
             ['node', '节点分析'],
+            ['error', '错误分析'],
           ] as const
         ).map(([id, label]) => (
           <button
@@ -561,6 +563,8 @@ export default function LogsPage({
       {view === 'hour' && <HourAnalysisView logs={logs} />}
       {/* 节点分析（阶段4填充） */}
       {view === 'node' && <NodeAnalysisView logs={logs} />}
+      {/* 错误分析：429/错误码分布与恢复时间（结构化字段，供策略调参与离线挖掘） */}
+      {view === 'error' && <ErrorAnalysisView logs={logs} />}
     </div>
   )
 }
@@ -846,4 +850,358 @@ function NodeAnalysisView({ logs }: { logs: LogRecord[] }) {
 
 function ChevronUpIcon() {
   return <ChevronDown size={16} className="rotate-180" />
+}
+
+const lowerBound = (arr: number[], x: number): number => {
+  let lo = 0
+  let hi = arr.length
+  while (lo < hi) {
+    const mid = (lo + hi) >> 1
+    if ((arr[mid] as number) < x) lo = mid + 1
+    else hi = mid
+  }
+  return lo
+}
+
+const medianOf = (arr: number[]): number | null => {
+  if (arr.length === 0) return null
+  const a = [...arr].sort((x, y) => x - y)
+  const m = a.length >> 1
+  return a.length % 2 ? (a[m] as number) : ((a[m - 1] as number) + (a[m] as number)) / 2
+}
+
+const pctileOf = (arr: number[], p: number): number | null => {
+  if (arr.length === 0) return null
+  const a = [...arr].sort((x, y) => x - y)
+  return a[Math.min(a.length - 1, Math.floor((a.length - 1) * p))] as number
+}
+
+const ERR_CLASS_LABELS: Record<string, string> = {
+  rate_limit: '限流 (429)',
+  quota: '额度 (402)',
+  auth: '认证 (401/403)',
+  upstream: '上游 (5xx/EOF)',
+  transport: '连接/传输',
+  protocol: '协议',
+  other: '其它',
+}
+
+/** 错误分析视图：429 频率与恢复、错误码/类分布、失败时池快照、CSV 导出。
+ *  优先用 schema_version=2 的结构化字段，旧记录回退到正则文本匹配。 */
+function ErrorAnalysisView({ logs }: { logs: CallLogRecord[] }) {
+  const asc = useMemo(() => [...logs].sort((a, b) => String(a.ts).localeCompare(String(b.ts))), [logs])
+
+  const nodeOf = (r: CallLogRecord) => r.nodes?.slice(-1)[0] ?? ''
+  const blobOf = (r: CallLogRecord) =>
+    ((r.err_msg || '') + ' ' + (r.events || []).map((e) => e.detail || '').join(' ')).toLowerCase()
+  const is429 = (r: CallLogRecord): boolean => {
+    if (r.upstream_status === 429 || r.error_class === 'rate_limit') return true
+    if (r.error_code && /rate_limit|429|freeusagelimit/i.test(r.error_code)) return true
+    if ((r.upstream_status ?? 0) > 0 && r.upstream_status !== 429) return false
+    const b = blobOf(r)
+    return /429|rate.?limit|免费额度|额度用尽|rate_limit_exceeded|freeusagelimit/.test(b)
+  }
+  const classOf = (r: CallLogRecord): string => {
+    if (r.error_class) return r.error_class
+    const b = blobOf(r)
+    if (/429|rate.?limit|额度用尽|freeusagelimit/.test(b)) return 'rate_limit'
+    if (/401|403|认证|forbidden/.test(b)) return 'auth'
+    if (/402/.test(b)) return 'quota'
+    if (/50[0234]|unexpected eof|upstream|超时|timeout/.test(b)) return 'upstream'
+    if (/dial|connect|refused|i\/o timeout|连接/.test(b)) return 'transport'
+    return 'other'
+  }
+
+  const stats = useMemo(() => {
+    const okTimesAsc: number[] = []
+    for (const r of asc) {
+      if (r.status !== 'ok') continue
+      const t = Date.parse(r.ts)
+      if (Number.isNaN(t)) continue
+      okTimesAsc.push(t)
+    }
+    const p429 = asc.filter(is429)
+    const recAny: number[] = []
+    const detail = p429.map((r) => {
+      const t = Date.parse(r.ts)
+      const n = nodeOf(r) || '直连'
+      const arr = [...okTimesAsc].sort((a, b) => a - b)
+      const iAny = lowerBound(arr, t)
+      const rec = iAny < arr.length ? ((arr[iAny] as number) - t) / 1000 : null
+      if (rec != null) recAny.push(rec)
+      return { r, t, node: n, rec, hourKey: r.ts.slice(0, 13), classKey: classOf(r), codeKey: r.error_code || classOf(r) }
+    })
+    const hourly = new Map<string, number>()
+    const byModel = new Map<string, number>()
+    const byNode = new Map<string, number>()
+    const byClass = new Map<string, number>()
+    const byCode = new Map<string, number>()
+    const failClasses = new Map<string, number>()
+    let poolAvail = 0
+    let poolBad = 0
+    let poolN = 0
+    for (const d of detail) {
+      hourly.set(d.hourKey, (hourly.get(d.hourKey) || 0) + 1)
+      byModel.set(d.r.model || '未知', (byModel.get(d.r.model || '未知') || 0) + 1)
+      byNode.set(d.node, (byNode.get(d.node) || 0) + 1)
+      byClass.set(d.classKey, (byClass.get(d.classKey) || 0) + 1)
+      byCode.set(d.codeKey, (byCode.get(d.codeKey) || 0) + 1)
+      if (d.r.pool) {
+        poolAvail += d.r.pool.available
+        poolBad += d.r.pool.bad_quota + d.r.pool.bad_auth + d.r.pool.bad_link
+        poolN++
+      }
+    }
+    for (const r of asc) {
+      if (r.status === 'ok') continue
+      const c = classOf(r)
+      failClasses.set(c, (failClasses.get(c) || 0) + 1)
+    }
+    const sortedT = detail.map((d) => d.t).filter((x) => !Number.isNaN(x)).sort((a, b) => a - b)
+    let bursts = 0
+    let prev = -Infinity
+    for (const t of sortedT) {
+      if (t - prev > 30000) bursts++
+      prev = t
+    }
+    return {
+      total: asc.length,
+      n429: p429.length,
+      recAny,
+      bursts,
+      detail,
+      hourly: [...hourly].sort((a, b) => (a[0] < b[0] ? 1 : -1)).slice(0, 18),
+      byModel: [...byModel].sort((a, b) => b[1] - a[1]).slice(0, 8),
+      byNode: [...byNode].sort((a, b) => b[1] - a[1]).slice(0, 8),
+      byClass: [...byClass].sort((a, b) => b[1] - a[1]),
+      byCode: [...byCode].sort((a, b) => b[1] - a[1]).slice(0, 10),
+      failClasses: [...failClasses].sort((a, b) => b[1] - a[1]),
+      poolAvail,
+      poolBad,
+      poolN,
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [asc])
+
+  const recBuckets = [15, 30, 60, 120, 300]
+  const bucketCounts = recBuckets.map((b, i) =>
+    stats.recAny.filter((x) => (i === 0 ? x <= b : x > (recBuckets[i - 1] as number) && x <= b)).length,
+  )
+  const over300 = stats.recAny.filter((x) => x > 300).length
+  const p50 = medianOf(stats.recAny)
+  const p90 = pctileOf(stats.recAny, 0.9)
+  const within60 = stats.recAny.length ? stats.recAny.filter((x) => x <= 60).length / stats.recAny.length : null
+  const maxHour = Math.max(1, ...stats.hourly.map((h) => h[1]))
+
+  const exportCsv = () => {
+    const head = ['ts', 'req_id', 'model', 'node', 'upstream_status', 'error_class', 'error_code', 'retry_after_ms', 'recovery_s', 'pool_available', 'pool_bad', 'err_msg']
+    const esc = (v: unknown) => `"${String(v ?? '').replace(/"/g, '""')}"`
+    const lines = [head.join(',')]
+    for (const d of [...stats.detail].reverse()) {
+      const r = d.r
+      lines.push(
+        [r.ts, r.req_id, r.model, d.node, r.upstream_status ?? '', r.error_class ?? '', r.error_code ?? '', r.retry_after_ms ?? '', d.rec != null ? d.rec.toFixed(1) : '', r.pool?.available ?? '', r.pool ? r.pool.bad_quota + r.pool.bad_auth + r.pool.bad_link : '', r.err_msg ?? ''].map(esc).join(','),
+      )
+    }
+    const blob = new Blob(['' + lines.join('\n')], { type: 'text/csv;charset=utf-8' })
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = url
+    a.download = `errors-${new Date().toISOString().slice(0, 10)}.csv`
+    a.click()
+    URL.revokeObjectURL(url)
+  }
+
+  const hasStructured = stats.detail.some((d) => d.r.schema_version === 2)
+
+  return (
+    <div className="space-y-4">
+      {/* 概览 */}
+      <div className="bg-white rounded-2xl border border-zinc-200 p-5">
+        <div className="flex items-center justify-between mb-1">
+          <div className="text-[14px] font-semibold text-zinc-900">错误分析</div>
+          <button
+            type="button"
+            onClick={exportCsv}
+            disabled={stats.n429 === 0}
+            className="flex items-center gap-1.5 text-[12px] text-teal-700 bg-teal-50 border border-teal-100 rounded-lg px-3 py-1.5 hover:bg-teal-100 disabled:opacity-40"
+          >
+            <Download size={13} />
+            导出 429 CSV
+          </button>
+        </div>
+        <div className="text-[12px] text-zinc-400 mb-4">
+          优先使用 call_log 的结构化字段（schema v2：error_class/error_code/upstream_status/retry_after_ms/pool）；旧记录回退文本匹配。可用于评估节点策略与离线挖掘。
+        </div>
+        <div className="flex flex-wrap gap-5 text-sm">
+          <span className="text-zinc-600">总请求 <b className="text-zinc-900">{stats.total}</b></span>
+          <span className="text-red-600">429 次数 <b>{stats.n429}</b></span>
+          <span className="text-amber-600">429 率 <b>{stats.total ? ((stats.n429 / stats.total) * 100).toFixed(1) + '%' : '-'}</b></span>
+          <span className="text-zinc-600">恢复中位 <b>{p50 != null ? p50.toFixed(0) + 's' : '-'}</b> · p90 <b>{p90 != null ? p90.toFixed(0) + 's' : '-'}</b></span>
+          <span className="text-zinc-600">≤60s 恢复 <b>{within60 != null ? (within60 * 100).toFixed(0) + '%' : '-'}</b></span>
+          <span className="text-zinc-600">429 突发段 <b>{stats.bursts}</b></span>
+        </div>
+        {!hasStructured && stats.n429 > 0 && (
+          <div className="mt-3 text-[12px] text-zinc-400">当前记录多为旧版本日志（无结构化字段）；新版本失败会带 error_class/pool/node_state，分析会更精确。</div>
+        )}
+        {stats.poolN > 0 && (
+          <div className="mt-2 text-[12px] text-zinc-500">
+            失败时池快照均值：可用 {Math.round(stats.poolAvail / stats.poolN)} · 坏池 {Math.round(stats.poolBad / stats.poolN)}（样本 {stats.poolN}）
+          </div>
+        )}
+      </div>
+
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+        {/* 恢复时间分布 */}
+        <div className="bg-white rounded-2xl border border-zinc-200 p-5">
+          <div className="text-[14px] font-semibold text-zinc-900 mb-3">429 恢复时间分布</div>
+          {stats.recAny.length === 0 ? (
+            <div className="py-8 text-center text-zinc-400 text-sm">暂无可测量的恢复样本</div>
+          ) : (
+            <table className="w-full text-[13px]">
+              <tbody>
+                {recBuckets.map((b, i) => {
+                  const label = i === 0 ? `≤${b}s` : `>${recBuckets[i - 1] as number}s 且 ≤${b}s`
+                  const c = bucketCounts[i] as number
+                  return (
+                    <tr key={b} className="border-b border-zinc-50">
+                      <td className="py-1.5 pr-3 text-zinc-700">{label}</td>
+                      <td className="py-1.5 pr-3 text-right tabular-nums w-16 text-zinc-600">{c}</td>
+                      <td className="py-1.5">
+                        <div className="h-1.5 bg-zinc-100 rounded-full overflow-hidden">
+                          <div className="h-full bg-teal-500 rounded-full" style={{ width: `${(c / stats.recAny.length) * 100}%` }} />
+                        </div>
+                      </td>
+                    </tr>
+                  )
+                })}
+                <tr>
+                  <td className="py-1.5 pr-3 text-zinc-700">&gt;300s</td>
+                  <td className="py-1.5 pr-3 text-right tabular-nums w-16 text-zinc-600">{over300}</td>
+                  <td className="py-1.5">
+                    <div className="h-1.5 bg-zinc-100 rounded-full overflow-hidden">
+                      <div className="h-full bg-red-400 rounded-full" style={{ width: `${(over300 / stats.recAny.length) * 100}%` }} />
+                    </div>
+                  </td>
+                </tr>
+              </tbody>
+            </table>
+          )}
+        </div>
+
+        {/* 失败错误类分布 */}
+        <div className="bg-white rounded-2xl border border-zinc-200 p-5">
+          <div className="text-[14px] font-semibold text-zinc-900 mb-3">失败错误类分布</div>
+          {stats.failClasses.length === 0 ? (
+            <div className="py-8 text-center text-zinc-400 text-sm">无失败记录</div>
+          ) : (
+            <table className="w-full text-[13px]">
+              <thead>
+                <tr className="text-left text-[12px] text-zinc-500 border-b border-zinc-100">
+                  <th className="py-2 pr-3 font-medium">类型</th>
+                  <th className="py-2 text-right font-medium">次数</th>
+                </tr>
+              </thead>
+              <tbody>
+                {stats.failClasses.map(([c, n]) => (
+                  <tr key={c} className="border-b border-zinc-50">
+                    <td className="py-1.5 pr-3 text-zinc-700">{ERR_CLASS_LABELS[c] || c}</td>
+                    <td className="py-1.5 text-right tabular-nums text-zinc-600">{n}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          )}
+        </div>
+      </div>
+
+      {/* 429 按小时 */}
+      <div className="bg-white rounded-2xl border border-zinc-200 p-5">
+        <div className="text-[14px] font-semibold text-zinc-900 mb-3">429 按小时分布</div>
+        {stats.hourly.length === 0 ? (
+          <div className="py-8 text-center text-zinc-400 text-sm">无 429 记录</div>
+        ) : (
+          <table className="w-full text-[13px]">
+            <tbody>
+              {stats.hourly.map(([h, n]) => (
+                <tr key={h}>
+                  <td className="py-1 pr-3 text-zinc-700 whitespace-nowrap font-mono text-[12px]">{h.replace('T', ' ')}:00</td>
+                  <td className="py-1 pr-3 text-right tabular-nums w-12 text-zinc-600">{n}</td>
+                  <td className="py-1">
+                    <div className="h-1.5 bg-zinc-100 rounded-full overflow-hidden">
+                      <div className="h-full bg-amber-400 rounded-full" style={{ width: `${(n / maxHour) * 100}%` }} />
+                    </div>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
+      </div>
+
+      {/* 维度表：模型 / 节点 / 错误码 */}
+      <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
+        {[
+          { title: '429 按模型', rows: stats.byModel },
+          { title: '429 按节点', rows: stats.byNode },
+          { title: '错误码分布', rows: stats.byCode },
+        ].map((blk) => (
+          <div key={blk.title} className="bg-white rounded-2xl border border-zinc-200 p-5">
+            <div className="text-[14px] font-semibold text-zinc-900 mb-3">{blk.title}</div>
+            {blk.rows.length === 0 ? (
+              <div className="py-8 text-center text-zinc-400 text-sm">暂无数据</div>
+            ) : (
+              <table className="w-full text-[13px]">
+                <tbody>
+                  {blk.rows.map(([k, n]) => (
+                    <tr key={k} className="border-b border-zinc-50">
+                      <td className="py-1.5 pr-3 text-zinc-700 truncate max-w-[160px]" title={k}>{k}</td>
+                      <td className="py-1.5 text-right tabular-nums text-zinc-600">{n}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            )}
+          </div>
+        ))}
+      </div>
+
+      {/* 最近 429 明细 */}
+      <div className="bg-white rounded-2xl border border-zinc-200 p-5 overflow-x-auto">
+        <div className="text-[14px] font-semibold text-zinc-900 mb-3">最近 429 记录（最近 20 条）</div>
+        {stats.detail.length === 0 ? (
+          <div className="py-8 text-center text-zinc-400 text-sm">无 429 记录</div>
+        ) : (
+          <table className="w-full text-[13px] min-w-[720px]">
+            <thead>
+              <tr className="text-left text-[12px] text-zinc-500 border-b border-zinc-100">
+                <th className="py-2 pr-3 font-medium">时间</th>
+                <th className="py-2 pr-3 font-medium">模型</th>
+                <th className="py-2 pr-3 font-medium">节点</th>
+                <th className="py-2 pr-3 font-medium text-right">HTTP</th>
+                <th className="py-2 pr-3 font-medium">错误码</th>
+                <th className="py-2 pr-3 font-medium text-right">Retry-After</th>
+                <th className="py-2 pr-3 font-medium text-right">恢复</th>
+                <th className="py-2 font-medium">池(可用/坏)</th>
+              </tr>
+            </thead>
+            <tbody>
+              {[...stats.detail].reverse().slice(0, 20).map((d) => (
+                <tr key={d.r.req_id} className="border-b border-zinc-50">
+                  <td className="py-1.5 pr-3 whitespace-nowrap text-zinc-700">{fmtTime(d.r.ts)}</td>
+                  <td className="py-1.5 pr-3 truncate max-w-[160px]" title={d.r.model}>{d.r.model}</td>
+                  <td className="py-1.5 pr-3 font-mono text-[12px] text-zinc-600">{d.node}</td>
+                  <td className="py-1.5 pr-3 text-right tabular-nums text-zinc-600">{d.r.upstream_status ?? '—'}</td>
+                  <td className="py-1.5 pr-3 text-zinc-700 truncate max-w-[160px]" title={d.r.error_code}>{d.r.error_code ?? '—'}</td>
+                  <td className="py-1.5 pr-3 text-right tabular-nums text-zinc-600">{d.r.retry_after_ms ? `${Math.round(d.r.retry_after_ms / 1000)}s` : '—'}</td>
+                  <td className="py-1.5 pr-3 text-right tabular-nums">{d.rec != null ? <span className={d.rec <= 30 ? 'text-teal-600' : 'text-amber-600'}>{d.rec.toFixed(0)}s</span> : '—'}</td>
+                  <td className="py-1.5 text-zinc-600">{d.r.pool ? `${d.r.pool.available}/${d.r.pool.bad_quota + d.r.pool.bad_auth + d.r.pool.bad_link}` : '—'}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
+      </div>
+    </div>
+  )
 }

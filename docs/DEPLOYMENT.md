@@ -57,7 +57,7 @@ sudo systemctl status opencode2api
 | `health_restart_threshold` | int | 连续失败 N 次自动重启（0 = 不自动重启） |
 | `log_filter_keywords` | string | 调用日志过滤关键词（逗号分隔） |
 | `bad_pool_reset_sec` | int | 链路类坏池自动恢复间隔（秒，默认 300） |
-| `quota_bad_pool_reset_sec` | int | 额度类（429/402）坏池首次冷却秒数（默认 600，允许 60~1800） |
+| `quota_bad_pool_reset_sec` | int | 额度类（429/402）坏池首次冷却秒数（默认 60，允许 10~600；429 连续 5 次才进坏池） |
 
 环境变量（优先级高于配置文件）：
 

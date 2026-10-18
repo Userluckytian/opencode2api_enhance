@@ -216,19 +216,28 @@ const badThreshold = 3
 // G5：配置热重载原子写（applyConfig Store），请求路径无锁 Load；默认值写于 init。
 var badPoolResetSec atomic.Int64
 
-// quotaBadPoolResetSec 额度类坏池（402/429）首次冷却秒数（默认 600，允许 60~1800）。
+// quotaBadPoolResetSec 额度类坏池（402/429）首次冷却秒数（默认 60，允许 10~600）。
 // 额度类属于可恢复坏池：到期后放行 1 个恢复探测；再次 429 按 base×2^(badCount-阈值)
-// 递增，上限 1800s，并附加 0~60s 随机抖动避免全池同时探测。
+// 递增，上限 600s，并附加 0~15s 随机抖动避免全池同时探测。
+// 依据 2026-10-18 生产日志：429 恢复中位数约 14s、86% 在 60s 内，单次/首次不宜隔离过久。
 // G5：配置热重载原子写（applyConfig Store），请求路径无锁 Load；默认值写于 init。
 var quotaBadPoolResetSec atomic.Int64
 
 // quotaBadPoolResetMaxSec 额度类坏池冷却上限（秒）。
-const quotaBadPoolResetMaxSec = 1800
+const quotaBadPoolResetMaxSec = 600
+
+// rateLimitNodeCooldownSec 单次 429 的节点临时冷却（默认 15s），早于进坏池。
+var rateLimitNodeCooldownSec atomic.Int64
+
+// rateLimitBadThreshold 429 连续几次才进额度坏池（比通用 badThreshold 更宽容，
+// 避免 1~9 条的短突发就把节点隔离很久）。
+const rateLimitBadThreshold = 5
 
 func init() {
 	routeMode.Store("smart")
 	badPoolResetSec.Store(300)
-	quotaBadPoolResetSec.Store(600)
+	quotaBadPoolResetSec.Store(60)
+	rateLimitNodeCooldownSec.Store(15)
 }
 
 type socks5HealthState struct {
@@ -271,31 +280,35 @@ func badPoolResetDuration() time.Duration {
 	return time.Duration(badPoolResetSec.Load()) * time.Second
 }
 
-// quotaBadPoolResetDuration 额度类坏池冷却时长：base × 2^(badCount-阈值)，上限 1800s，附 0~60s 抖动。
+// quotaBadPoolResetDuration 额度类坏池冷却时长：base × 2^(badCount-阈值)，上限 600s，附 0~15s 抖动。
 func quotaBadPoolResetDuration(badCount int) time.Duration {
 	base := quotaBadPoolResetSec.Load()
 	if base <= 0 {
-		base = 600
+		base = 60
 	}
-	exp := badCount - badThreshold
+	exp := badCount - rateLimitBadThreshold
 	if exp < 0 {
 		exp = 0
 	}
-	// 防止溢出：badCount 极大时直接用上限。
-	mult := 1 << exp
-	if exp > 10 {
-		mult = 1 << 10
-	}
-	secs := int64(base) * int64(mult)
+	// 防止溢出：badCount 极大时直接用上限对应的倍数。
+	mult := 1 << minInt(exp, 10)
+	secs := base * int64(mult)
 	if secs > quotaBadPoolResetMaxSec {
 		secs = quotaBadPoolResetMaxSec
 	}
-	jitter := int64(rand.IntN(61)) // 0~60s
+	jitter := int64(rand.IntN(16)) // 0~15s
 	total := secs + jitter
-	if total > quotaBadPoolResetMaxSec+60 {
-		total = quotaBadPoolResetMaxSec + 60
+	if total > quotaBadPoolResetMaxSec+15 {
+		total = quotaBadPoolResetMaxSec + 15
 	}
 	return time.Duration(total) * time.Second
+}
+
+func minInt(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
 }
 
 // badPoolProbeReady 非消费式检查：链路类/额度类坏池已过期且探测配额未消费。
@@ -383,7 +396,11 @@ func markSocks5Result(addr string, status int, requestErr error) {
 	if reason, ok := badStatusCodes[status]; ok {
 		state := socks5Health[addr]
 		state.badCount++
-		if state.badCount >= badThreshold {
+		threshold := badThreshold
+		if status == http.StatusTooManyRequests {
+			threshold = rateLimitBadThreshold
+		}
+		if state.badCount >= threshold {
 			state.badReason = reason
 			state.badClass = badPoolClass(status)
 			switch state.badClass {
@@ -397,9 +414,17 @@ func markSocks5Result(addr string, status int, requestErr error) {
 			state.badProbeUsed = false
 			slog.Warn("proxy entered bad pool", "addr", addr, "reason", reason, "count", state.badCount, "class", state.badClass)
 		}
-		// 坏状态码也标记临时冷却（后续请求跳过，避免连续踩雷）
+		// 坏状态码也标记临时冷却（后续请求跳过，避免连续踩雷）。
+		// 429 用更短的 rateLimitNodeCooldownSec（默认 15s）：实测 429 多在十几秒内恢复，
+		// 单次/短突发不该被按 45s 隔离。
 		state.failures++
-		state.until = time.Now().Add(45 * time.Second)
+		cooldown := 45 * time.Second
+		if status == http.StatusTooManyRequests {
+			if s := rateLimitNodeCooldownSec.Load(); s > 0 {
+				cooldown = time.Duration(s) * time.Second
+			}
+		}
+		state.until = time.Now().Add(cooldown)
 		socks5Health[addr] = state
 	} else {
 		failed := requestErr != nil || status == http.StatusBadGateway ||
