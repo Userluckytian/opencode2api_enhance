@@ -72,7 +72,7 @@ func (r CallLogRecord) HasIssue() bool {
 	}
 	for _, e := range r.Events {
 		switch e.Type {
-		case "switch", "ttft_timeout", "silence_timeout", "stream_interrupt",
+		case "switch", "retry_same_node", "resume_retry", "ttft_timeout", "silence_timeout", "stream_interrupt",
 			"stream_error", "connect_error", "upstream_error", "all_failed":
 			return true
 		}

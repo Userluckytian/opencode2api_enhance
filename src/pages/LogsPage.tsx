@@ -36,7 +36,7 @@ const PAGE_SIZE = 100
 const hasIssue = (rec: CallLogRecord) => {
   if (rec.status !== 'ok') return true
   return (rec.events ?? []).some((e) =>
-    ['switch', 'ttft_timeout', 'silence_timeout', 'stream_interrupt', 'stream_error', 'connect_error', 'upstream_error', 'all_failed'].includes(e.type),
+    ['switch', 'retry_same_node', 'resume_retry', 'ttft_timeout', 'silence_timeout', 'stream_interrupt', 'stream_error', 'connect_error', 'upstream_error', 'all_failed'].includes(e.type),
   )
 }
 
@@ -52,6 +52,8 @@ const issueLabel = (rec: CallLogRecord): string => {
   const ev = rec.events ?? []
   if (ev.some((e) => e.type === 'all_failed')) return '全部节点失败'
   if (ev.some((e) => e.type === 'switch')) return '已切换节点'
+  if (ev.some((e) => e.type === 'retry_same_node')) return '同节点重试'
+  if (ev.some((e) => e.type === 'resume_retry')) return '续写重连'
   if (ev.some((e) => e.type === 'ttft_timeout')) return '首字超时'
   if (ev.some((e) => e.type === 'silence_timeout')) return '静默超时'
   if (ev.some((e) => e.type === 'stream_interrupt')) return '流中断'
@@ -83,6 +85,8 @@ const rowErrText = (rec: CallLogRecord): string | undefined => {
 const eventClass = (type: string): string => {
   switch (type) {
     case 'switch':
+    case 'retry_same_node':
+    case 'resume_retry':
       return 'bg-amber-100 text-amber-800'
     case 'ttft_timeout':
     case 'silence_timeout':
@@ -564,6 +568,8 @@ export default function LogsPage({
 /** 超时/错误类事件（用于分析统计） */
 const ISSUE_EVENT_TYPES = [
   'switch',
+  'retry_same_node',
+  'resume_retry',
   'ttft_timeout',
   'silence_timeout',
   'stream_interrupt',

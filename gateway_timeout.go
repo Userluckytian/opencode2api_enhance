@@ -656,6 +656,7 @@ func streamWithResume(w http.ResponseWriter, r *http.Request, upstreamBody []byt
 	// 当前活动的上游响应；attempt 0 用 initial（其代理地址为 initialProxyAddr），后续用重连结果
 	upResp := initial
 	proxyAddr := initialProxyAddr
+	lastNode := initialProxyAddr
 	doneSeen := false
 
 	for attempt <= maxResume {
@@ -674,7 +675,8 @@ func streamWithResume(w http.ResponseWriter, r *http.Request, upstreamBody []byt
 			}
 			triedAddrs[proxyAddr] = true
 			callRec.Events = append(callRec.Events, CallEvent{Type: "connect_ok", Node: proxyAddr, Detail: "reconnected", At: time.Now()})
-			callRec.Nodes = append(callRec.Nodes, proxyAddr)
+			noteResumeNode(callRec, lastNode, proxyAddr)
+			lastNode = proxyAddr
 		}
 
 		reader := bufio.NewReader(upResp)
@@ -1023,7 +1025,7 @@ func streamWithResume(w http.ResponseWriter, r *http.Request, upstreamBody []byt
 			return res
 		}
 
-		// 中断：记录切换事件，续写重试
+		// 中断：记录续写重连事件；是否真正切换节点由下一次重连结果决定。
 		res.Switched = true
 		attempt++
 		// 标记当前节点冷却（20s），强制下一次重连选择其他健康节点——
@@ -1039,12 +1041,12 @@ func streamWithResume(w http.ResponseWriter, r *http.Request, upstreamBody []byt
 			callRec.Events = append(callRec.Events, CallEvent{Type: "all_failed", Node: proxyAddr, Detail: res.ErrMsg, At: time.Now()})
 			return res
 		}
-		callRec.Events = append(callRec.Events, CallEvent{Type: "switch", Node: proxyAddr, Detail: fmt.Sprintf("switching (resume, accumulated=%d chars)", len(accumulated)), At: time.Now()})
+		callRec.Events = append(callRec.Events, CallEvent{Type: "resume_retry", Node: proxyAddr, Detail: fmt.Sprintf("stream interrupted; reconnecting (accumulated=%d chars)", len(accumulated)), At: time.Now()})
 		accumTail := accumulated
 		if len(accumTail) > 150 {
 			accumTail = "…" + accumTail[len(accumTail)-150:]
 		}
-		slog.Info("stream-resume: switching",
+		slog.Info("stream-resume: retrying",
 			"attempt", attempt, "reason", res.ErrMsg,
 			"model", model, "node", proxyAddr,
 			"accumulated_chars", len(accumulated), "saw_finish_reason", sawFinish,
@@ -1079,6 +1081,31 @@ func flushWriter(w http.ResponseWriter) {
 	if f, ok := w.(http.Flusher); ok {
 		f.Flush()
 	}
+}
+
+// noteResumeNode 记录续写重连的出口节点：
+//   - 与上一次相同 → 只记 retry_same_node，不重复追加 nodes（池内无备选时常见）；
+//   - 不同 → 追加 nodes 并记 switch。
+//
+// 返回是否发生了真实节点切换。
+func noteResumeNode(rec *CallRecord, lastNode, node string) bool {
+	if node == "" {
+		return false
+	}
+	if node == lastNode {
+		rec.Events = append(rec.Events, CallEvent{
+			Type: "retry_same_node", Node: node,
+			Detail: "no alternative node; retried on same node", At: time.Now(),
+		})
+		return false
+	}
+	rec.Nodes = append(rec.Nodes, node)
+	detail := "switched to " + node
+	if lastNode != "" {
+		detail = "switched from " + lastNode + " to " + node
+	}
+	rec.Events = append(rec.Events, CallEvent{Type: "switch", Node: node, Detail: detail, At: time.Now()})
+	return true
 }
 
 // buildResumeBody 供测试使用的续写 body 构造（独立于 streamWithResume 内部逻辑）
