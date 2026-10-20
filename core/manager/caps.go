@@ -11,9 +11,9 @@ import "strings"
 type udpMode int
 
 const (
-	udpNone   udpMode = iota // 协议无 UDP 通道（恒 false）
-	udpOptIn                  // 订阅带 udp 字段才为 true（默认 false）
-	udpForce                  // 协议本身走 UDP（恒 true，订阅关不掉）
+	udpNone  udpMode = iota // 协议无 UDP 通道（恒 false）
+	udpOptIn                // 订阅带 udp 字段才为 true（默认 false）
+	udpForce                // 协议本身走 UDP（恒 true，订阅关不掉）
 )
 
 // protoCap 单个协议的能力定义。canonical 用于键与 outbound type 输出。
@@ -29,23 +29,23 @@ type protoCap struct {
 // caps 表：canonical 名 → 能力。所有类型字面量名单的唯一定义处。
 // singbox=false 的行（ssr/snell）依然参与解析与导出，只是永不生成实例。
 var caps = map[string]protoCap{
-	"trojan":     {canonical: "trojan", singbox: true, udp: udpOptIn},
-	"vless":      {canonical: "vless", singbox: true, udp: udpOptIn},
-	"vmess":      {canonical: "vmess", singbox: true, udp: udpOptIn},
-	"ss":         {canonical: "ss", singbox: true, udp: udpOptIn},
-	"hysteria2":  {canonical: "hysteria2", singbox: true, udp: udpForce, forceTLS: true},
-	"hysteria":   {canonical: "hysteria", singbox: true, udp: udpForce, forceTLS: true},
-	"tuic":       {canonical: "tuic", singbox: true, udp: udpForce, forceTLS: true},
-	"anytls":     {canonical: "anytls", singbox: true, udp: udpOptIn, forceTLS: true},
-	"wireguard":  {canonical: "wireguard", singbox: true, udp: udpForce},
-	"http":       {canonical: "http", singbox: true, udp: udpNone, authless: true},
-	"https":      {canonical: "https", singbox: true, udp: udpNone, authless: true},
-	"socks":      {canonical: "socks5", singbox: true, udp: udpOptIn, authless: true},
-	"socks5":     {canonical: "socks5", singbox: true, udp: udpOptIn, authless: true},
-	"socks5h":    {canonical: "socks5", singbox: true, udp: udpOptIn, authless: true},
-	"socks4":     {canonical: "socks4", singbox: true, udp: udpNone, authless: true},
-	"ssr":        {canonical: "ssr", singbox: false, reason: "sing-box 内核不支持 SSR（上游已移除该协议），节点可导出到第三方客户端使用", udp: udpOptIn},
-	"snell":      {canonical: "snell", singbox: false, reason: "sing-box 内核不支持 snell，节点可导出到第三方客户端使用", udp: udpOptIn},
+	"trojan":    {canonical: "trojan", singbox: true, udp: udpOptIn},
+	"vless":     {canonical: "vless", singbox: true, udp: udpOptIn},
+	"vmess":     {canonical: "vmess", singbox: true, udp: udpOptIn},
+	"ss":        {canonical: "ss", singbox: true, udp: udpOptIn},
+	"hysteria2": {canonical: "hysteria2", singbox: true, udp: udpForce, forceTLS: true},
+	"hysteria":  {canonical: "hysteria", singbox: true, udp: udpForce, forceTLS: true},
+	"tuic":      {canonical: "tuic", singbox: true, udp: udpForce, forceTLS: true},
+	"anytls":    {canonical: "anytls", singbox: true, udp: udpOptIn, forceTLS: true},
+	"wireguard": {canonical: "wireguard", singbox: true, udp: udpForce},
+	"http":      {canonical: "http", singbox: true, udp: udpNone, authless: true},
+	"https":     {canonical: "https", singbox: true, udp: udpNone, authless: true},
+	"socks":     {canonical: "socks5", singbox: true, udp: udpOptIn, authless: true},
+	"socks5":    {canonical: "socks5", singbox: true, udp: udpOptIn, authless: true},
+	"socks5h":   {canonical: "socks5", singbox: true, udp: udpOptIn, authless: true},
+	"socks4":    {canonical: "socks4", singbox: true, udp: udpNone, authless: true},
+	"ssr":       {canonical: "ssr", singbox: false, reason: "sing-box 内核不支持 SSR（上游已移除该协议），节点可导出到第三方客户端使用", udp: udpOptIn},
+	"snell":     {canonical: "snell", singbox: false, reason: "sing-box 内核不支持 snell，节点可导出到第三方客户端使用", udp: udpOptIn},
 }
 
 // protoAliases 别名 → canonical（uniproxy canonicalProtocol 同款单表；含 singbox.go 里的历史写法）。

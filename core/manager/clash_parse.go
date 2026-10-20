@@ -40,19 +40,32 @@ func parseClashURL(base string) (uint16, string) {
 
 // parseClashYAML 解析 clash 文本 → ClashNode 列表（顶层 proxies 数组）。
 func parseClashYAML(content string) ([]ClashNode, error) {
+	return parseClashYAMLRep(content, nil)
+}
+
+// parseClashYAMLRep 同 parseClashYAML；字段不全的节点计 skipped 到 rep（阶段 X B2）。
+func parseClashYAMLRep(content string, rep *ParseReport) ([]ClashNode, error) {
 	root, err := yamlParse(content)
 	if err != nil {
 		return nil, err
 	}
 	var out []ClashNode
-	for _, item := range root.sliceOf("proxies") {
+	for i, item := range root.sliceOf("proxies") {
 		n := nodeFromYAML(item)
 		if n.Name == "" || n.Server == "" || n.Port == 0 || n.NodeType == "" {
+			if rep != nil {
+				rep.addSkip(clashItemWhere(i), "节点字段不全（name/server/port/type 缺失）被跳过")
+			}
 			continue
 		}
 		out = append(out, n)
 	}
 	return out, nil
+}
+
+// clashItemWhere 为 YAML proxies 第 i 项生成定位串（YAML 条目与行号非一一对应，用序号足够定位）。
+func clashItemWhere(i int) string {
+	return "proxies 第 " + strconv.Itoa(i+1) + " 项"
 }
 
 // nodeFromYAML 把 YAML map 转 ClashNode。
