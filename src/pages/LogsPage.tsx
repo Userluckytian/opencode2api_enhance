@@ -41,17 +41,51 @@ const hasIssue = (rec: CallLogRecord) => {
   )
 }
 
-/** 429/额度类错误关键字（命中 err_msg 或事件 detail → 「额度用尽」标签） */
-const isRateLimited = (rec: CallLogRecord) => {
-  const hay = [rec.err_msg || '', ...(rec.events ?? []).map((e) => e.detail || '')]
+/** 把记录与事件的结构化错误信息拼成小写文本（仅用于旧记录无结构化字段时的兜底） */
+const errBlobOf = (rec: CallLogRecord) =>
+  [
+    rec.err_msg || '',
+    rec.error_class || '',
+    rec.error_code || '',
+    ...(rec.events ?? []).flatMap((e) => [e.detail || '', e.error_class || '', e.error_code || '']),
+  ]
     .join(' ')
     .toLowerCase()
-  return /429|rate\s*limit|quota|insufficient|exceeded|额度|配额|用尽|限流/.test(hay)
+
+/**
+ * 429/额度类判定 → 「额度用尽」标签。
+ * 结构化字段优先（schema v2+：upstream_status/error_class/error_code），
+ * 有结构化信息时以其为准，绝不再做文本猜测；仅旧记录缺字段时才回退窄正则。
+ * 历史教训：旧版兜底正则含裸 `exceeded`，把 400 context_length_exceeded（上下文超长）
+ * 误标成「额度用尽」——兜底词必须只收「限流/额度」专属词，不收 exceeded/limit 这类泛词。
+ */
+const isRateLimited = (rec: CallLogRecord) => {
+  if (rec.upstream_status === 429 || rec.error_class === 'rate_limit') return true
+  if (rec.error_code && /rate_limit|free_usage|insufficient_quota|quota/.test(rec.error_code)) return true
+  // 流中断类故障的结构化信息挂在事件上（schema v2+），同样优先判定
+  if ((rec.events ?? []).some((e) => e.status === 429 || e.error_class === 'rate_limit')) return true
+  // 已有结构化错误信息（任一字段存在）→ 明确不是 429，不再文本猜测
+  if (rec.upstream_status != null || rec.error_class || rec.error_code) return false
+  return /429|rate.?limit|insufficient.?quota|free.?usage|额度用尽|配额用尽|限流/.test(errBlobOf(rec))
+}
+
+/** 上下文超长判定（400 context_length_exceeded）→ 「上下文超限」标签。
+ *  不是额度问题：换节点/换 key 无解，需要客户端压缩历史。 */
+const isContextOverflow = (rec: CallLogRecord) => {
+  if (rec.error_code && /context_length|max_context|context_window/.test(rec.error_code)) return true
+  if ((rec.events ?? []).some((e) => (e.error_code || '').includes('context_length'))) return true
+  if (rec.error_code) return false // error_code 已解析且不是 context 类
+  return /context_length_exceeded|maximum context length|context window/.test(errBlobOf(rec))
 }
 
 const issueLabel = (rec: CallLogRecord): string => {
   const ev = rec.events ?? []
-  if (ev.some((e) => e.type === 'all_failed')) return '全部节点失败'
+  if (ev.some((e) => e.type === 'all_failed')) {
+    // 曾发生真实节点切换 → 确实试了多个节点都失败；
+    // 全程只有 retry_same_node / 无 switch（池内无备选）→ 同一节点反复中断，
+    // 旧文案「全部节点失败」把人误导成「节点池挂了」，实际是单点抽风，语义分开。
+    return ev.some((e) => e.type === 'switch') ? '全部节点失败' : '单节点反复中断'
+  }
   if (ev.some((e) => e.type === 'switch')) return '已切换节点'
   if (ev.some((e) => e.type === 'retry_same_node')) return '同节点重试'
   if (ev.some((e) => e.type === 'resume_retry')) return '续写重连'
@@ -177,6 +211,14 @@ const LogRow = memo(function LogRow({
         {isRateLimited(rec) && (
           <span className="shrink-0 text-[11px] text-zinc-50 bg-zinc-800 rounded-md px-2 py-0.5">
             额度用尽
+          </span>
+        )}
+        {isContextOverflow(rec) && (
+          <span
+            className="shrink-0 text-[11px] text-purple-50 bg-purple-700 rounded-md px-2 py-0.5"
+            title="请求超过了模型最大上下文长度（400 context_length_exceeded），与额度/限流无关；需客户端压缩历史或换更大上下文的模型，换节点无解"
+          >
+            上下文超限
           </span>
         )}
         {rec.route_verdict === 'direct_config_missing' && verdict && (
@@ -883,6 +925,7 @@ const ERR_CLASS_LABELS: Record<string, string> = {
   upstream: '上游 (5xx/EOF)',
   transport: '连接/传输',
   protocol: '协议',
+  context_length: '上下文超长 (400)',
   other: '其它',
 }
 
@@ -921,8 +964,12 @@ function ErrorAnalysisView({ logs }: { logs: CallLogRecord[] }) {
     return /429|rate.?limit|免费额度|额度用尽|rate_limit_exceeded|freeusagelimit/.test(b)
   }
   const classOf = (r: CallLogRecord): string => {
+    if (r.error_class === 'other' && /context_length|max_context|context_window/i.test(r.error_code || '')) {
+      return 'context_length'
+    }
     if (r.error_class) return r.error_class
     const b = blobOf(r)
+    if (/context_length_exceeded|maximum context length/i.test(b)) return 'context_length'
     if (/429|rate.?limit|额度用尽|freeusagelimit/.test(b)) return 'rate_limit'
     if (/401|403|认证|forbidden/.test(b)) return 'auth'
     if (/402/.test(b)) return 'quota'

@@ -1072,7 +1072,14 @@ func streamWithResume(w http.ResponseWriter, r *http.Request, upstreamBody []byt
 		}
 		if attempt > maxResume {
 			res.OK = false
-			res.ErrMsg = "所有候选节点均失败，回复中断"
+			// 保留最后一次中断的真实根因（如 unexpected EOF / 超时）：
+			// 旧实现直接覆盖成通用文案，行级摘要看不到「到底是哪种失败」。
+			lastErr := res.ErrMsg
+			if lastErr != "" {
+				res.ErrMsg = "所有候选节点均失败，回复中断（最后错误: " + lastErr + "）"
+			} else {
+				res.ErrMsg = "所有候选节点均失败，回复中断"
+			}
 			callRec.Events = append(callRec.Events, CallEvent{Type: "all_failed", Node: proxyAddr, Detail: res.ErrMsg, At: time.Now()})
 			return res
 		}
@@ -1108,7 +1115,11 @@ func streamWithResume(w http.ResponseWriter, r *http.Request, upstreamBody []byt
 	}
 
 	res.OK = false
-	res.ErrMsg = "所有候选节点均失败，回复中断"
+	if res.ErrMsg != "" {
+		res.ErrMsg = "所有候选节点均失败，回复中断（最后错误: " + res.ErrMsg + "）"
+	} else {
+		res.ErrMsg = "所有候选节点均失败，回复中断"
+	}
 	return res
 }
 
