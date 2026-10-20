@@ -60,9 +60,12 @@ func StatusError(msg string) InstanceStatus {
 
 // Instance 单实例契约（JSON 字段与前端/Rust 一致）。
 type Instance struct {
-	Name        string         `json:"name"`
-	Port        uint16         `json:"port"`
-	Node        string         `json:"node"`
+	Name string `json:"name"`
+	Port uint16 `json:"port"`
+	Node string `json:"node"`
+	// NodeFP 创建时节点指纹（阶段 X B1）：机场改节点备注后，自动拉取按指纹识别
+	// 「同一节点换了名字」不再重复建实例；旧实例无此字段 → 回退 name|ip 匹配。
+	NodeFP      string         `json:"node_fp,omitempty"`
 	Password    string         `json:"password"`
 	IP          string         `json:"ip"`
 	SingboxPort uint16         `json:"singbox_port"`
@@ -115,7 +118,7 @@ type Manager struct {
 // New 创建管理器。
 func New(dataDir string) *Manager {
 	return &Manager{
-		paths:            ResolvePaths(dataDir),
+		paths:             ResolvePaths(dataDir),
 		subscribeFetchSem: make(chan struct{}, subscribeFetchConcurrency),
 	}
 }

@@ -40,19 +40,32 @@ func parseClashURL(base string) (uint16, string) {
 
 // parseClashYAML 解析 clash 文本 → ClashNode 列表（顶层 proxies 数组）。
 func parseClashYAML(content string) ([]ClashNode, error) {
+	return parseClashYAMLRep(content, nil)
+}
+
+// parseClashYAMLRep 同 parseClashYAML；字段不全的节点计 skipped 到 rep（阶段 X B2）。
+func parseClashYAMLRep(content string, rep *ParseReport) ([]ClashNode, error) {
 	root, err := yamlParse(content)
 	if err != nil {
 		return nil, err
 	}
 	var out []ClashNode
-	for _, item := range root.sliceOf("proxies") {
+	for i, item := range root.sliceOf("proxies") {
 		n := nodeFromYAML(item)
 		if n.Name == "" || n.Server == "" || n.Port == 0 || n.NodeType == "" {
+			if rep != nil {
+				rep.addSkip(clashItemWhere(i), "节点字段不全（name/server/port/type 缺失）被跳过")
+			}
 			continue
 		}
 		out = append(out, n)
 	}
 	return out, nil
+}
+
+// clashItemWhere 为 YAML proxies 第 i 项生成定位串（YAML 条目与行号非一一对应，用序号足够定位）。
+func clashItemWhere(i int) string {
+	return "proxies 第 " + strconv.Itoa(i+1) + " 项"
 }
 
 // nodeFromYAML 把 YAML map 转 ClashNode。
@@ -79,6 +92,11 @@ func nodeFromYAML(n *yamlNode) ClashNode {
 		PrivateKey:        n.string("private-key"), // wireguard 客户端私钥
 		PublicKey:         n.string("public-key"),  // wireguard 对端公钥
 		AuthStr:           n.string("auth-str"),    // hysteria v1 认证串
+		// 阶段 X：SSR 专有键（obfs 复用 Obfs 字段）与 udp 声明位（caps.nodeUDP 三态输入）。
+		SSRProtocol:   n.string("protocol"),
+		SSRProtoParam: percentDecode(n.string("protocol-param")),
+		SSRObfsParam:  percentDecode(n.string("obfs-param")),
+		UDP:           n.boolPtr("udp"),
 	}
 	c.Port = uint16(n.intVal("port"))
 	if ws := n.mapOf("ws-opts"); ws != nil {
@@ -88,6 +106,10 @@ func nodeFromYAML(n *yamlNode) ClashNode {
 	if ro := n.mapOf("reality-opts"); ro != nil {
 		c.RealityPublicKey = ro.string("public-key")
 		c.RealityShortID = ro.string("short-id")
+	}
+	// 阶段 X：grpc-opts（clash 键 grpc-service-name → GrpcService）。
+	if gop := n.mapOf("grpc-opts"); gop != nil {
+		c.GrpcService = gop.string("grpc-service-name")
 	}
 	// 兼容扁平写法 ws-headers: {Host: ...}（老式 clash 配置）。
 	if c.WSHeaders == nil {

@@ -181,7 +181,7 @@ export default function NodesPage({
             if (rr.error) {
               toast(`订阅已添加，但首次拉取失败：${rr.error}`, false)
             } else {
-              toast(`已导入 ${rr.imported} 个节点到节点池`, true)
+              toast(pullSummary(rr), true)
               setAddUrl('')
               setAddName('')
               setAddInterval(30)
@@ -202,7 +202,7 @@ export default function NodesPage({
         setAddInterval(30)
         await loadSubs()
       } else {
-        toast(`已导入 ${r.imported} 个节点到节点池`, true)
+        toast(pullSummary(r), true)
         setAddUrl('')
         setAddName('')
         setAddInterval(30)
@@ -219,12 +219,31 @@ export default function NodesPage({
     }
   }
 
-  // T3: 立即拉取该订阅（按源目标导入）
-  const handleImportSub = async (url: string) => {
+  // T3: 立即拉取该订阅（按源目标导入）。阶段 X：导入摘要带 usable/unsupported/issues；
+  // 删除保护闸拒绝时（rejected）提示用户可带 force 重试（confirm 二次确认）。
+  const pullSummary = (r: { imported: number; usable?: number; unsupported?: { type: string; count: number }[]; issues_total?: number; target: string }) => {
+    let msg = `订阅拉取成功：导入 ${r.imported} 个节点（${r.target}）`
+    if (r.usable != null && r.usable !== r.imported) {
+      const unsup = (r.unsupported ?? []).map((b) => `${b.type}×${b.count}`).join('，')
+      msg += `；可转发 ${r.usable}` + (unsup ? `（不可转发：${unsup}，保留可导出）` : '')
+    }
+    if (r.issues_total) {
+      msg += `；${r.issues_total} 处解析告警`
+    }
+    return msg
+  }
+  const handleImportSub = async (url: string, force = false) => {
     setImportingUrl(url)
     try {
-      const r = await api.subscriptionsImport(url)
-      toast(`订阅拉取成功：导入 ${r.imported} 个节点（${r.target}）`, true)
+      const r = await api.subscriptionsImport(url, undefined, force)
+      if (r.rejected) {
+        toast(r.error || '刷新被删除保护拦截：节点数骤减，已保留原节点', false)
+        if (window.confirm((r.error || '本次订阅节点数骤减') + '\n\n仍要强制刷新（用新结果覆盖旧节点）吗？')) {
+          await handleImportSub(url, true)
+        }
+      } else {
+        toast(pullSummary(r), true)
+      }
       await loadNodes()
       await loadSubs()
     } catch (e) {
@@ -613,7 +632,8 @@ export default function NodesPage({
   }
 
   // 组内「可选」节点 = 未实例化（已实例化节点的复选框禁用，不参与组全选）
-  const selectable = (list: NodeView[]) => list.filter((n) => !instanceNodes.has(n.name))
+  // 阶段 X：可选 = 未实例化 且 内核可转发（usable===false 的 SSR 等只展示/导出，不可建实例）。
+  const selectable = (list: NodeView[]) => list.filter((n) => !instanceNodes.has(n.name) && n.usable !== false)
 
   // 组头勾选态：按可选节点计算（组内全是已实例化时视为未全选）
   const groupSelected = (list: NodeView[]) => {
@@ -877,12 +897,12 @@ export default function NodesPage({
                         <div
                           key={n.name}
                           onClick={() => {
-                            if (!isInstanced) toggleNode(n.name)
+                            if (!isInstanced && n.usable !== false) toggleNode(n.name)
                           }}
                           className={clsx(
                             'flex items-center gap-2 px-4 py-2.5 pl-9 transition-colors',
                             // 整行可点（未实例化）才显示手型；已实例化禁选
-                            !isInstanced && 'cursor-pointer select-none',
+                            !isInstanced && n.usable !== false && 'cursor-pointer select-none',
                             // 选中：左侧竖条（inset shadow 不占布局）+ 名称加粗，不做整行大色块（节点挨着时全选会连成一片）
                             selected.has(n.name) && 'shadow-[inset_3px_0_0_0_#0d9488]',
                             // 未选中：hover 浅灰；已实例化（禁选）静息灰底
@@ -895,12 +915,22 @@ export default function NodesPage({
                             checked={selected.has(n.name)}
                             onChange={() => toggleNode(n.name)}
                             onClick={(e) => e.stopPropagation()}
-                            disabled={isInstanced}
+                            // 阶段 X：内核不可转发的节点不允许建实例（池内仍可见可导出），与「已实例化」同级禁选。
+                            disabled={isInstanced || n.usable === false}
+                            title={n.usable === false ? n.kernel_reason : undefined}
                             className="accent-teal-600 disabled:opacity-30"
                           />
                           <div className="flex-1 min-w-0">
                             <div className="flex items-center gap-2">
-                              <span className={clsx('text-[13px] truncate', selected.has(n.name) ? 'font-semibold text-teal-800' : 'text-zinc-800')}>{n.name}</span>
+                              <span className={clsx('text-[13px] truncate', selected.has(n.name) ? 'font-semibold text-teal-800' : n.usable === false ? 'text-zinc-400 line-through decoration-zinc-300' : 'text-zinc-800')}>{n.name}</span>
+                              {n.usable === false && (
+                                <span
+                                  className="inline-block px-1.5 py-0.5 rounded-full text-[10px] font-medium border bg-zinc-100 text-zinc-500 border-zinc-200 shrink-0"
+                                  title={n.kernel_reason || '当前内核不支持该协议；节点仍可导出到第三方客户端使用'}
+                                >
+                                  内核不支持
+                                </span>
+                              )}
                               {isInstanced && (
                                 <span
                                   className={clsx(

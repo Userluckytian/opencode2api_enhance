@@ -26,6 +26,7 @@ import (
 
 // SubscribeNode 订阅节点（轻量结构，可落为实例；raw 保留原始链接）。
 // JSON 字段与 Rust SubscribeNode（serde snake_case）一致。
+// 阶段 X：SSR/grpc/UDP/Fingerprint 为协议模块化补充，全部 omitempty——旧缓存无迁移读入。
 type SubscribeNode struct {
 	Name              string            `json:"name"`
 	Server            string            `json:"server"`
@@ -44,11 +45,21 @@ type SubscribeNode struct {
 	RealityPbk        string            `json:"reality_pbk,omitempty"`        // VLESS REALITY 公钥（pbk）
 	RealitySid        string            `json:"reality_sid,omitempty"`        // VLESS REALITY short-id（sid）
 	ClientFingerprint string            `json:"client_fingerprint,omitempty"` // TLS 指纹（fp，缺省 chrome）
-	Obfs              string            `json:"obfs,omitempty"`               // hysteria2 Salamander 混淆类型
+	Obfs              string            `json:"obfs,omitempty"`               // hysteria2 Salamander / SSR obfs 类型（plain/http_simple/…）
 	ObfsPassword      string            `json:"obfs_password,omitempty"`
-	SkipCertVerify    bool              `json:"skip_cert_verify,omitempty"`
-	Group             string            `json:"group,omitempty"` // 订阅来源分组名
-	Raw               string            `json:"raw"`
+	// —— SSR 专有（类型=ssr 时有值；sing-box 内核不可转发，解析/保存/导出全支持，见 caps.go）——
+	SSRProtocol    string `json:"ssr_protocol,omitempty"`       // 传输协议 auth_aes128_md5 等
+	SSRProtoParam  string `json:"ssr_protocol_param,omitempty"` // protocol-param
+	SSRObfsParam   string `json:"ssr_obfs_param,omitempty"`     // obfs-param
+	GrpcService    string `json:"grpc_service,omitempty"`       // grpc transport 的 service_name
+	UDP            bool   `json:"udp,omitempty"`                // caps.nodeUDP 三态判定结果（解析产物，非猜测）
+	SkipCertVerify bool   `json:"skip_cert_verify,omitempty"`
+	Group          string `json:"group,omitempty"` // 订阅来源分组名
+	Raw            string `json:"raw"`
+	// Fingerprint 节点身份指纹（uniproxy parser.go:386 同款思路：协议/服务器/凭据哈希，
+	// 排除显示名——机场改节点备注不再打断实例匹配与刷新 diff）。
+	// 解析入库时由 refreshSubscriptionFingerprints/导入路径填充；空 = 旧缓存未迁移（diff 回退 name 匹配）。
+	Fingerprint string `json:"fingerprint,omitempty"`
 }
 
 // SubscriptionMeta 订阅元信息（来自 HTTP 响应头，clash-verge-rev 同款解析；
@@ -71,23 +82,47 @@ func fetchSubscription(url string) ([]SubscribeNode, error) {
 
 // fetchSubscriptionWithMeta 拉取并解析订阅 URL，同时解析响应头元信息（订阅名/流量/到期）。
 func fetchSubscriptionWithMeta(url string) ([]SubscribeNode, SubscriptionMeta, error) {
+	nodes, meta, _, err := fetchSubscriptionWithMetaRep(url)
+	return nodes, meta, err
+}
+
+// fetchSubscriptionWithMetaRep 同 fetchSubscriptionWithMeta，额外返回解析问题汇总（阶段 X B2）。
+// 阶段 X T5 最小下载加固（uniproxy safehttp 思路裁剪版，只加两闸门不动传输栈）：
+// ① 重定向 ≤4 跳（订阅站跳登录门户常见，无上限则可能被 30x 链拖住）；
+// ② 响应体是 HTML 页（`<!DOCTYPE`/`<html`）→ 拒收并明确报错——否则会「拉取成功 0 节点」难排查。
+func fetchSubscriptionWithMetaRep(url string) ([]SubscribeNode, SubscriptionMeta, *ParseReport, error) {
 	client := &http.Client{Timeout: 20 * time.Second}
+	client.CheckRedirect = func(req *http.Request, via []*http.Request) error {
+		if len(via) > 4 {
+			return fmt.Errorf("重定向超过 4 跳（疑似跳转循环或登录门户）")
+		}
+		return nil
+	}
 	resp, err := client.Get(url)
 	if err != nil {
-		return nil, SubscriptionMeta{}, fmt.Errorf("订阅拉取失败: %v", err)
+		return nil, SubscriptionMeta{}, nil, fmt.Errorf("订阅拉取失败: %v", err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return nil, SubscriptionMeta{}, fmt.Errorf("订阅拉取失败: HTTP %d", resp.StatusCode)
+		return nil, SubscriptionMeta{}, nil, fmt.Errorf("订阅拉取失败: HTTP %d", resp.StatusCode)
 	}
 	meta := parseSubscriptionHeaders(resp.Header)
 	body, err := io.ReadAll(io.LimitReader(resp.Body, 32<<20))
 	if err != nil {
-		return nil, SubscriptionMeta{}, fmt.Errorf("读取订阅内容失败: %v", err)
+		return nil, SubscriptionMeta{}, nil, fmt.Errorf("读取订阅内容失败: %v", err)
 	}
-	nodes, err := parseSubscription(string(body))
+	if looksLikeHTMLPage(body) {
+		return nil, SubscriptionMeta{}, nil, fmt.Errorf("订阅地址返回的是网页而非订阅内容（常见原因：链接已失效/需要登录/该 URL 是订购页而非订阅直链）")
+	}
+	nodes, rep, err := parseSubscriptionWithReport(string(body))
 	meta.Profile = extractProfileName(string(body))
-	return nodes, meta, err
+	return nodes, meta, rep, err
+}
+
+// looksLikeHTMLPage 响应前 512 字节内出现 doctype/html 标签即判 HTML（大小写不敏感）。
+func looksLikeHTMLPage(b []byte) bool {
+	head := strings.ToLower(string(b[:min(len(b), 512)]))
+	return strings.Contains(head, "<!doctype html") || strings.Contains(head, "<html")
 }
 
 // parseSubscriptionHeaders 解析订阅响应头（clash-verge-rev 同款）：
@@ -250,16 +285,23 @@ func (m *Manager) groupNameFor(url string, meta SubscriptionMeta) string {
 // parseSubscription 解析订阅内容（自动识别 Clash YAML / sing-box JSON / base64 / 明文链接）。
 // 统一在出口过滤公告/信息伪节点（对齐 Rust is_info_pseudo_node，覆盖全部格式）。
 func parseSubscription(body string) ([]SubscribeNode, error) {
+	nodes, _, err := parseSubscriptionWithReport(body)
+	return nodes, err
+}
+
+// parseSubscriptionWithReport 同 parseSubscription，额外返回解析过程问题汇总（阶段 X B2）。
+func parseSubscriptionWithReport(body string) ([]SubscribeNode, *ParseReport, error) {
+	rep := &ParseReport{}
 	trimmed := strings.TrimSpace(strings.TrimPrefix(body, "\uFEFF"))
 	if trimmed == "" {
-		return nil, fmt.Errorf("订阅内容为空")
+		return nil, rep, fmt.Errorf("订阅内容为空")
 	}
 	var nodes []SubscribeNode
 	var err error
 	switch {
 	case strings.HasPrefix(trimmed, "proxies:") || (strings.Contains(trimmed, "proxies:") && strings.Contains(trimmed, "type:")):
 		var clash []ClashNode
-		clash, err = parseClashYAML(trimmed)
+		clash, err = parseClashYAMLRep(trimmed, rep)
 		if err == nil {
 			nodes = make([]SubscribeNode, 0, len(clash))
 			for i := range clash {
@@ -267,23 +309,23 @@ func parseSubscription(body string) ([]SubscribeNode, error) {
 			}
 		}
 	case strings.HasPrefix(trimmed, `{"outbounds"`) || strings.HasPrefix(trimmed, "{\n  \"outbounds\""):
-		nodes, err = parseSingboxJSON(trimmed)
+		nodes, err = parseSingboxJSONRep(trimmed, rep)
 	default:
 		if text, ok := decodeBase64Loose(trimmed); ok {
 			t := strings.TrimSpace(text)
 			if strings.HasPrefix(t, `{"outbounds"`) {
-				nodes, err = parseSingboxJSON(t)
+				nodes, err = parseSingboxJSONRep(t, rep)
 				break
 			}
 			if strings.Contains(t, "://") {
-				nodes, err = parsePlainLinks(t)
+				nodes, err = parsePlainLinksRep(t, rep)
 				break
 			}
 		}
-		nodes, err = parsePlainLinks(trimmed)
+		nodes, err = parsePlainLinksRep(trimmed, rep)
 	}
 	if err != nil {
-		return nil, err
+		return nil, rep, err
 	}
 	// 出口统一过滤公告/伪节点（官网/更新时间/剩余流量…，全角/半角冒号均覆盖，口径同 Clash）
 	filtered := nodes[:0]
@@ -293,9 +335,11 @@ func parseSubscription(body string) ([]SubscribeNode, error) {
 		}
 	}
 	if len(filtered) == 0 {
-		return nil, fmt.Errorf("订阅内容中未解析到任何可用节点")
+		return nil, rep, fmt.Errorf("订阅内容中未解析到任何可用节点")
 	}
-	return filtered, nil
+	// 阶段 X（B1）：统一出口补指纹身份（排除显示名；机场改名不断实例/diff）。
+	fillFingerprints(filtered)
+	return filtered, rep, nil
 }
 
 // subscribeFromClash ClashNode → SubscribeNode。
@@ -321,8 +365,9 @@ func subscribeFromClash(n ClashNode) SubscribeNode {
 	if n.TLS != nil {
 		tls = *n.TLS
 	}
-	switch strings.ToLower(n.NodeType) {
-	case "anytls", "hysteria2", "hy2", "tuic", "hysteria", "hy1":
+	// 强制 TLS 名单唯一数据源 caps.go（原内联 anytls/hysteria2/hy2/tuic/hysteria/hy1 并入；
+	// canonical 归一后 hy2/hy1 别名行为不变）。
+	if c, ok := capOf(n.NodeType); ok && c.forceTLS {
 		tls = true
 	}
 	return SubscribeNode{
@@ -345,9 +390,15 @@ func subscribeFromClash(n ClashNode) SubscribeNode {
 		ClientFingerprint: n.ClientFingerprint,
 		Obfs:              n.Obfs,
 		ObfsPassword:      n.ObfsPassword,
-		SkipCertVerify:    n.SkipCertVerify != nil && *n.SkipCertVerify,
-		Group:             n.Group,
-		Raw:               fmt.Sprintf("%s@%s:%d", n.NodeType, n.Server, n.Port),
+		// 阶段 X：SSR 三键直通 + UDP 能力（caps 三态：force 恒真 / opt-in 看声明 / none 恒假）。
+		SSRProtocol:    n.SSRProtocol,
+		SSRProtoParam:  n.SSRProtoParam,
+		SSRObfsParam:   n.SSRObfsParam,
+		GrpcService:    n.GrpcService,
+		UDP:            nodeUDP(n.NodeType, n.UDP != nil && *n.UDP),
+		SkipCertVerify: n.SkipCertVerify != nil && *n.SkipCertVerify,
+		Group:          n.Group,
+		Raw:            fmt.Sprintf("%s@%s:%d", n.NodeType, n.Server, n.Port),
 	}
 }
 
@@ -401,14 +452,22 @@ func decodeBase64Loose(s string) (string, bool) {
 
 // parsePlainLinks 逐行解析 vmess:// vless:// trojan:// ss:// hysteria2:// 链接。
 func parsePlainLinks(s string) ([]SubscribeNode, error) {
+	return parsePlainLinksRep(s, nil)
+}
+
+// parsePlainLinksRep 同 parsePlainLinks，坏行不杀好节点、逐条收集为 rep（阶段 X B2）。
+func parsePlainLinksRep(s string, rep *ParseReport) ([]SubscribeNode, error) {
 	var nodes []SubscribeNode
-	for _, line := range strings.Split(s, "\n") {
+	for i, line := range strings.Split(s, "\n") {
 		line = strings.TrimSpace(line)
 		if line == "" || strings.HasPrefix(line, "#") {
 			continue
 		}
 		if node, ok, err := parseURILink(line); err != nil {
-			// 对齐 Rust：跳过无法解析的行（仅记录，不中断）
+			// 对齐 Rust：跳过无法解析的行（仅记录，不中断）；rep 记账含行号。
+			if rep != nil {
+				rep.add(fmt.Sprintf("第 %d 行", i+1), "%v", err)
+			}
 			continue
 		} else if ok {
 			if isPseudoNode(node.Name) {
@@ -416,6 +475,11 @@ func parsePlainLinks(s string) ([]SubscribeNode, error) {
 				continue
 			}
 			nodes = append(nodes, node)
+		} else if rep != nil && strings.Contains(line, "://") {
+			// 形似链接但 scheme 不认识 / 缺关键段（parseURILink 返回 ok=false,err=nil）：
+			// 不静默丢，计入跳过（uniproxy「坏条目不杀好节点但绝不悄悄丢」口径）。
+			scheme := line[:strings.Index(line, "://")]
+			rep.addSkip(fmt.Sprintf("第 %d 行", i+1), "未识别的链接协议 %s://（跳过）", scheme)
 		}
 	}
 	if len(nodes) == 0 {
@@ -474,6 +538,11 @@ func parseURILink(line string) (SubscribeNode, bool, error) {
 	case strings.HasPrefix(line, "ss://"):
 		n, err := parseSS(strings.TrimPrefix(line, "ss://"))
 		return n, true, err
+	// ssr:// 解析入库（阶段 X）：节点池可见、可导出到第三方客户端；
+	// 但 caps.singbox=false——永不生成实例（导入摘要明示，非静默丢弃）。
+	case strings.HasPrefix(line, "ssr://"):
+		n, err := parseSSR(strings.TrimPrefix(line, "ssr://"))
+		return n, true, err
 	case strings.HasPrefix(line, "hysteria2://"):
 		n, err := parseHysteria2(strings.TrimPrefix(line, "hysteria2://"))
 		return n, true, err
@@ -526,6 +595,11 @@ func parseURILink(line string) (SubscribeNode, bool, error) {
 
 // parseSingboxJSON 解析 sing-box JSON 订阅（{"outbounds":[...]}；字段与 singbox outbound 同构逆向映射）。
 func parseSingboxJSON(body string) ([]SubscribeNode, error) {
+	return parseSingboxJSONRep(body, nil)
+}
+
+// parseSingboxJSONRep 同 parseSingboxJSON；未知类型/缺 server 的 outbound 计 skipped（阶段 X B2）。
+func parseSingboxJSONRep(body string, rep *ParseReport) ([]SubscribeNode, error) {
 	var doc map[string]any
 	if json.Unmarshal([]byte(body), &doc) != nil {
 		return nil, fmt.Errorf("解析 sing-box JSON 失败")
@@ -535,19 +609,29 @@ func parseSingboxJSON(body string) ([]SubscribeNode, error) {
 		return nil, fmt.Errorf("sing-box JSON 缺少 outbounds 数组")
 	}
 	var nodes []SubscribeNode
-	for _, o := range obs {
+	for oi, o := range obs {
 		ob, _ := o.(map[string]any)
 		if ob == nil {
 			continue
 		}
 		nodeType, _ := ob["type"].(string)
+		// sing-box 配置里的路由类 outbound（直连/拦截/DNS）不是代理节点，静默忽略不记账。
+		if nodeType == "direct" || nodeType == "block" || nodeType == "dns" {
+			continue
+		}
 		if nodeType == "" {
+			if rep != nil {
+				rep.addSkip(outboundWhere(oi), "outbound 缺 type 字段被跳过")
+			}
 			continue
 		}
 		tag, _ := ob["tag"].(string)
 		server, _ := ob["server"].(string)
 		port := jsonUint16(ob["server_port"])
 		if server == "" || port == 0 {
+			if rep != nil {
+				rep.addSkip(outboundWhere(oi), "%s 缺 server/server_port 被跳过", nodeType)
+			}
 			continue
 		}
 		tlsObj, _ := ob["tls"].(map[string]any)
@@ -562,11 +646,15 @@ func parseSingboxJSON(body string) ([]SubscribeNode, error) {
 		if utls, ok := tlsObj["utls"].(map[string]any); ok {
 			fingerprint, _ = utls["fingerprint"].(string)
 		}
-		var network, wsPath, flow string
+		var network, wsPath, flow, grpcService string
 		var wsHeaders map[string]string
 		if tr, ok := ob["transport"].(map[string]any); ok {
 			network, _ = tr["type"].(string)
 			wsPath, _ = tr["path"].(string)
+			// 阶段 X：grpc service_name 往返（消灭「导入再导出丢信息」循环）。
+			if network == "grpc" {
+				grpcService, _ = tr["service_name"].(string)
+			}
 			if hdrs, ok := tr["headers"].(map[string]any); ok {
 				hm := make(map[string]string, len(hdrs))
 				for k, v := range hdrs {
@@ -587,6 +675,11 @@ func parseSingboxJSON(body string) ([]SubscribeNode, error) {
 		}
 
 		var password, uuid, cipher, username string
+		var ssrProtocol, ssrProtoParam, ssrObfsParam string
+		// 别名收敛（hy2→hysteria2、shadowsocks→ss、shadowsocksr→ssr）；未知保留原值（报错文案可读）。
+		if canon := canonicalProtocol(nodeType); canon != "" {
+			nodeType = canon
+		}
 		switch nodeType {
 		case "vless":
 			uuid, _ = ob["uuid"].(string)
@@ -598,15 +691,35 @@ func parseSingboxJSON(body string) ([]SubscribeNode, error) {
 			if nodeType == "tuic" {
 				uuid, _ = ob["uuid"].(string)
 			}
-		case "shadowsocks":
+		case "ss":
 			password, _ = ob["password"].(string)
 			cipher, _ = ob["method"].(string)
 		case "wireguard":
 			password, _ = ob["private_key"].(string)
-		case "socks", "http":
+		case "socks5", "socks4", "http", "https":
 			password, _ = ob["password"].(string)
 			username, _ = ob["username"].(string)
+		// 补全既有缺口：hysteria v1 / anytls 此前落 default 被静默丢。
+		case "hysteria":
+			password, _ = ob["password"].(string)
+			if password == "" {
+				password, _ = ob["auth_str"].(string)
+			}
+		case "anytls":
+			password, _ = ob["password"].(string)
+		// 阶段 X：fork 版 sing-box（nekobox 等带 SSR 的衍生内核）导出的 JSON 订阅可含
+		// shadowsocksr outbound——解析入池（官方 sing-box 不可转发，caps 明示过滤）。
+		case "ssr":
+			password, _ = ob["password"].(string)
+			cipher, _ = ob["method"].(string)
+			ssrProtocol, _ = ob["protocol"].(string)
+			ssrProtoParam, _ = ob["protocol_param"].(string)
+			obfs, _ = ob["obfs"].(string)
+			ssrObfsParam, _ = ob["obfs_param"].(string)
 		default:
+			if rep != nil {
+				rep.addSkip(outboundWhere(oi), "未识别的 outbound 类型 %q 被跳过", nodeType)
+			}
 			continue
 		}
 
@@ -628,6 +741,7 @@ func parseSingboxJSON(body string) ([]SubscribeNode, error) {
 			Network:           network,
 			WsPath:            wsPath,
 			WsHeaders:         wsHeaders,
+			GrpcService:       grpcService,
 			Flow:              flow,
 			TLS:               tlsEnabled || realityPbk != "",
 			RealityPbk:        realityPbk,
@@ -635,6 +749,10 @@ func parseSingboxJSON(body string) ([]SubscribeNode, error) {
 			ClientFingerprint: fingerprint,
 			Obfs:              obfs,
 			ObfsPassword:      obfsPassword,
+			SSRProtocol:       ssrProtocol,
+			SSRProtoParam:     ssrProtoParam,
+			SSRObfsParam:      ssrObfsParam,
+			UDP:               nodeUDP(nodeType, false),
 			SkipCertVerify:    insecure,
 			Raw:               string(raw),
 		})
@@ -781,6 +899,138 @@ func parseTrojan(rest string) (SubscribeNode, error) {
 		TLS:       tls,
 		Raw:       "trojan://" + rest,
 	}, nil
+}
+
+// parseSSR 解析 ssr://（fancy-ssr 规范，兼容 mihomo/v2rayN 导出形态）：
+//
+//	ssr://base64url( host:port:protocol:cipher:password:base64url( obfs[/?k=v&...] ) )[/?外层k=v]#name
+//
+// 内层 query 键：obfs / obfsparam / protoparam / protocol / uid / sid / group / tls-auth /
+// udp-port / ssrport；obfsparam、protoparam、uid、sid、group 为 **二次编码**
+// （utf8 → percentEncode → base64url），解码顺序相反。
+// 阶段 X 定位：SSR 仅解析入库（节点池可见、可导出到第三方客户端）；
+// sing-box 内核不可转发（caps.singbox=false），实例生成端明示过滤。
+func parseSSR(rest string) (SubscribeNode, error) {
+	body, name := splitFragment(rest)
+	var outerQuery string
+	// 外层 /?k=v（少数导出把参数放外层；与内层合并，内层优先由后写覆盖决定）
+	if h, q, ok := strings.Cut(body, "/?"); ok {
+		body, outerQuery = h, q
+	} else if i := strings.IndexByte(body, '?'); i >= 0 {
+		body, outerQuery = body[:i], body[i+1:]
+	}
+	raw, ok := decodeBase64Loose(body)
+	if !ok {
+		return SubscribeNode{}, fmt.Errorf("ssr payload 非 base64")
+	}
+	parts := strings.SplitN(strings.TrimSpace(raw), ":", 6)
+	if len(parts) < 5 {
+		return SubscribeNode{}, fmt.Errorf("ssr payload 段数不足（期望 host:port:protocol:cipher:password[:inner]）")
+	}
+	server, port, err := splitHostPort(parts[0] + ":" + strings.TrimSpace(parts[1]))
+	if err != nil {
+		return SubscribeNode{}, fmt.Errorf("ssr host:port: %w", err)
+	}
+	protocol, cipher, password := parts[2], parts[3], parts[4]
+	obfs := "plain"
+	var protoParam, obfsParam, group, udpPort string
+	if len(parts) == 6 { // 第 6 段 base64url(obfs[/?query])（旧导出可能为空）
+		if inner, ok := decodeBase64Loose(parts[5]); ok {
+			if hq, q, ok := strings.Cut(inner, "/?"); ok {
+				obfs = hq
+				protoParam, obfsParam, group, udpPort = ssrInnerParams(q)
+			} else if inner != "" {
+				obfs = inner
+			}
+		}
+	}
+	// 外层参数并入（可覆盖内层）
+	if outerQuery != "" {
+		if p, o, g, u := ssrInnerParams(outerQuery); true {
+			if p != "" {
+				protoParam = p
+			}
+			if o != "" {
+				obfsParam = o
+			}
+			if g != "" {
+				group = g
+			}
+			if u != "" {
+				udpPort = u
+			}
+		}
+	}
+	if name == "" {
+		if g := ssrQueryValue(outerQuery, "remarks"); g != "" {
+			name = ssrDoubleDecode(g)
+		}
+	}
+	if name == "" {
+		name = server
+	}
+	udp := udpPort != "" && udpPort != "0"
+	return SubscribeNode{
+		Name:          name,
+		Server:        server,
+		Port:          port,
+		NodeType:      "ssr",
+		Password:      password,
+		Cipher:        cipher,
+		Obfs:          obfs,       // SSR 的 obfs 类型（plain/http_simple/tls1.2_ticket_auth…）
+		SSRProtocol:   protocol,   // 传输协议（origin/auth_aes128_md5/auth_chain_a…）
+		SSRProtoParam: protoParam, // protocol-param
+		SSRObfsParam:  obfsParam,  // obfs-param
+		Network:       "tcp",
+		UDP:           nodeUDP("ssr", udp),
+		TLS:           false,
+		Group:         group,
+		Raw:           "ssr://" + rest,
+	}, nil
+}
+
+// ssrInnerParams 提取内层 query 的 protoparam/obfsparam/group/udp-port（中文参数为
+// percentEncode→base64url 二次编码；单重编码/原文也容错接受）。
+func ssrInnerParams(q string) (protoParam, obfsParam, group, udpPort string) {
+	for _, pair := range strings.Split(q, "&") {
+		k, v, ok := strings.Cut(pair, "=")
+		if !ok {
+			continue
+		}
+		switch k {
+		case "protoparam", "protocol-param":
+			protoParam = ssrDoubleDecode(v)
+		case "obfsparam", "obfs-param":
+			obfsParam = ssrDoubleDecode(v)
+		case "group":
+			group = ssrDoubleDecode(v)
+		case "udp-port", "ssrport":
+			udpPort = v
+		}
+	}
+	return
+}
+
+// ssrQueryValue 取 query 里某键的原始值。
+func ssrQueryValue(q, key string) string {
+	for _, pair := range strings.Split(q, "&") {
+		if k, v, ok := strings.Cut(pair, "="); ok && k == key {
+			return v
+		}
+	}
+	return ""
+}
+
+// ssrDoubleDecode fancy-ssr 二次编码参数：先 base64url 再 percent；
+// 解不出可打印 UTF-8 时退回单层 percent（各机场/客户端实现不一致，取可用者）。
+func ssrDoubleDecode(v string) string {
+	if v == "" {
+		return ""
+	}
+	if b, ok := decodeBase64Loose(v); ok && utf8.ValidString(b) {
+		return percentDecode(b)
+	}
+	return percentDecode(v)
 }
 
 // parseSS ss://base64(method:password)@host:port#name 或 ss://base64(method:password@host:port)#name。
@@ -1310,6 +1560,7 @@ func (m *Manager) RemoveSubscriptionGroupNodes(group string) (int, error) {
 // toClashNode SubscribeNode → ClashNode（供 sing-box 生成与节点列表合并）。
 func toClashNode(n SubscribeNode) ClashNode {
 	skip := n.SkipCertVerify
+	udp := n.UDP
 	return ClashNode{
 		Name:              n.Name,
 		Server:            n.Server,
@@ -1336,6 +1587,13 @@ func toClashNode(n SubscribeNode) ClashNode {
 		PublicKey:         n.Cipher,   // wireguard: public-key 槽（singbox 生成用 cipher 回退）
 		AuthStr:           n.Password, // hysteria v1: auth-str 槽
 		Group:             n.Group,
+		// 阶段 X：SSR/grpc/UDP 反向直通（节点池展示与导出用；sing-box 生成端对 ssr 在 caps 拦截）。
+		SSRProtocol:   n.SSRProtocol,
+		SSRProtoParam: n.SSRProtoParam,
+		SSRObfsParam:  n.SSRObfsParam,
+		GrpcService:   n.GrpcService,
+		Fingerprint:   n.Fingerprint, // B1：节点池展示与实例匹配共用
+		UDP:           &udp,
 	}
 }
 
@@ -1356,19 +1614,82 @@ func (m *Manager) listSubscriptionNodes() []ClashNode {
 // ---------- 导入 ----------
 
 // importSubscriptionPool 仅拉取并缓存订阅节点（不创建实例），返回节点数与分组名。
+// 旧签名兼容包装：走带闸路径（force=false），拒绝时错误文案保持旧语义。
 func (m *Manager) importSubscriptionPool(url string) (int, string, error) {
-	nodes, meta, err := fetchSubscriptionWithMeta(url)
+	res, err := m.importSubscriptionPoolFull(url, false)
 	if err != nil {
-		return 0, "", err
+		if asRejected(err) {
+			// 兼容旧文案消费者：保留人话 message，同时错误链携带 *RefreshRejectedError 供判定。
+			return 0, res.Group, fmt.Errorf("订阅刷新被保护闸拦截（节点数骤减或为空），已保留原节点；确认无误可在界面上强制刷新: %w", err)
+		}
+		return 0, res.Group, err
 	}
-	if len(nodes) == 0 {
-		return 0, "", fmt.Errorf("订阅中未解析到任何节点")
+	return res.Imported, res.Group, nil
+}
+
+// UnsupportedBucket 不可转发类型聚合（导入摘要 / 节点 API 共用契约）。
+type UnsupportedBucket struct {
+	Type   string `json:"type"`
+	Count  int    `json:"count"`
+	Reason string `json:"reason"`
+}
+
+// SubscriptionImportResult 订阅导入摘要（阶段 X 契约：usable/unsupported 明示、issues 上报）。
+type SubscriptionImportResult struct {
+	Imported    int                 `json:"imported"`
+	Group       string              `json:"group,omitempty"`
+	Usable      int                 `json:"usable"`
+	Unsupported []UnsupportedBucket `json:"unsupported,omitempty"`
+	Issues      []ParseIssue        `json:"issues,omitempty"`
+	IssuesTotal int                 `json:"issues_total"`
+	Truncated   bool                `json:"issues_truncated,omitempty"`
+}
+
+// summarizeUsability 按 caps 统计可转发/不可转发桶。
+func summarizeUsability(nodes []SubscribeNode) (int, []UnsupportedBucket) {
+	usable := 0
+	byType := map[string]*UnsupportedBucket{}
+	var order []string
+	for _, n := range nodes {
+		ok, why := kernelUsable(n.NodeType)
+		if ok {
+			usable++
+			continue
+		}
+		b, seen := byType[n.NodeType]
+		if !seen {
+			b = &UnsupportedBucket{Type: n.NodeType, Reason: why}
+			byType[n.NodeType] = b
+			order = append(order, n.NodeType)
+		}
+		b.Count++
+	}
+	out := make([]UnsupportedBucket, 0, len(order))
+	for _, t := range order {
+		out = append(out, *byType[t])
+	}
+	return usable, out
+}
+
+// importSubscriptionPoolFull 带闸导入 + 摘要（阶段 X B2/B3/T4）：
+// 拉取 → 解析（issues 收集）→ 能力摘要 → shrink 闸写缓存（force 可控）。
+// 解析错误（闸一的一部分语义，见 saveSubscriptionCacheGroupedGuarded 注释）不阻断入库，
+// 只进摘要上报；骤减/空组（闸二）阻断并保留旧节点。
+func (m *Manager) importSubscriptionPoolFull(url string, force bool) (SubscriptionImportResult, error) {
+	nodes, meta, rep, err := fetchSubscriptionWithMetaRep(url)
+	if err != nil {
+		return SubscriptionImportResult{}, err
 	}
 	group := m.applyGroup(nodes, url, meta)
-	if err := m.saveSubscriptionCacheGrouped(nodes); err != nil {
-		return 0, "", err
+	res := SubscriptionImportResult{Imported: len(nodes), Group: group}
+	if rep != nil {
+		res.Issues, res.IssuesTotal, res.Truncated = rep.Issues, rep.Total, rep.Truncated
 	}
-	return len(nodes), group, nil
+	res.Usable, res.Unsupported = summarizeUsability(nodes)
+	if err := m.saveSubscriptionCacheGroupedGuarded(nodes, force); err != nil {
+		return res, err
+	}
+	return res, nil
 }
 
 // applyGroup 给节点标注订阅分组名（未标注的节点），返回分组名。
@@ -1408,6 +1729,47 @@ func (m *Manager) saveSubscriptionCacheGrouped(nodes []SubscribeNode) error {
 	return m.saveSubscriptionCacheLocked(append(keep, nodes...))
 }
 
+// saveSubscriptionCacheGroupedGuarded 带 shrink 保护闸（阶段 X B3，uniproxy imports.go:264-284 思路）：
+//   - 同一分组内，若按指纹 diff 的「将删除数」超过旧节点一半（或新结果为空）→ 拒绝写入
+//     （*RefreshRejectedError 类型），保留旧节点；force=true 越过。
+//
+// 与 uniproxy 的差异（刻意）：解析「非致命问题」（个别坏行/未知类型）不阻断写入——
+// 我们的存量订阅普遍含杂字段，照抄「任一错误全留旧」会把正常刷新大面积打挂；
+// 错误如实进导入摘要上报。致命解析失败（0 可用节点）在调用方 fetch 层已被 err 阻断，天然全留旧。
+// 手动粘贴导入（ImportLinks/本地文件）走无闸版本：那是用户显式的小批量编辑，不该被百分比误伤。
+func (m *Manager) saveSubscriptionCacheGroupedGuarded(nodes []SubscribeNode, force bool) error {
+	group := ""
+	if len(nodes) > 0 {
+		group = nodes[0].Group
+	}
+	if group == "" || force {
+		return m.saveSubscriptionCacheGrouped(nodes)
+	}
+	m.subscriptionCacheMu.Lock()
+	defer m.subscriptionCacheMu.Unlock()
+	old := m.loadSubscriptionCacheLocked()
+	var oldGroup []SubscribeNode
+	for _, n := range old {
+		if n.Group == group {
+			oldGroup = append(oldGroup, n)
+		}
+	}
+	if len(oldGroup) > 0 {
+		_, removed, _ := diffByFingerprint(oldGroup, nodes)
+		if len(nodes) == 0 || len(removed)*2 > len(oldGroup) {
+			return &RefreshRejectedError{Msg: fmt.Sprintf("订阅 %q 本次结果较上次减少 %d/%d（超半数或为空），已保留原节点",
+				group, len(removed), len(oldGroup))}
+		}
+	}
+	var keep []SubscribeNode
+	for _, n := range old {
+		if n.Group != group {
+			keep = append(keep, n)
+		}
+	}
+	return m.saveSubscriptionCacheLocked(append(keep, nodes...))
+}
+
 // importSubscription 批量导入订阅节点为实例（含持久化订阅缓存）。
 // joinGateway 为 true 时导入的实例打上入池标记（不自动启动，启停由实例池页控制）。
 // 按节点身份（节点名+端口）匹配已存在实例，重复的订阅节点不重复创建
@@ -1431,20 +1793,29 @@ func (m *Manager) importSubscription(url string, joinGateway bool) (int, error) 
 	existingNames := map[string]bool{}
 	usedPorts := map[uint16]bool{}
 	existingIDs := map[string]bool{}
+	existingFPs := map[string]bool{} // 阶段 X B1：实例指纹索引
 	for _, e := range list {
 		existingNames[e.Name] = true
 		usedPorts[e.Port] = true
 		usedPorts[e.SingboxPort] = true
 		// 节点身份 = 节点名 + 节点地址（server:port）；实例端口是本地监听端口，与节点身份无关。
+		// 阶段 X B1：另建指纹索引，让「同节点改备注」在下一轮拉取时被识别为已有实例。
 		existingIDs[e.Node+"|"+e.IP] = true
+		if e.NodeFP != "" {
+			existingFPs[e.NodeFP] = true
+		}
 	}
 	imported := 0
 	for _, node := range nodes {
 		nodeID := node.Name + "|" + fmt.Sprintf("%s:%d", node.Server, node.Port)
-		if existingIDs[nodeID] {
+		// 指纹命中（含 name|ip 旧口径兜底）→ 已建过实例，跳过重复创建。
+		if existingIDs[nodeID] || (node.Fingerprint != "" && existingFPs[node.Fingerprint]) {
 			continue
 		}
 		existingIDs[nodeID] = true
+		if node.Fingerprint != "" {
+			existingFPs[node.Fingerprint] = true
+		}
 		name := sanitizeInstanceName(node.Name)
 		if existingNames[name] {
 			i := 2
@@ -1464,6 +1835,7 @@ func (m *Manager) importSubscription(url string, joinGateway bool) (int, error) 
 			Name:        name,
 			Port:        port,
 			Node:        node.Name,
+			NodeFP:      node.Fingerprint, // 阶段 X B1：机场改备注后靠指纹识别同节点
 			Password:    genSkKey(),
 			IP:          ip,
 			SingboxPort: port + singboxPortOffset,

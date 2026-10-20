@@ -32,6 +32,29 @@ export type NodeView = {
   port: number
   has_cred: boolean
   group: string
+  /** 阶段 X：sing-box 内核能否转发（SSR 等为 false，仍可见可导出） */
+  usable?: boolean
+  /** usable=false 时的人话原因（进 tooltip） */
+  kernel_reason?: string
+  /** 节点身份指纹（B1；旧缓存可能为空） */
+  fingerprint?: string
+}
+
+/** 阶段 X：导入摘要（uniproxy 借鉴——usable/unsupported 明示、issues 上报） */
+export type UnsupportedBucket = { type: string; count: number; reason: string }
+export type ParseIssue = { where: string; reason: string }
+export type SubscriptionImportResult = {
+  status: string
+  imported: number
+  target: string
+  usable?: number
+  unsupported?: UnsupportedBucket[]
+  issues?: ParseIssue[]
+  issues_total?: number
+  issues_truncated?: boolean
+  /** 删除保护闸拦截（旧节点已保留）：UI 据此弹「强制刷新」 */
+  rejected?: boolean
+  error?: string
 }
 
 export type TestResult = {
@@ -839,7 +862,7 @@ export const api = {
   // 源已保存）。target 可选，默认 'pool-only'（2026-08-16 决策：订阅导入一律只进节点池）。
   // name 可选：手动指定分组名（固定，自动拉取不覆盖）。
   subscriptionsAdd: (url: string, intervalMin: number, target?: SubscriptionTargetLabel, name?: string) =>
-    req<{ status: string; imported: number; target: string; error?: string }>('POST', '/subscriptions/add', {
+    req<SubscriptionImportResult>('POST', '/subscriptions/add', {
       url,
       interval_min: intervalMin,
       target: target ?? 'pool-only',
@@ -852,10 +875,12 @@ export const api = {
       { url },
     ),
   // name 可选：非空则先固定该源分组名再立即拉取（仅导入节点池）。
-  subscriptionsImport: (url: string, name?: string) =>
-    req<{ status: string; imported: number; target: string }>('POST', '/subscriptions/import', {
+  // force=true 越过删除保护闸（用户在「节点骤减」确认弹窗点「仍要刷新」时）。
+  subscriptionsImport: (url: string, name?: string, force?: boolean) =>
+    req<SubscriptionImportResult>('POST', '/subscriptions/import', {
       url,
       name: name ?? undefined,
+      force: force ?? undefined,
     }),
 
   // 批量粘贴代理链接导入（vless/vmess/trojan/ss/hy2/http/socks5 等；group 留空自动「手动导入N」）

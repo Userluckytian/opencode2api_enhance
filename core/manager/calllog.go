@@ -363,7 +363,7 @@ func clearLogHTTP(port uint16, auth, label string) error {
 }
 
 // removeLogFileRetry 删除日志文件（含轮转旧段 .1）并对瞬时跨进程占用重试
-//（Windows：文件刚被关闭/正被短暂读取时 Remove 会撞「文件被占用」）。
+// （Windows：文件刚被关闭/正被短暂读取时 Remove 会撞「文件被占用」）。
 func removeLogFileRetry(path string) error {
 	for _, p := range []string{path, path + ".1"} {
 		var err error

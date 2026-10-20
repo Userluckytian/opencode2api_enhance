@@ -110,7 +110,10 @@ func singboxOutbound(n ClashNode) (map[string]any, error) {
 		return *n.SkipCertVerify
 	}
 
-	switch strings.ToLower(n.NodeType) {
+	// canonical 归一后进 switch（阶段 X T1）：别名（shadowsocks/hy2/hy1/wg/socks5h）
+	// 统一映射 canonical 名，case 标签只认 caps.go 的 canonical；对拍测试锁一致性。
+	ty := canonicalProtocol(n.NodeType)
+	switch ty {
 	case "trojan":
 		if n.Password == "" {
 			return nil, errors.New("缺少 password")
@@ -211,7 +214,7 @@ func singboxOutbound(n ClashNode) (map[string]any, error) {
 			}
 		}
 		return out, nil
-	case "socks", "socks5", "socks4":
+	case "socks5", "socks4":
 		out := map[string]any{
 			"type":        "socks",
 			"tag":         "proxy",
@@ -219,7 +222,7 @@ func singboxOutbound(n ClashNode) (map[string]any, error) {
 			"server_port": n.Port,
 			"version":     "5",
 		}
-		if strings.EqualFold(n.NodeType, "socks4") {
+		if ty == "socks4" {
 			out["version"] = "4"
 		}
 		if n.Username != "" {
@@ -229,7 +232,7 @@ func singboxOutbound(n ClashNode) (map[string]any, error) {
 			out["password"] = n.Password
 		}
 		return out, nil
-	case "ss", "shadowsocks":
+	case "ss":
 		if n.Password == "" {
 			return nil, errors.New("缺少 password")
 		}
@@ -245,7 +248,7 @@ func singboxOutbound(n ClashNode) (map[string]any, error) {
 			"method":      method,
 			"password":    n.Password,
 		}, nil
-	case "hysteria2", "hy2":
+	case "hysteria2":
 		if n.Password == "" {
 			return nil, errors.New("缺少 password")
 		}
@@ -312,7 +315,7 @@ func singboxOutbound(n ClashNode) (map[string]any, error) {
 				"insecure":    insecure(false),
 			},
 		}, nil
-	case "wireguard", "wg":
+	case "wireguard":
 		privateKey := n.PrivateKey
 		if privateKey == "" {
 			privateKey = n.Password
@@ -336,7 +339,7 @@ func singboxOutbound(n ClashNode) (map[string]any, error) {
 				"public_key":  publicKey,
 			}},
 		}, nil
-	case "hysteria", "hy1":
+	case "hysteria":
 		password := n.AuthStr
 		if password == "" {
 			password = n.Password
@@ -354,7 +357,13 @@ func singboxOutbound(n ClashNode) (map[string]any, error) {
 			},
 		}, nil
 	default:
-		return nil, fmt.Errorf("不支持的节点类型: %s", n.NodeType)
+		// 能力判定唯一数据源 caps.go：不可转发类型带完整原因（UI/日志同源直读），
+		// 不再只报「不支持的节点类型」。对拍测试锁 switch 支持集 == caps.singbox。
+		_, reason := kernelUsable(n.NodeType)
+		if reason == "" {
+			reason = "不支持的节点类型: " + n.NodeType
+		}
+		return nil, fmt.Errorf("%s（类型 %s）", reason, n.NodeType)
 	}
 }
 

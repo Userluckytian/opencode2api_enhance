@@ -1,3 +1,7 @@
+// ⚠️ LEGACY 镜像（阶段 X T5b 标注）：实例启停/配置物化的 Rust 旧实现。
+// 生产链路已迁 Go core（core/manager/instance.go，经 /api/admin/* HTTP）；
+// 本文件的命令未注册进 lib.rs invoke_handler，运行时不可达（编译期保留）。
+// 新行为请改 core/manager，勿在此双维护。
 use crate::clash_yaml;
 use crate::opencode_cfg;
 use crate::singbox;

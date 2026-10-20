@@ -1,3 +1,7 @@
+// ⚠️ LEGACY 镜像（阶段 X T5b 标注）：本文件的 sing-box 配置生成逻辑与 Go 侧
+// core/manager/singbox.go 孪生。生产链路是 Go core（HTTP /api/admin/*）；
+// 这里保留的 #[tauri::command] 未注册进 lib.rs invoke_handler（仅 4 个壳命令），运行时不可达。
+// 新协议/能力改动请改 core/manager（唯一数据源 caps.go），勿在此双维护；删除与否留待验收决策。
 use crate::clash_yaml::ClashNode;
 use anyhow::{bail, Context, Result};
 use serde_json::json;
