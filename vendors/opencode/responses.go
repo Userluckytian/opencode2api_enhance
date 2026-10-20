@@ -28,20 +28,66 @@ func isResponsesModelID(modelID string) bool {
 	return strings.HasPrefix(id, "muse-spark") || strings.HasPrefix(id, "muse_spark")
 }
 
-// responsesEndpoint 返回模型应使用的 responses 端点。仅对 muse-spark 系列生效；
-// 其它模型返回 ok=false，走原 chat/completions 路径（逐字节不变）。
+// responsesEndpoint 判定该模型是否**必然**走 Responses（muse 特例），并给端点。
+// 保留原签名供 muse 端点选择单测锁定；生产路径的实际判定走 preferResponsesFor
+// （叠加 cfg.PreferResponses 与回落保护），二者对 muse 结果一致。
 func (v *Vendor) responsesEndpoint(modelID string, a authT) (string, bool) {
 	if !isResponsesModelID(modelID) {
 		return "", false
 	}
+	return v.responsesURLFor(modelID, a), true
+}
+
+// responsesURLFor 返回模型对应的 Responses 端点（按 auth 档 + surface 三档）。
+func (v *Vendor) responsesURLFor(modelID string, a authT) string {
 	if a.mode == authPublic {
 		// keyless 免费档：/zen/v1/responses 已被上游下线，与 chat 路径同因。
-		return inferenceResponsesURL, true
+		return inferenceResponsesURL
 	}
 	if a.useGoEndpoint(v, modelID) {
-		return zenGoResponsesURL, true
+		return zenGoResponsesURL
 	}
-	return zenResponsesURL, true
+	return zenResponsesURL
+}
+
+// preferResponsesFor 决定本次请求是否走上游 Responses 协议出站（阶段 W）。
+//   - muse 恒 true（现状，chat/completions 对其不可用）；
+//   - 否则按 cfg.PreferResponses=="responses"，但带图片的请求回落 chat——
+//     上游对图片的支持仅以 deepseek 1px 探针验证（见 probes/RESULTS.md C2），
+//     chat 才是图片的已验证路径，保守回落。
+func (v *Vendor) preferResponsesFor(modelID string, bodyMap map[string]any) bool {
+	if isResponsesModelID(modelID) {
+		return true
+	}
+	if v.cfg.PreferResponses != "responses" {
+		return false
+	}
+	if bodyHasImageInput(bodyMap) {
+		return false
+	}
+	return true
+}
+
+// bodyHasImageInput 检测 chat messages 是否含 image_url 内容部件。
+func bodyHasImageInput(bodyMap map[string]any) bool {
+	msgs, _ := bodyMap["messages"].([]any)
+	for _, m := range msgs {
+		mm, _ := m.(map[string]any)
+		if mm == nil {
+			continue
+		}
+		parts, _ := mm["content"].([]any)
+		for _, p := range parts {
+			pm, _ := p.(map[string]any)
+			if pm == nil {
+				continue
+			}
+			if t, _ := pm["type"].(string); t == "image_url" {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // responsesInputFromMessages 把 OpenAI chat messages 压成 Responses input items。
@@ -309,6 +355,7 @@ func translateResponsesJSON(body []byte, modelID string) []byte {
 	}
 
 	var textB strings.Builder
+	var reasoningB strings.Builder
 	var toolCalls []any
 	if out, ok := raw["output"].([]any); ok {
 		for _, o := range out {
@@ -330,6 +377,24 @@ func translateResponsesJSON(body []byte, modelID string) []byte {
 						}
 						if t, ok := pm["text"].(string); ok {
 							textB.WriteString(t)
+						}
+					}
+				}
+			case "reasoning":
+				// 阶段 W T3-2：通用模型（prefer=responses 灰度）的 reasoning 为**明文摘要**
+				// （summary_text parts，T1 探测 P1 证实），映射回 chat 的 reasoning_content；
+				// muse 的 encrypted_content 形态 summary 为空 → 自然跳过，行为不变。
+				if parts, ok := om["summary"].([]any); ok {
+					for _, p := range parts {
+						pm, ok := p.(map[string]any)
+						if !ok {
+							continue
+						}
+						if pt, _ := pm["type"].(string); pt != "summary_text" {
+							continue
+						}
+						if t, ok := pm["text"].(string); ok {
+							reasoningB.WriteString(t)
 						}
 					}
 				}
@@ -368,6 +433,9 @@ func translateResponsesJSON(body []byte, modelID string) []byte {
 	msg := map[string]any{"role": "assistant"}
 	if textB.Len() > 0 {
 		msg["content"] = textB.String()
+	}
+	if reasoningB.Len() > 0 {
+		msg["reasoning_content"] = reasoningB.String()
 	}
 	if len(toolCalls) > 0 {
 		msg["tool_calls"] = toolCalls
@@ -494,6 +562,7 @@ func (t *responsesSSEToChatSSE) run() {
 	id := ""
 	var created int64
 	contentStarted := false
+	reasoningStarted := false
 	finished := false
 	// 工具调用状态：按上游 output_index 记录我们分配的 tool_calls 下标，
 	// function_call_arguments.delta 用同一 output_index 续传参数增量。
@@ -571,10 +640,26 @@ func (t *responsesSSEToChatSSE) run() {
 				continue
 			}
 			delta := map[string]any{"content": txt}
-			if !contentStarted {
-				contentStarted = true
+			if !contentStarted && !reasoningStarted {
 				delta["role"] = "assistant"
 			}
+			contentStarted = true
+			if !emit(chunk(delta, "")) {
+				return
+			}
+		case "response.reasoning_summary_text.delta":
+			// 阶段 W T3-2：通用模型（prefer=responses）的明文思考**摘要**流 →
+			// chat 惯例的 delta.reasoning_content（keepReasoning 下游消费此键）。
+			// 语义注记：这是摘要而非全文思考（T1 探测 P1），差异已写入配置文档。
+			txt, _ := obj["delta"].(string)
+			if txt == "" {
+				continue
+			}
+			delta := map[string]any{"reasoning_content": txt}
+			if !contentStarted && !reasoningStarted {
+				delta["role"] = "assistant"
+			}
+			reasoningStarted = true
 			if !emit(chunk(delta, "")) {
 				return
 			}
@@ -666,8 +751,8 @@ func (t *responsesSSEToChatSSE) run() {
 				return
 			}
 		default:
-			// reasoning / ping / response.in_progress / output_item.* / content_part.* 均忽略：
-			// muse 的 reasoning 正文为 encrypted_content，无明文可透。
+			// output_item.* / content_part.* 忽略；reasoning 摘要已在专列 case 翻译（T3-2）。
+			// muse 的 reasoning 正文为 encrypted_content（无明文可透，summary 恒空）。
 		}
 	}
 	// 上游 EOF 且未收到 response.completed：不伪造 [DONE]，下游按「EOF without DONE」走既有续写/中断逻辑。

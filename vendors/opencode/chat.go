@@ -241,9 +241,14 @@ func (v *Vendor) call(ctx context.Context, msg *contract.Message, streaming bool
 	modelID := msg.Model
 	maxRetries := maxRetriesOf(msg)
 
-	// Responses-only 模型（muse-spark 系列）走 /zen/v1/responses（付费 go 面走 /zen/go/v1/responses）。
+	// 出站协议判定（阶段 W）：muse 恒 Responses；cfg.PreferResponses=="responses" 时
+	// 全模型优先 Responses（图片请求回落 chat，见 preferResponsesFor）。
 	// 命中时请求构造与 2xx 响应都在厂商内完成 Responses ↔ chat 翻译，下游契约不变。
-	respURL, useResponses := v.responsesEndpoint(modelID, a)
+	useResponses := v.preferResponsesFor(modelID, bodyMap)
+	respURL := ""
+	if useResponses {
+		respURL = v.responsesURLFor(modelID, a)
+	}
 
 	// 免费通道 body 级门禁（2026-10-14 起为 v2 契约）：强制 stream:true + 补齐
 	// shell/glob/grep/read 的真实定义（空 schema 会被上游判为占位工具并 403）。

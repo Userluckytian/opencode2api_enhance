@@ -99,6 +99,20 @@ SOCKS5 代理列表。
 }
 ```
 
+#### opencode 内建厂商参数（`params`）
+
+| 参数 | 必填 | 说明 |
+|---|---|---|
+| `client_version` | — | 免费通道上报的客户端版本（UA `opencode/prod/<值>/cli`）；空 = 启动时自动探测 npm，失败回落内置值。上游抬高免费下限时改这里跟进，无需重编译 |
+| `prefer_responses` | — | **出站协议偏好（v1.7.8+）**：`chat`（默认，含空/非法值）= 现状，仅 muse 系走上游 Responses；`responses` = 全部 opencode 模型优先走上游原生 `/responses` 端点（免费档 `/inference/v1/responses`，带 key `/zen/v1/responses`，go 面 `/zen/go/v1/responses`），响应在厂商内翻回 chat 契约，下游三入口/failover/续写/竞速不变。**带图片的请求自动回落 chat**（chat 为图片已验证路径）。配置热生效需重启网关（params 在厂商构造期读取） |
+
+> `prefer_responses: "responses"` 灰度手册：上游行为矩阵实测见
+> `docs/ai-framework/plans/probes/RESULTS.md`（2026-10-20）。与 chat 路径的两个已知行为差异：
+> ① reasoning 为**明文摘要流**（映射到 `delta.reasoning_content`，非全文思考）；
+> ② 非 muse 模型 `tool_choice` 三态（none/命名函数/required）上游均支持（muse 仅 auto，维持现状近似处理）。
+> 放量观察：日志页「错误分析」对比两协议的失败率、`unexpected EOF` 中断率（「单节点反复中断」标签）与 TTFT；
+> 回退：改回 `"chat"` 或不填并重启，**一键、无数据迁移**。
+
 #### custom 自定义模型源参数（`params`）
 
 用户自带 key 接入第三方供应商（管理面板「自定义模型」页可视化编辑，以下为配置等价形式）。

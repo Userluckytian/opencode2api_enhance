@@ -31,15 +31,60 @@ type frame struct {
 }
 
 // yamlParse 解析 clash 场景的 YAML → 顶层 map。
+// 顶层 for 用下标以支持 flow-style 多行折叠（消费续行后跳过 li）。
 func yamlParse(text string) (*yamlNode, error) {
 	root := &yamlNode{kind: kindMap, vs: map[string]*yamlNode{}}
 	stack := []frame{{node: root, indent: -1}}
 	lines := strings.Split(strings.ReplaceAll(text, "\r\n", "\n"), "\n")
-	for _, raw := range lines {
+	for li := 0; li < len(lines); li++ {
+		raw := lines[li]
 		trimmed := strings.TrimRight(stripYAMLComment(raw), " \t")
 		content := strings.TrimSpace(trimmed)
 		if content == "" {
 			continue
+		}
+		// flow-style 多行折叠（mihomo/clash 配置常见写法：dns 段
+		// `nameserver-policy: {` + 逐行条目 + `}`、`nameserver: [` + 逐行 IP + `]`）。
+		// 不折叠则续行 `114.114.114.114,`/`}` 会被当 key: 行解析而报「无法解析行」。
+		if k, v, ok := splitYAML(content); ok && (strings.HasPrefix(v, "[") || strings.HasPrefix(v, "{")) && !flowBalanced(v) {
+			for li+1 < len(lines) && !flowBalanced(v) {
+				li++
+				cont := strings.TrimSpace(strings.TrimRight(stripYAMLComment(lines[li]), " \t"))
+				if cont == "" {
+					continue
+				}
+				v = flowJoin(v, cont)
+			}
+			content = k + ": " + v
+		} else if content[0] == '[' || content[0] == '{' {
+			// 独立成行的 flow（上一行是 `key:` 空值 → pending 帧）
+			if !flowBalanced(content) {
+				for li+1 < len(lines) && !flowBalanced(content) {
+					li++
+					cont := strings.TrimSpace(strings.TrimRight(stripYAMLComment(lines[li]), " \t"))
+					if cont == "" {
+						continue
+					}
+					content = flowJoin(content, cont)
+				}
+			}
+			if flowBalanced(content) {
+				pv := stack[len(stack)-1]
+				if pv.node.kind == kindPending {
+					var n *yamlNode
+					if content[0] == '{' {
+						if fm, ok := parseFlowMap(content); ok {
+							n = fm
+						}
+					} else {
+						n = parseScalarOrList(content)
+					}
+					if n != nil {
+						pv.node.kind, pv.node.vs, pv.node.list = n.kind, n.vs, n.list
+					}
+					continue
+				}
+			}
 		}
 		ind := indentOf(trimmed)
 		// 回退：弹出缩进 ≥ 当前行的帧。
@@ -60,7 +105,7 @@ func yamlParse(text string) (*yamlNode, error) {
 		// 解析 pending 容器（前一行 `key:` 空值）
 		if stack[len(stack)-1].node.kind == kindPending {
 			pv := stack[len(stack)-1]
-			if strings.HasPrefix(content, "- ") {
+			if isListItem {
 				pv.node.kind = kindSlice
 			} else {
 				pv.node.kind = kindMap
@@ -70,17 +115,32 @@ func yamlParse(text string) (*yamlNode, error) {
 		cur := stack[len(stack)-1].node
 
 		if strings.HasPrefix(content, "- ") || content == "-" {
+			rest := strings.TrimSpace(strings.TrimPrefix(content, "-"))
+			// 纯标量列表项（proxy-groups 内 `- 节点名`、dns 数组、rules 行）：存 scalar、
+			// 不压帧——压帧会让同级下一项错误嵌进本项，且原实现丢标量值。
+			// 排除锚点/别名/flow（& * { [）：这些保留原 map-item 路径（其 vs 非 nil，
+			// 子键行仍可安全写入，行为与旧版逐字节一致）。
+			if rest != "" && !strings.HasPrefix(rest, "{") && !strings.HasPrefix(rest, "[") &&
+				!strings.HasPrefix(rest, "&") && !strings.HasPrefix(rest, "*") {
+				if _, _, ok := splitYAML(rest); !ok {
+					scalar := &yamlNode{kind: kindScalar, scalar: trimYAMLKey(rest)}
+					if cur := stack[len(stack)-1].node; cur.kind == kindSlice {
+						cur.list = append(cur.list, scalar)
+						continue
+					}
+					// 父非 slice 时落到通用分支报错（行为与旧版一致）
+				}
+			}
 			item := &yamlNode{kind: kindMap, vs: map[string]*yamlNode{}}
 			if cur.kind == kindSlice {
 				cur.list = append(cur.list, item)
 			} else if cur.kind == kindPending || cur.kind == kindScalar {
 				// 不该出现
-				return nil, errors.New("yaml: 列表项父级无效")
+				return nil, errors.New("yaml: 列表项父级无效 (行 " + strconv.Itoa(li+1) + ": " + content + ")")
 			} else {
-				return nil, errors.New("yaml: 列表项父级是 map")
+				return nil, errors.New("yaml: 列表项父级是 map (行 " + strconv.Itoa(li+1) + ": " + content + ")")
 			}
 			stack = append(stack, frame{node: item, indent: ind})
-			rest := strings.TrimSpace(strings.TrimPrefix(content, "-"))
 			if rest != "" {
 				if strings.HasPrefix(rest, "{") {
 					// flow-style map 列表项：- {k: v, ...} → 填进 item.vs
@@ -100,7 +160,7 @@ func yamlParse(text string) (*yamlNode, error) {
 
 		key, val, ok := splitYAML(content)
 		if !ok {
-			return nil, errors.New("yaml: 无法解析行: " + content)
+			return nil, errors.New("yaml: 无法解析行(第 " + strconv.Itoa(li+1) + " 行): " + content)
 		}
 		yamlSetKey(&stack, ind, key, strings.TrimSpace(val))
 	}
@@ -162,13 +222,44 @@ func parseFlowMap(s string) (*yamlNode, bool) {
 		if part == "" {
 			continue
 		}
-		k, v, ok := splitYAML(part)
+		k, v, ok := splitFlowKV(part)
 		if !ok {
 			continue
 		}
-		node.vs[strings.TrimSpace(k)] = parseScalarOrList(strings.TrimSpace(v))
+		node.vs[trimYAMLKey(strings.TrimSpace(k))] = parseScalarOrList(strings.TrimSpace(v))
 	}
 	return node, true
+}
+
+// splitFlowKV flow 项内部按「引号外首个冒号」切 key:value（JSON 风格 "k":"v" 冒号后无空格）。
+// 与 splitYAML 的区别：block 语境要求冒号后跟空格，flow 语境的键值常紧贴（Clash JSON 化节点）。
+func splitFlowKV(line string) (string, string, bool) {
+	inSQ, inDQ := false, false
+	for i := 0; i < len(line); i++ {
+		switch line[i] {
+		case '\'':
+			if !inDQ {
+				inSQ = !inSQ
+			}
+		case '"':
+			if !inSQ {
+				inDQ = !inDQ
+			}
+		case ':':
+			if !inSQ && !inDQ {
+				return strings.TrimSpace(line[:i]), strings.TrimSpace(line[i+1:]), true
+			}
+		}
+	}
+	return "", "", false
+}
+
+// trimYAMLKey 去 flow 键两侧引号（"name" → name）。
+func trimYAMLKey(k string) string {
+	if len(k) >= 2 && ((k[0] == '"' && k[len(k)-1] == '"') || (k[0] == '\'' && k[len(k)-1] == '\'')) {
+		return k[1 : len(k)-1]
+	}
+	return k
 }
 
 // splitFlowItems 按“引号外 + 括号深度 0”的逗号切分（flow-style 内部）。
@@ -236,6 +327,45 @@ func stripYAMLComment(line string) string {
 		}
 	}
 	return line
+}
+
+// flowBalanced 判断 flow-style 文本的 []{} 是否闭合（引号内不计）。
+func flowBalanced(s string) bool {
+	inSQ, inDQ := false, false
+	depth := 0
+	for i := 0; i < len(s); i++ {
+		switch s[i] {
+		case '\'':
+			if !inDQ {
+				inSQ = !inSQ
+			}
+		case '"':
+			if !inSQ {
+				inDQ = !inDQ
+			}
+		case '[', '{':
+			if !inSQ && !inDQ {
+				depth++
+			}
+		case ']', '}':
+			if !inSQ && !inDQ {
+				depth--
+				if depth < 0 {
+					return false
+				}
+			}
+		}
+	}
+	return depth == 0 && !inSQ && !inDQ
+}
+
+// flowJoin 把续行并入进行中的 flow 文本（补空格分隔，幂等）。
+func flowJoin(acc, cont string) string {
+	acc = strings.TrimSpace(acc)
+	if strings.HasSuffix(acc, ",") {
+		return acc + " " + cont
+	}
+	return acc + ", " + cont
 }
 
 // splitYAML 按“引号外 : 后随空格/行尾”切分。
