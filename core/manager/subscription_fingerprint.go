@@ -60,14 +60,20 @@ func fillFingerprints(nodes []SubscribeNode) {
 
 // diffByFingerprint 新旧节点按指纹 diff（uniproxy imports.go reconcile 思路）。
 // 返回：added（新有旧无）、removed（旧有新无）、renamed（指纹同但显示名变——不算删加）。
-// 迁移兼容（审查 c 项修复）：旧缓存节点无 Fingerprint 字段 → 就地按当前算法补算
-// （fillFingerprints 语义），与新生成节点走同一轨道；否则「旧 legacy 键 vs 新 fp 键」
-// 永不相交，升级后首轮刷新会被 shrink 闸 100% 误拒。
+// 迁移模式（审查 c 项，端到端实测驱动的修正）：旧缓存整组无 Fingerprint 字段
+// （升级前写入，且旧 schema 连 SSR/UDP 等新字段都不存在，补算指纹也≠新指纹）时，
+// 两侧统一按 legacy 键（name|server|port）比较——首轮刷新不产生虚假增删；
+// 写入成功后缓存即带指纹，后续轮次自动升级回指纹轨道。
 func diffByFingerprint(oldNodes, newNodes []SubscribeNode) (added, removed []SubscribeNode, renamed int) {
-	fillFingerprints(oldNodes)
-	fillFingerprints(newNodes)
-	keyOf := func(n SubscribeNode) string {
+	useFP := false
+	for _, n := range oldNodes {
 		if n.Fingerprint != "" {
+			useFP = true
+			break
+		}
+	}
+	keyOf := func(n SubscribeNode) string {
+		if useFP && n.Fingerprint != "" {
 			return "fp:" + n.Fingerprint
 		}
 		return "legacy:" + n.Name + "|" + n.Server + "|" + fmt.Sprint(n.Port)
