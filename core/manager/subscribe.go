@@ -321,8 +321,9 @@ func subscribeFromClash(n ClashNode) SubscribeNode {
 	if n.TLS != nil {
 		tls = *n.TLS
 	}
-	switch strings.ToLower(n.NodeType) {
-	case "anytls", "hysteria2", "hy2", "tuic", "hysteria", "hy1":
+	// 强制 TLS 名单唯一数据源 caps.go（原内联 anytls/hysteria2/hy2/tuic/hysteria/hy1 并入；
+	// canonical 归一后 hy2/hy1 别名行为不变）。
+	if c, ok := capOf(n.NodeType); ok && c.forceTLS {
 		tls = true
 	}
 	return SubscribeNode{
