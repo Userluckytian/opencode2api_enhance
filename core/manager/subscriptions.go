@@ -134,13 +134,23 @@ func (m *Manager) RemoveSubscription(url string) (bool, error) {
 // ImportSubscriptionNow 立即执行某条订阅源的导入（2026-08-16 决策：一律只进节点池）。
 // 拉取并刷新订阅缓存，不创建任何实例；返回导入节点数与目标标签（恒为「节点池」）。
 func (m *Manager) ImportSubscriptionNow(url string) (int, string, error) {
-	url = strings.TrimSpace(url)
-	n, group, err := m.importSubscriptionPool(url)
+	res, err := m.ImportSubscriptionNowFull(url, false)
 	if err != nil {
-		return 0, "", err
+		return 0, res.Group, err
 	}
-	m.persistSourceGroup(url, group)
-	return n, "节点池", nil
+	return res.Imported, "节点池", nil
+}
+
+// ImportSubscriptionNowFull 带 force 与完整摘要（阶段 X T4 契约）：
+// shrink 闸拒绝时 err 含 refresh_rejected 哨兵、摘要仍带解析到的数量供 UI 展示「将删除 X%」。
+func (m *Manager) ImportSubscriptionNowFull(url string, force bool) (SubscriptionImportResult, error) {
+	url = strings.TrimSpace(url)
+	res, err := m.importSubscriptionPoolFull(url, force)
+	if err != nil {
+		return res, err
+	}
+	m.persistSourceGroup(url, res.Group)
+	return res, nil
 }
 
 // subscribeFetchConcurrency 订阅拉取并发上限（防多源到点同步尖峰）。
@@ -413,11 +423,24 @@ func (m *Manager) SubscriptionsAddHandler() http.HandlerFunc {
 			writeErr(w, http.StatusBadRequest, err.Error())
 			return
 		}
-		imported, targetLabel, importErr := m.ImportSubscriptionNow(req.URL)
-		resp := map[string]any{"status": "ok", "imported": imported, "target": targetLabel}
+		// 阶段 X T4：首次导入同样返回摘要（usable/unsupported/issues）；旧字段 imported/error 保留。
+		res, importErr := m.ImportSubscriptionNowFull(req.URL, false)
+		resp := map[string]any{
+			"status": "ok", "imported": res.Imported, "target": "节点池",
+			"usable": res.Usable, "unsupported": res.Unsupported,
+			"issues": res.Issues, "issues_total": res.IssuesTotal,
+		}
 		if importErr != nil {
-			resp["imported"] = 0
+			if !strings.Contains(importErr.Error(), "refresh_rejected") {
+				res = SubscriptionImportResult{}
+			}
+			resp["imported"] = res.Imported
+			resp["usable"] = res.Usable
+			resp["unsupported"] = res.Unsupported
 			resp["error"] = importErr.Error()
+			if strings.Contains(importErr.Error(), "refresh_rejected") {
+				resp["rejected"] = true
+			}
 		}
 		writeJSON(w, resp)
 	}
@@ -553,8 +576,9 @@ func (m *Manager) SubscriptionsImportHandler() http.HandlerFunc {
 			return
 		}
 		var req struct {
-			URL  string `json:"url"`
-			Name string `json:"name"`
+			URL   string `json:"url"`
+			Name  string `json:"name"`
+			Force bool   `json:"force"` // 阶段 X B3：越过删除保护闸强制刷新（用户在确认弹窗点「仍要刷新」）
 		}
 		if json.NewDecoder(r.Body).Decode(&req) != nil || req.URL == "" {
 			writeErr(w, http.StatusBadRequest, "url 必填")
@@ -563,11 +587,30 @@ func (m *Manager) SubscriptionsImportHandler() http.HandlerFunc {
 		if name := strings.TrimSpace(req.Name); name != "" {
 			m.pinSourceGroup(req.URL, name)
 		}
-		n, targetLabel, err := m.ImportSubscriptionNow(req.URL)
-		if err != nil {
-			writeErr(w, http.StatusBadRequest, err.Error())
-			return
+		// 阶段 X T4：一次拉取返回完整摘要（usable/unsupported/issues），两种入口共用响应形态。
+		res, importErr := m.ImportSubscriptionNowFull(req.URL, req.Force)
+		resp := map[string]any{
+			"status": "ok", "imported": res.Imported, "target": "节点池",
+			"usable": res.Usable, "unsupported": res.Unsupported,
+			"issues": res.Issues, "issues_total": res.IssuesTotal,
 		}
-		writeJSON(w, map[string]any{"status": "ok", "imported": n, "target": targetLabel})
+		if res.Truncated {
+			resp["issues_truncated"] = true
+		}
+		if importErr != nil {
+			if !strings.Contains(importErr.Error(), "refresh_rejected") {
+				// 拉取/解析真失败：保持旧契约（源已保存、imported=0、error 提示重试）。
+				res = SubscriptionImportResult{}
+			}
+			resp["imported"] = res.Imported
+			resp["usable"] = res.Usable
+			resp["unsupported"] = res.Unsupported
+			resp["error"] = importErr.Error()
+			// 删除保护闸拒绝：语义是「保护成功」而非拉取失败，前端据此提供「强制刷新」。
+			if strings.Contains(importErr.Error(), "refresh_rejected") {
+				resp["rejected"] = true
+			}
+		}
+		writeJSON(w, resp)
 	}
 }

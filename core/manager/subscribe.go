@@ -1574,6 +1574,7 @@ func toClashNode(n SubscribeNode) ClashNode {
 		SSRProtoParam: n.SSRProtoParam,
 		SSRObfsParam:  n.SSRObfsParam,
 		GrpcService:   n.GrpcService,
+		Fingerprint:   n.Fingerprint, // B1：节点池展示与实例匹配共用
 		UDP:           &udp,
 	}
 }

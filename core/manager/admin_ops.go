@@ -20,6 +20,12 @@ type NodeView struct {
 	Port     uint16 `json:"port"`
 	HasCred  bool   `json:"has_cred"`
 	Group    string `json:"group"`
+	// 阶段 X T4（能力明示，唯一数据源 caps.go）：sing-box 内核不可转发的节点
+	// （SSR 等）照常出现在池内（可查可导出），UI 据 usable=false 置灰 + tooltip 展示 reason。
+	Usable       bool   `json:"usable"`
+	KernelReason string `json:"kernel_reason,omitempty"`
+	// Fingerprint 节点身份指纹（阶段 X B1；旧缓存未迁移时为空）。
+	Fingerprint string `json:"fingerprint,omitempty"`
 }
 
 func (m *Manager) nodeViews() []NodeView {
@@ -29,9 +35,11 @@ func (m *Manager) nodeViews() []NodeView {
 	}
 	out := []NodeView{}
 	for _, n := range sf.ListNodes() {
+		usable, reason := kernelUsable(n.NodeType)
 		out = append(out, NodeView{
 			Name: n.Name, NodeType: n.NodeType, Server: n.Server, Port: n.Port,
 			HasCred: nodeHasCredential(n), Group: n.Group,
+			Usable: usable, KernelReason: reason, Fingerprint: n.Fingerprint,
 		})
 	}
 	return out
