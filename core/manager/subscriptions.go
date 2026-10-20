@@ -142,7 +142,7 @@ func (m *Manager) ImportSubscriptionNow(url string) (int, string, error) {
 }
 
 // ImportSubscriptionNowFull 带 force 与完整摘要（阶段 X T4 契约）：
-// shrink 闸拒绝时 err 含 refresh_rejected 哨兵、摘要仍带解析到的数量供 UI 展示「将删除 X%」。
+// shrink 闸拒绝时 err 为 *RefreshRejectedError（errors.As 判定）、摘要仍带解析到的数量供 UI 展示「将删除 X%」。
 func (m *Manager) ImportSubscriptionNowFull(url string, force bool) (SubscriptionImportResult, error) {
 	url = strings.TrimSpace(url)
 	res, err := m.importSubscriptionPoolFull(url, force)
@@ -431,14 +431,14 @@ func (m *Manager) SubscriptionsAddHandler() http.HandlerFunc {
 			"issues": res.Issues, "issues_total": res.IssuesTotal,
 		}
 		if importErr != nil {
-			if !strings.Contains(importErr.Error(), "refresh_rejected") {
+			if !asRejected(importErr) {
 				res = SubscriptionImportResult{}
 			}
 			resp["imported"] = res.Imported
 			resp["usable"] = res.Usable
 			resp["unsupported"] = res.Unsupported
 			resp["error"] = importErr.Error()
-			if strings.Contains(importErr.Error(), "refresh_rejected") {
+			if asRejected(importErr) {
 				resp["rejected"] = true
 			}
 		}
@@ -598,7 +598,7 @@ func (m *Manager) SubscriptionsImportHandler() http.HandlerFunc {
 			resp["issues_truncated"] = true
 		}
 		if importErr != nil {
-			if !strings.Contains(importErr.Error(), "refresh_rejected") {
+			if !asRejected(importErr) {
 				// 拉取/解析真失败：保持旧契约（源已保存、imported=0、error 提示重试）。
 				res = SubscriptionImportResult{}
 			}
@@ -607,7 +607,7 @@ func (m *Manager) SubscriptionsImportHandler() http.HandlerFunc {
 			resp["unsupported"] = res.Unsupported
 			resp["error"] = importErr.Error()
 			// 删除保护闸拒绝：语义是「保护成功」而非拉取失败，前端据此提供「强制刷新」。
-			if strings.Contains(importErr.Error(), "refresh_rejected") {
+			if asRejected(importErr) {
 				resp["rejected"] = true
 			}
 		}

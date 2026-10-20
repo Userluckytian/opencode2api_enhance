@@ -35,8 +35,8 @@ type ClashNode struct {
 	SSRProtoParam string `json:"protocol-param,omitempty"`
 	SSRObfsParam  string `json:"obfs-param,omitempty"`
 	GrpcService   string `json:"grpc-service-name,omitempty"`
-	UDP           *bool  `json:"udp,omitempty"`           // Clash YAML 的 udp: true/false 原样承载
-	Fingerprint   string `json:"fingerprint,omitempty"`   // 阶段 X B1：订阅源节点携带；外部 Clash 文件源为空
+	UDP           *bool  `json:"udp,omitempty"`         // Clash YAML 的 udp: true/false 原样承载
+	Fingerprint   string `json:"fingerprint,omitempty"` // 阶段 X B1：订阅源节点携带；外部 Clash 文件源为空
 }
 
 // nodeHasCredential 节点是否具备连接凭据（含「该类型本就无需凭据」）。

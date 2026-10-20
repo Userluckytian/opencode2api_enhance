@@ -98,8 +98,8 @@ func (c *ScanController) allocatePorts(opts ScanOptions, need int) ([]portPair, 
 	if c.m != nil {
 		instBase = c.m.instanceBasePort()
 	}
-	instLo, instHi := instBase+100, instBase+2100  // 实例 API 段 [instLo, instHi)
-	sbLo, sbHi := instBase+2100, instBase+4100     // 实例 sing-box 段 [sbLo, sbHi)（singbox = api+2000）
+	instLo, instHi := instBase+100, instBase+2100 // 实例 API 段 [instLo, instHi)
+	sbLo, sbHi := instBase+2100, instBase+4100    // 实例 sing-box 段 [sbLo, sbHi)（singbox = api+2000）
 	var pairs []portPair
 	used := map[uint16]bool{}
 	for offset := 0; offset < 4096 && len(pairs) < need; offset++ {

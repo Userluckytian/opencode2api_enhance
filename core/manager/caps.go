@@ -26,8 +26,9 @@ type protoCap struct {
 	forceTLS  bool    // 协议强制 TLS（订阅里的 tls:false 是脏数据，忽略）
 }
 
-// caps 表：canonical 名 → 能力。所有类型字面量名单的唯一定义处。
-// singbox=false 的行（ssr/snell）依然参与解析与导出，只是永不生成实例。
+// caps 表:键 = canonical 全集(别名一律经 protoAliases 归一后才查本表,故此处不留别名行——
+// 审查 h 项:原 socks/socks5h 行 capOf 永远读不到,是死行,已并入 socks5)。
+// singbox=false 的行(ssr/snell)依然参与解析与导出,只是永不生成实例。
 var caps = map[string]protoCap{
 	"trojan":    {canonical: "trojan", singbox: true, udp: udpOptIn},
 	"vless":     {canonical: "vless", singbox: true, udp: udpOptIn},
@@ -40,12 +41,10 @@ var caps = map[string]protoCap{
 	"wireguard": {canonical: "wireguard", singbox: true, udp: udpForce},
 	"http":      {canonical: "http", singbox: true, udp: udpNone, authless: true},
 	"https":     {canonical: "https", singbox: true, udp: udpNone, authless: true},
-	"socks":     {canonical: "socks5", singbox: true, udp: udpOptIn, authless: true},
 	"socks5":    {canonical: "socks5", singbox: true, udp: udpOptIn, authless: true},
-	"socks5h":   {canonical: "socks5", singbox: true, udp: udpOptIn, authless: true},
 	"socks4":    {canonical: "socks4", singbox: true, udp: udpNone, authless: true},
-	"ssr":       {canonical: "ssr", singbox: false, reason: "sing-box 内核不支持 SSR（上游已移除该协议），节点可导出到第三方客户端使用", udp: udpOptIn},
-	"snell":     {canonical: "snell", singbox: false, reason: "sing-box 内核不支持 snell，节点可导出到第三方客户端使用", udp: udpOptIn},
+	"ssr":       {canonical: "ssr", singbox: false, reason: "sing-box 内核不支持 SSR(上游已移除该协议),节点可导出到第三方客户端使用", udp: udpOptIn},
+	"snell":     {canonical: "snell", singbox: false, reason: "sing-box 内核不支持 snell,节点可导出到第三方客户端使用", udp: udpOptIn},
 }
 
 // protoAliases 别名 → canonical（uniproxy canonicalProtocol 同款单表；含 singbox.go 里的历史写法）。

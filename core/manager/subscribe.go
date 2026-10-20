@@ -1618,8 +1618,9 @@ func (m *Manager) listSubscriptionNodes() []ClashNode {
 func (m *Manager) importSubscriptionPool(url string) (int, string, error) {
 	res, err := m.importSubscriptionPoolFull(url, false)
 	if err != nil {
-		if strings.Contains(err.Error(), "refresh_rejected") {
-			return 0, res.Group, fmt.Errorf("订阅刷新被保护闸拦截（节点数骤减或为空），已保留原节点；确认无误可在界面上强制刷新")
+		if asRejected(err) {
+			// 兼容旧文案消费者：保留人话 message，同时错误链携带 *RefreshRejectedError 供判定。
+			return 0, res.Group, fmt.Errorf("订阅刷新被保护闸拦截（节点数骤减或为空），已保留原节点；确认无误可在界面上强制刷新: %w", err)
 		}
 		return 0, res.Group, err
 	}
@@ -1730,7 +1731,7 @@ func (m *Manager) saveSubscriptionCacheGrouped(nodes []SubscribeNode) error {
 
 // saveSubscriptionCacheGroupedGuarded 带 shrink 保护闸（阶段 X B3，uniproxy imports.go:264-284 思路）：
 //   - 同一分组内，若按指纹 diff 的「将删除数」超过旧节点一半（或新结果为空）→ 拒绝写入
-//     （错误含 refresh_rejected 哨兵），保留旧节点；force=true 越过。
+//     （*RefreshRejectedError 类型），保留旧节点；force=true 越过。
 //
 // 与 uniproxy 的差异（刻意）：解析「非致命问题」（个别坏行/未知类型）不阻断写入——
 // 我们的存量订阅普遍含杂字段，照抄「任一错误全留旧」会把正常刷新大面积打挂；
@@ -1756,8 +1757,8 @@ func (m *Manager) saveSubscriptionCacheGroupedGuarded(nodes []SubscribeNode, for
 	if len(oldGroup) > 0 {
 		_, removed, _ := diffByFingerprint(oldGroup, nodes)
 		if len(nodes) == 0 || len(removed)*2 > len(oldGroup) {
-			return fmt.Errorf("refresh_rejected: 订阅 %q 本次结果较上次减少 %d/%d（超半数或为空），已保留原节点",
-				group, len(removed), len(oldGroup))
+			return &RefreshRejectedError{Msg: fmt.Sprintf("订阅 %q 本次结果较上次减少 %d/%d（超半数或为空），已保留原节点",
+				group, len(removed), len(oldGroup))}
 		}
 	}
 	var keep []SubscribeNode
