@@ -1,5 +1,19 @@
 # Changelog
 
+## v1.7.8-beta.7（2026-10-20，Beta）
+
+### opencode 出站协议可选（阶段 W）+ 订阅协议模块化（阶段 X）
+
+- **opencode 厂商 `prefer_responses` 开关**：可选 `"responses"` 让全部模型走上游原生 Responses 协议（厂商内翻回 chat 契约），默认 `"chat"` 行为零变化；带图输入自动回落 chat；reasoning 摘要流（`reasoning_summary_text.delta`）翻译为 `reasoning_content`。结论来自对 interfrec 新 API 的四象限实测（非文档推断）。
+- **订阅解析模块化**：新增 `core/manager/caps.go` 能力矩阵唯一数据源（canonical 协议别名表 + sing-box 可转发标记 + UDP 三态 + authless/强制TLS），收敛原先散落在 4 处互不同步的协议名单。
+- **ssr:// 完整解析**：fancy-ssr 六段 base64url + 二次编码中文 param + udp-port；sing-box JSON 往返补全（reality/grpc service-name/multiplex/hysteria/anytls），未知类型从静默丢弃改为计数上报。
+- **节点指纹身份**：SHA256(协议/服务器/凭据/传输)（排除显示名），改名不再被误判为删增；旧组无指纹自动走 legacy 键迁移模式，导入成功后升指纹轨。
+- **刷新两道闸**：同组删除 >50% 或清空 → 拒绝并保留原节点（防机场返回半截订阅吃掉节点池），手动确认可 force；解析错误收集 `ParseReport`（≤128 详情），坏行不杀好节点。
+- **导入摘要与 UI**：`/subscriptions/import` 与节点视图带 `usable/unsupported[]/issues/force`；不可转发节点（SSR/snell 等）置灰禁选 + 「内核不支持」徽标 tooltip；骤减时强刷二次确认。
+- **下载加固**：重定向 ≤4 跳、HTML 门户页拒收；YAML 解析器支持 flow 多行折叠/裸 dash/JSON 风格节点（修复部分订阅导入 0 节点）。
+- **日志标签修复**：「额度用尽」改结构化字段优先判定，新增紫色「上下文超限」标签；「全部节点失败」附最后错误根因，无真实切换事件时显示「单节点反复中断」。
+- 测试：T0 黄金回归 + caps 对拍×4 + SSR URI×3 + 指纹×3 + 错误收集×3 + 两道闸×2 等新增；dev 端到端 V1-V5 迁移场景实测通过。
+
 ## v1.7.8-beta.6（2026-10-18，Beta）
 
 ### 第二轮埋点：选路决策 + 尝试链 + Retry-After 驱动冷却
