@@ -2,6 +2,8 @@
 package opencode
 
 import (
+	"log/slog"
+
 	"github.com/6Kmfi6HP/opencode2api/core/contract"
 )
 
@@ -71,6 +73,12 @@ func init() {
 			cfg.ClientVersion = s
 		}
 		if s, ok := spec.Params[ParamPreferResponses].(string); ok {
+			if s != "" && s != "chat" && s != "responses" {
+				// 非法值不炸网关：按 chat（现状）处理并显式告警，避免拼写错误静默失效。
+				slog.Warn("opencode: invalid prefer_responses, falling back to chat",
+					"value", s, "want", "chat|responses")
+				s = "chat"
+			}
 			cfg.PreferResponses = s
 		}
 		return New(cfg), nil
