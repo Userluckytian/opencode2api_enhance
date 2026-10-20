@@ -28,6 +28,10 @@ const (
 	// 非 "_" 前缀 → 配置文件中 providers[].params.client_version 可覆盖，
 	// 用于上游抬高免费通道下限后无需重编译即可跟进。
 	ParamClientVersion = "client_version"
+
+	// ParamPreferResponses 键：出站协议偏好（string；用户可配，阶段 W）。
+	// "responses" = 全模型优先走上游 Responses；空/chat/非法值 = 现状（仅 muse）。
+	ParamPreferResponses = "prefer_responses"
 )
 
 func init() {
@@ -65,6 +69,9 @@ func init() {
 		}
 		if s, ok := spec.Params[ParamClientVersion].(string); ok {
 			cfg.ClientVersion = s
+		}
+		if s, ok := spec.Params[ParamPreferResponses].(string); ok {
+			cfg.PreferResponses = s
 		}
 		return New(cfg), nil
 	})

@@ -124,6 +124,11 @@ type Config struct {
 	// 用户可配（providers[].params.client_version）：上游抬高免费通道下限时，
 	// 改配置即可跟进，无需重编译；置空/删除则回到自动探测。
 	ClientVersion string
+	// PreferResponses 出站协议偏好（providers[].params.prefer_responses，阶段 W）：
+	//   "chat"（含空/非法值）= 现状：仅 muse 前缀走 Responses；
+	//   "responses" = 全部模型优先走上游原生 /responses（上游行为矩阵实测见
+	//   docs/ai-framework/plans/probes/RESULTS.md），带图片请求自动回落 chat。
+	PreferResponses string
 }
 
 // Vendor 实现 contract.Vendor，代表 OpenCode 上游。
