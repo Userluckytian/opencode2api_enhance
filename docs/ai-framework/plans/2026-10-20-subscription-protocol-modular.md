@@ -1,6 +1,6 @@
 # 阶段 X：订阅协议模块化（格式解耦 + 内核能力过滤 + 刷新安全）
 
-> **状态：** 实施中（v2：已并入 uniproxy 借鉴决策）  
+> **状态：** 已完成（验收 #1-#8 全绿；#8 dev 端到端 V1-V5 实测通过；迁移误拒缺陷由端到端抓出并已修复 9e6c6be）  
 > **For agentic workers:** 按 Task 顺序执行；每 Task 测完再进下一 Task。  
 > **元规范:** `docs/ai-framework/phased-plan-driven.md`
 
@@ -77,10 +77,11 @@
   "usable":86, "unsupported":[{"type":"ssr","count":104,"reason":"sing-box 内核不支持 SSR（节点可导出到第三方客户端）"}],
   "issues":[{"line":7,"reason":"第 7 行：未知协议 unknown://"}], "issues_truncated":false }
 // GET /api/admin/nodes 每项新增
-{ "name":"...", "node_type":"ssr", "usable_by_kernel":false, "kernel_reason":"..." , "fingerprint":"<12hex 短指纹>" }
-// 刷新保护（自动拉取路径）
-{ "status":"refresh_rejected", "reason":"subscription_shrink", "message":"解析后节点数比现有少 62%，已保留原节点；确认无误可手动强制刷新" }
+{ "name":"...", "node_type":"ssr", "usable":false, "kernel_reason":"..." , "fingerprint":"<16 hex 短指纹>" }
+// 刷新保护（闸拒绝时 import 响应带 rejected:true + error 人话原因；内部为 *RefreshRejectedError）
 ```
+
+**计划 vs 实现偏差（诚实登记，非缺陷）**：① 契约字段 `usable_by_kernel` 实现时简化为 `usable`（后端 NodeView 与 api.ts 一致）；② 模型字段「Mux 开关」未实施——本批订阅源无 multiplex 需求证据，且 sing-box mux 为顶层新语法需生成端配套，留待真有订阅带该字段；③ 「图片回落 chat」属阶段 W prefer_responses 路径，本阶段订阅层不涉及；④ 刷新保护响应形态未新开 status 字段，复用既有「imported + error + rejected」向后兼容形态。
 
 ## Task 0：黄金回归 ✅ 已完成
 
@@ -114,16 +115,18 @@ SubscribeNode/ClashNode 补 SSR 四字段（protocol/obfs/obfs-param/proto-param
 
 | # | 标准 | 通过条件 | 责任人 | 结果 |
 |---|------|----------|--------|------|
-| 1 | 黄金测试先行全绿 | T0 存在且通过 | 自动化 | ✅ (fb62620+T0) |
-| 2 | 能力单源 | caps↔全部消费点对拍绿 | 自动化 | ⬜ |
-| 3 | ssr:// 与 JSON 往返 | 单测：标准/中文param/reality/grpc service_name | 自动化 | ⬜ |
-| 4 | 指纹身份 | 改名 diff=0 删除；旧 name 身份迁移匹配测试 | 自动化 | ⬜ |
-| 5 | 错误收集 | 坏行夹好节点存活（uniproxy errors_test 同款不变量） | 自动化 | ⬜ |
-| 6 | 两道闸 | shrink>50%/解析错→旧缓存保留；force 语义 | 自动化 | ⬜ |
-| 7 | 明示过滤 | 契约字段 + tsc/build 绿 + UI 置灰 | 自动化+人工 | ⬜ |
-| 8 | 行为兼容 | usable outbound 快照未变；全套件绿 | 自动化 | ⬜ |
-| 9 | 独立审查 | cat-jam ✅/⚠️（问题登记） | 独立角色 | ⬜ |
-| 10 | dev 端到端 | T6 场景全过 | 会话内端到端 | ⬜ |
+| 1 | 黄金测试先行全绿 | T0 存在且通过 | 自动化 | ✅ zz_golden_x_test（三方言+outbound 快照） |
+| 2 | 能力单源 | caps↔全部消费点对拍绿 | 自动化 | ✅ TestCaps_*×4（socks5h 漂移曾被抓并修；键全 canonical 闭环） |
+| 3 | ssr:// 与 JSON 往返 | 单测：标准/中文param/reality/grpc service_name | 自动化 | ✅ TestSSRURI*/TestSingboxJSON_SSRAndGrpcService（补 hysteria/anytls 既有缺口） |
+| 4 | 指纹身份 | 改名 diff=0 删除；旧 name 身份迁移匹配测试 | 自动化 | ✅ TestFingerprint/TestDiffByFingerprint + dev V3 实测改名零误拒 |
+| 5 | 错误收集 | 坏行夹好节点存活（uniproxy errors_test 同款不变量） | 自动化 | ✅ TestParseIssues_*（128 截断/全坏报错/direct-block 不计） |
+| 6 | 两道闸 | shrink>50%/解析错→旧缓存保留；force 语义 | 自动化 | ✅ TestShrinkGuard(+MigrationFirstRefresh)；迁移首轮曾 104/190 误拒被抓→模式选择修复 9e6c6be |
+| 7 | 明示过滤 | 契约字段 + tsc/build 绿 + UI 置灰 | 自动化+人工 | ✅ API 摘要/usable/kernel_reason 实测；tsc+vite 绿；**置灰样式与 toast 文案待用户肉眼过（残留手工项）** |
+| 8 | 行为兼容 | usable outbound 快照未变；全套件绿 | 自动化 | ✅ T0 快照全绿；`go test ./...` 串行全绿（manager 3 flaky 按 OPEN.md 判例单包钉） |
+| 9 | 独立审查 | cat-jam ✅/⚠️（问题登记） | 独立角色 | ✅ ⚠️ 有条件通过→四项全部处置（c/g/e/h），审查直接驱动 1 个真缺陷修复 |
+| 10 | dev 端到端 | T6 场景全过 | 会话内端到端 | ✅ x4 二进制 V1-V5：迁移零误拒/改名放行/骤减拒绝保留/force 越闸/usable 86+置灰 104+reason；现场已清理 |
+
+**端到端重要复盘**：审查 c 项首版修复（「旧节点补算指纹」）在单测下全绿，但 dev 实测被 104/190 误拒打脸——旧缓存的**节点 schema 本身缺新字段**（无 SSR/UDP 列），补算出的指纹与新版必然不等。最终方案改为**模式选择**（旧组整组无指纹→全组走 legacy 键，导入成功后自动升级指纹轨道）。教训：迁移兼容必须用**真实旧版本写出的字节**验证，合成 fixture 会美化问题。
 
 ## 风险与降级
 
