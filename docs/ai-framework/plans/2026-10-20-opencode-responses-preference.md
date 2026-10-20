@@ -1,6 +1,6 @@
 # 阶段 W：opencode 厂商出站协议可切 responses（prefer_responses）
 
-> **状态：** 实施中  
+> **状态：** 已完成（验收 #1-#7 ✅；#8 端到端灰度冒烟待部署复验）  
 > **For agentic workers:** 按 Task 顺序执行；每 Task 测完再进下一 Task。  
 > **元规范:** `docs/ai-framework/phased-plan-driven.md`
 
@@ -152,14 +152,14 @@
 
 | # | 标准 | 通过条件 | 验证责任人 | 结果 |
 |---|------|----------|-----------|------|
-| 1 | T1 行为矩阵有真实数据 | 6 场景原始流落盘 + RESULTS.md 每场景有 HTTP 码与证据片段 | 自动化（执行方） | ⬜ |
-| 2 | 默认零变化 | 单测：prefer 缺省时非 muse 决策 = chat（构造与 URL 逐字节路径不变） | 自动化 | ⬜ |
-| 3 | 开关生效 | 单测：prefer=responses → 三档端点选择正确 + muse 不受 prefer 影响 + 回落特征命中 chat | 自动化 | ⬜ |
-| 4 | 缺口修复 | T3 各失败用例转绿；图片/reasoning 结果按 T1 约束（不可支持项以回落/文档收口即算过） | 自动化 | ⬜ |
-| 5 | 全套件 | `go test ./...` 绿（flaky 按 OPEN.md 判例单包复跑） | 自动化 | ⬜ |
-| 6 | 独立代码审查 | `@cat-jam` 审查结论 ✅/⚠️（问题登记进本表） | 独立角色 | ⬜ |
-| 7 | 密钥红线 | `git ls-files` 无凭据；probes/ 无实例 password | 自动化 | ⬜ |
-| 8 | 真实灰度冒烟 | 部署机：prefer=responses + 网关 `/v1/chat/completions` 实调 deepseek，日志显示成功且无图片/reasoning 回归 | 端到端（需用户/部署机） | ⬜ |
+| 1 | T1 行为矩阵有真实数据 | 6 场景原始流落盘 + RESULTS.md 每场景有 HTTP 码与证据片段 | 自动化（执行方） | ✅ 6+2 场景（C1/C2 对照），results/raw_*.txt 本地 + RESULTS.md 入库 |
+| 2 | 默认零变化 | 单测：prefer 缺省时非 muse 决策 = chat（构造与 URL 逐字节路径不变） | 自动化 | ✅ TestPreferResponsesDecision（缺省/chat/非法 × muse × 图片 8 子例全绿） |
+| 3 | 开关生效 | 单测：prefer=responses → 三档端点选择正确 + muse 不受 prefer 影响 + 回落特征命中 chat | 自动化 | ✅ Decision 表 + MuseUnaffectedByPreferRegression + ChatGoesResponsesURLAndTranslates（URL 后缀与翻译断言） |
+| 4 | 缺口修复 | T3 各失败用例转绿；图片/reasoning 结果按 T1 约束 | 自动化 | ✅ reasoning 摘要（流/非流双用例）翻译进 reasoning_content；图片回落 chat；tool_choice 经 T1 证实无需回落（muse 现状保留） |
+| 5 | 全套件 | `go test ./...` 绿（flaky 按 OPEN.md 判例单包复跑） | 自动化 | ✅ 并跑一次全绿；串行一次 core/manager 红 → 单包复跑绿（既有负载 flaky 判例吻合，本阶段未触碰该包）；go build/vet exit 0 |
+| 6 | 独立代码审查 | `@cat-jam` 审查结论 ✅/⚠️（问题登记进本表） | 独立角色 | ✅ ⚠️有条件通过→两项 ⚠️ 已整改：①registry 非法值装配告警（3904b2c）②流式边界表驱动用例 reasoning-only/残余事件/EOF 不伪造 DONE（全绿）；ℹ️ 测试文件因仓库 `*_test.go` 不入库策略仅本地留存（既有登记，非本阶段引入） |
+| 7 | 密钥红线 | `git ls-files` 无凭据；probes/ 无实例 password | 自动化 | ✅ git grep 扫描 0 命中；results/ 已 gitignore；脚本仅 Bearer public |
+| 8 | 真实灰度冒烟 | 部署机：prefer=responses + 网关 `/v1/chat/completions` 实调 deepseek，日志显示成功且无图片/reasoning 回归 | 端到端（需用户/部署机） | ⬜ 待部署复验（列入下方手工清单） |
 
 ---
 
@@ -184,5 +184,13 @@
 
 ## 残留手工验收清单
 
-1. 部署机开 `"prefer_responses": "responses"`，跑半天真实流量，日志页对比失败率/EOF/上下文超限分布（验收 #8）
+1. 部署机开 `"prefer_responses": "responses"`（runtime/_unified-gateway/opencode2api.json 的 opencode 条目 params），重启网关，跑半天真实流量，日志页对比失败率/EOF/上下文超限分布（验收 #8）
 2. 面板配置字段（下阶段候选）
+
+## 提交清单（main..feat/phase-w-opencode-responses）
+
+- f6588da 📝 docs(plan): 阶段 W 计划
+- c3413b4 🔧 chore(probe): T1 上游 responses 行为矩阵探测与结论
+- f850fc6 ✨ feat(opencode): prefer_responses 出站开关 + reasoning 摘要翻译 + 图片回落
+- 59020e8 📝 docs(opencode): prefer_responses 配置说明与灰度回退手册
+- 3904b2c 🔧 chore(opencode): 非法 prefer_responses 值装配期告警并回落 chat
