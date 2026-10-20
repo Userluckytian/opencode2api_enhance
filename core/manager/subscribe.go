@@ -26,6 +26,7 @@ import (
 
 // SubscribeNode 订阅节点（轻量结构，可落为实例；raw 保留原始链接）。
 // JSON 字段与 Rust SubscribeNode（serde snake_case）一致。
+// 阶段 X：SSR/grpc/UDP/Fingerprint 为协议模块化补充，全部 omitempty——旧缓存无迁移读入。
 type SubscribeNode struct {
 	Name              string            `json:"name"`
 	Server            string            `json:"server"`
@@ -44,11 +45,21 @@ type SubscribeNode struct {
 	RealityPbk        string            `json:"reality_pbk,omitempty"`        // VLESS REALITY 公钥（pbk）
 	RealitySid        string            `json:"reality_sid,omitempty"`        // VLESS REALITY short-id（sid）
 	ClientFingerprint string            `json:"client_fingerprint,omitempty"` // TLS 指纹（fp，缺省 chrome）
-	Obfs              string            `json:"obfs,omitempty"`               // hysteria2 Salamander 混淆类型
+	Obfs              string            `json:"obfs,omitempty"`               // hysteria2 Salamander / SSR obfs 类型（plain/http_simple/…）
 	ObfsPassword      string            `json:"obfs_password,omitempty"`
-	SkipCertVerify    bool              `json:"skip_cert_verify,omitempty"`
-	Group             string            `json:"group,omitempty"` // 订阅来源分组名
-	Raw               string            `json:"raw"`
+	// —— SSR 专有（类型=ssr 时有值；sing-box 内核不可转发，解析/保存/导出全支持，见 caps.go）——
+	SSRProtocol    string `json:"ssr_protocol,omitempty"`       // 传输协议 auth_aes128_md5 等
+	SSRProtoParam  string `json:"ssr_protocol_param,omitempty"` // protocol-param
+	SSRObfsParam   string `json:"ssr_obfs_param,omitempty"`     // obfs-param
+	GrpcService    string `json:"grpc_service,omitempty"`       // grpc transport 的 service_name
+	UDP            bool   `json:"udp,omitempty"`                // caps.nodeUDP 三态判定结果（解析产物，非猜测）
+	SkipCertVerify bool   `json:"skip_cert_verify,omitempty"`
+	Group          string `json:"group,omitempty"` // 订阅来源分组名
+	Raw            string `json:"raw"`
+	// Fingerprint 节点身份指纹（uniproxy parser.go:386 同款思路：协议/服务器/凭据哈希，
+	// 排除显示名——机场改节点备注不再打断实例匹配与刷新 diff）。
+	// 解析入库时由 refreshSubscriptionFingerprints/导入路径填充；空 = 旧缓存未迁移（diff 回退 name 匹配）。
+	Fingerprint string `json:"fingerprint,omitempty"`
 }
 
 // SubscriptionMeta 订阅元信息（来自 HTTP 响应头，clash-verge-rev 同款解析；
@@ -295,6 +306,8 @@ func parseSubscription(body string) ([]SubscribeNode, error) {
 	if len(filtered) == 0 {
 		return nil, fmt.Errorf("订阅内容中未解析到任何可用节点")
 	}
+	// 阶段 X（B1）：统一出口补指纹身份（排除显示名；机场改名不断实例/diff）。
+	fillFingerprints(filtered)
 	return filtered, nil
 }
 
@@ -346,9 +359,15 @@ func subscribeFromClash(n ClashNode) SubscribeNode {
 		ClientFingerprint: n.ClientFingerprint,
 		Obfs:              n.Obfs,
 		ObfsPassword:      n.ObfsPassword,
-		SkipCertVerify:    n.SkipCertVerify != nil && *n.SkipCertVerify,
-		Group:             n.Group,
-		Raw:               fmt.Sprintf("%s@%s:%d", n.NodeType, n.Server, n.Port),
+		// 阶段 X：SSR 三键直通 + UDP 能力（caps 三态：force 恒真 / opt-in 看声明 / none 恒假）。
+		SSRProtocol:    n.SSRProtocol,
+		SSRProtoParam:  n.SSRProtoParam,
+		SSRObfsParam:   n.SSRObfsParam,
+		GrpcService:    n.GrpcService,
+		UDP:            nodeUDP(n.NodeType, n.UDP != nil && *n.UDP),
+		SkipCertVerify: n.SkipCertVerify != nil && *n.SkipCertVerify,
+		Group:          n.Group,
+		Raw:            fmt.Sprintf("%s@%s:%d", n.NodeType, n.Server, n.Port),
 	}
 }
 
@@ -475,6 +494,11 @@ func parseURILink(line string) (SubscribeNode, bool, error) {
 	case strings.HasPrefix(line, "ss://"):
 		n, err := parseSS(strings.TrimPrefix(line, "ss://"))
 		return n, true, err
+	// ssr:// 解析入库（阶段 X）：节点池可见、可导出到第三方客户端；
+	// 但 caps.singbox=false——永不生成实例（导入摘要明示，非静默丢弃）。
+	case strings.HasPrefix(line, "ssr://"):
+		n, err := parseSSR(strings.TrimPrefix(line, "ssr://"))
+		return n, true, err
 	case strings.HasPrefix(line, "hysteria2://"):
 		n, err := parseHysteria2(strings.TrimPrefix(line, "hysteria2://"))
 		return n, true, err
@@ -563,11 +587,15 @@ func parseSingboxJSON(body string) ([]SubscribeNode, error) {
 		if utls, ok := tlsObj["utls"].(map[string]any); ok {
 			fingerprint, _ = utls["fingerprint"].(string)
 		}
-		var network, wsPath, flow string
+		var network, wsPath, flow, grpcService string
 		var wsHeaders map[string]string
 		if tr, ok := ob["transport"].(map[string]any); ok {
 			network, _ = tr["type"].(string)
 			wsPath, _ = tr["path"].(string)
+			// 阶段 X：grpc service_name 往返（消灭「导入再导出丢信息」循环）。
+			if network == "grpc" {
+				grpcService, _ = tr["service_name"].(string)
+			}
 			if hdrs, ok := tr["headers"].(map[string]any); ok {
 				hm := make(map[string]string, len(hdrs))
 				for k, v := range hdrs {
@@ -588,6 +616,8 @@ func parseSingboxJSON(body string) ([]SubscribeNode, error) {
 		}
 
 		var password, uuid, cipher, username string
+		var ssrProtocol, ssrProtoParam, ssrObfsParam string
+		nodeType = canonicalProtocol(nodeType) // 别名收敛（hy2→hysteria2、shadowsocks→ss、shadowsocksr→ssr）；未知保留原值
 		switch nodeType {
 		case "vless":
 			uuid, _ = ob["uuid"].(string)
@@ -599,14 +629,23 @@ func parseSingboxJSON(body string) ([]SubscribeNode, error) {
 			if nodeType == "tuic" {
 				uuid, _ = ob["uuid"].(string)
 			}
-		case "shadowsocks":
+		case "ss":
 			password, _ = ob["password"].(string)
 			cipher, _ = ob["method"].(string)
 		case "wireguard":
 			password, _ = ob["private_key"].(string)
-		case "socks", "http":
+		case "socks5", "socks4", "http", "https":
 			password, _ = ob["password"].(string)
 			username, _ = ob["username"].(string)
+		// 阶段 X：fork 版 sing-box（nekobox 等带 SSR 的衍生内核）导出的 JSON 订阅可含
+		// shadowsocksr outbound——解析入池（官方 sing-box 不可转发，caps 明示过滤）。
+		case "ssr":
+			password, _ = ob["password"].(string)
+			cipher, _ = ob["method"].(string)
+			ssrProtocol, _ = ob["protocol"].(string)
+			ssrProtoParam, _ = ob["protocol_param"].(string)
+			obfs, _ = ob["obfs"].(string)
+			ssrObfsParam, _ = ob["obfs_param"].(string)
 		default:
 			continue
 		}
@@ -629,6 +668,7 @@ func parseSingboxJSON(body string) ([]SubscribeNode, error) {
 			Network:           network,
 			WsPath:            wsPath,
 			WsHeaders:         wsHeaders,
+			GrpcService:       grpcService,
 			Flow:              flow,
 			TLS:               tlsEnabled || realityPbk != "",
 			RealityPbk:        realityPbk,
@@ -636,6 +676,10 @@ func parseSingboxJSON(body string) ([]SubscribeNode, error) {
 			ClientFingerprint: fingerprint,
 			Obfs:              obfs,
 			ObfsPassword:      obfsPassword,
+			SSRProtocol:       ssrProtocol,
+			SSRProtoParam:     ssrProtoParam,
+			SSRObfsParam:      ssrObfsParam,
+			UDP:               nodeUDP(nodeType, false),
 			SkipCertVerify:    insecure,
 			Raw:               string(raw),
 		})
@@ -782,6 +826,138 @@ func parseTrojan(rest string) (SubscribeNode, error) {
 		TLS:       tls,
 		Raw:       "trojan://" + rest,
 	}, nil
+}
+
+// parseSSR 解析 ssr://（fancy-ssr 规范，兼容 mihomo/v2rayN 导出形态）：
+//
+//	ssr://base64url( host:port:protocol:cipher:password:base64url( obfs[/?k=v&...] ) )[/?外层k=v]#name
+//
+// 内层 query 键：obfs / obfsparam / protoparam / protocol / uid / sid / group / tls-auth /
+// udp-port / ssrport；obfsparam、protoparam、uid、sid、group 为 **二次编码**
+// （utf8 → percentEncode → base64url），解码顺序相反。
+// 阶段 X 定位：SSR 仅解析入库（节点池可见、可导出到第三方客户端）；
+// sing-box 内核不可转发（caps.singbox=false），实例生成端明示过滤。
+func parseSSR(rest string) (SubscribeNode, error) {
+	body, name := splitFragment(rest)
+	var outerQuery string
+	// 外层 /?k=v（少数导出把参数放外层；与内层合并，内层优先由后写覆盖决定）
+	if h, q, ok := strings.Cut(body, "/?"); ok {
+		body, outerQuery = h, q
+	} else if i := strings.IndexByte(body, '?'); i >= 0 {
+		body, outerQuery = body[:i], body[i+1:]
+	}
+	raw, ok := decodeBase64Loose(body)
+	if !ok {
+		return SubscribeNode{}, fmt.Errorf("ssr payload 非 base64")
+	}
+	parts := strings.SplitN(strings.TrimSpace(raw), ":", 6)
+	if len(parts) < 5 {
+		return SubscribeNode{}, fmt.Errorf("ssr payload 段数不足（期望 host:port:protocol:cipher:password[:inner]）")
+	}
+	server, port, err := splitHostPort(parts[0] + ":" + strings.TrimSpace(parts[1]))
+	if err != nil {
+		return SubscribeNode{}, fmt.Errorf("ssr host:port: %w", err)
+	}
+	protocol, cipher, password := parts[2], parts[3], parts[4]
+	obfs := "plain"
+	var protoParam, obfsParam, group, udpPort string
+	if len(parts) == 6 { // 第 6 段 base64url(obfs[/?query])（旧导出可能为空）
+		if inner, ok := decodeBase64Loose(parts[5]); ok {
+			if hq, q, ok := strings.Cut(inner, "/?"); ok {
+				obfs = hq
+				protoParam, obfsParam, group, udpPort = ssrInnerParams(q)
+			} else if inner != "" {
+				obfs = inner
+			}
+		}
+	}
+	// 外层参数并入（可覆盖内层）
+	if outerQuery != "" {
+		if p, o, g, u := ssrInnerParams(outerQuery); true {
+			if p != "" {
+				protoParam = p
+			}
+			if o != "" {
+				obfsParam = o
+			}
+			if g != "" {
+				group = g
+			}
+			if u != "" {
+				udpPort = u
+			}
+		}
+	}
+	if name == "" {
+		if g := ssrQueryValue(outerQuery, "remarks"); g != "" {
+			name = ssrDoubleDecode(g)
+		}
+	}
+	if name == "" {
+		name = server
+	}
+	udp := udpPort != "" && udpPort != "0"
+	return SubscribeNode{
+		Name:          name,
+		Server:        server,
+		Port:          port,
+		NodeType:      "ssr",
+		Password:      password,
+		Cipher:        cipher,
+		Obfs:          obfs,       // SSR 的 obfs 类型（plain/http_simple/tls1.2_ticket_auth…）
+		SSRProtocol:   protocol,   // 传输协议（origin/auth_aes128_md5/auth_chain_a…）
+		SSRProtoParam: protoParam, // protocol-param
+		SSRObfsParam:  obfsParam,  // obfs-param
+		Network:       "tcp",
+		UDP:           nodeUDP("ssr", udp),
+		TLS:           false,
+		Group:         group,
+		Raw:           "ssr://" + rest,
+	}, nil
+}
+
+// ssrInnerParams 提取内层 query 的 protoparam/obfsparam/group/udp-port（中文参数为
+// percentEncode→base64url 二次编码；单重编码/原文也容错接受）。
+func ssrInnerParams(q string) (protoParam, obfsParam, group, udpPort string) {
+	for _, pair := range strings.Split(q, "&") {
+		k, v, ok := strings.Cut(pair, "=")
+		if !ok {
+			continue
+		}
+		switch k {
+		case "protoparam", "protocol-param":
+			protoParam = ssrDoubleDecode(v)
+		case "obfsparam", "obfs-param":
+			obfsParam = ssrDoubleDecode(v)
+		case "group":
+			group = ssrDoubleDecode(v)
+		case "udp-port", "ssrport":
+			udpPort = v
+		}
+	}
+	return
+}
+
+// ssrQueryValue 取 query 里某键的原始值。
+func ssrQueryValue(q, key string) string {
+	for _, pair := range strings.Split(q, "&") {
+		if k, v, ok := strings.Cut(pair, "="); ok && k == key {
+			return v
+		}
+	}
+	return ""
+}
+
+// ssrDoubleDecode fancy-ssr 二次编码参数：先 base64url 再 percent；
+// 解不出可打印 UTF-8 时退回单层 percent（各机场/客户端实现不一致，取可用者）。
+func ssrDoubleDecode(v string) string {
+	if v == "" {
+		return ""
+	}
+	if b, ok := decodeBase64Loose(v); ok && utf8.ValidString(b) {
+		return percentDecode(b)
+	}
+	return percentDecode(v)
 }
 
 // parseSS ss://base64(method:password)@host:port#name 或 ss://base64(method:password@host:port)#name。
@@ -1311,6 +1487,7 @@ func (m *Manager) RemoveSubscriptionGroupNodes(group string) (int, error) {
 // toClashNode SubscribeNode → ClashNode（供 sing-box 生成与节点列表合并）。
 func toClashNode(n SubscribeNode) ClashNode {
 	skip := n.SkipCertVerify
+	udp := n.UDP
 	return ClashNode{
 		Name:              n.Name,
 		Server:            n.Server,
@@ -1337,6 +1514,12 @@ func toClashNode(n SubscribeNode) ClashNode {
 		PublicKey:         n.Cipher,   // wireguard: public-key 槽（singbox 生成用 cipher 回退）
 		AuthStr:           n.Password, // hysteria v1: auth-str 槽
 		Group:             n.Group,
+		// 阶段 X：SSR/grpc/UDP 反向直通（节点池展示与导出用；sing-box 生成端对 ssr 在 caps 拦截）。
+		SSRProtocol:   n.SSRProtocol,
+		SSRProtoParam: n.SSRProtoParam,
+		SSRObfsParam:  n.SSRObfsParam,
+		GrpcService:   n.GrpcService,
+		UDP:           &udp,
 	}
 }
 

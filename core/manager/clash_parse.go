@@ -79,6 +79,11 @@ func nodeFromYAML(n *yamlNode) ClashNode {
 		PrivateKey:        n.string("private-key"), // wireguard 客户端私钥
 		PublicKey:         n.string("public-key"),  // wireguard 对端公钥
 		AuthStr:           n.string("auth-str"),    // hysteria v1 认证串
+		// 阶段 X：SSR 专有键（obfs 复用 Obfs 字段）与 udp 声明位（caps.nodeUDP 三态输入）。
+		SSRProtocol:   n.string("protocol"),
+		SSRProtoParam: percentDecode(n.string("protocol-param")),
+		SSRObfsParam:  percentDecode(n.string("obfs-param")),
+		UDP:           n.boolPtr("udp"),
 	}
 	c.Port = uint16(n.intVal("port"))
 	if ws := n.mapOf("ws-opts"); ws != nil {
@@ -88,6 +93,10 @@ func nodeFromYAML(n *yamlNode) ClashNode {
 	if ro := n.mapOf("reality-opts"); ro != nil {
 		c.RealityPublicKey = ro.string("public-key")
 		c.RealityShortID = ro.string("short-id")
+	}
+	// 阶段 X：grpc-opts（clash 键 grpc-service-name → GrpcService）。
+	if gop := n.mapOf("grpc-opts"); gop != nil {
+		c.GrpcService = gop.string("grpc-service-name")
 	}
 	// 兼容扁平写法 ws-headers: {Host: ...}（老式 clash 配置）。
 	if c.WSHeaders == nil {

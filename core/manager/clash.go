@@ -30,6 +30,12 @@ type ClashNode struct {
 	PublicKey         string            `json:"public-key,omitempty"`  // wireguard 对端公钥
 	AuthStr           string            `json:"auth-str,omitempty"`    // hysteria v1 认证串
 	Group             string            `json:"group,omitempty"`
+	// 阶段 X 协议模块化补充（SSR / grpc / UDP 能力；全 omitempty 向后兼容）。
+	SSRProtocol   string `json:"protocol,omitempty"` // ssr: 传输协议（auth_aes128_md5 等）
+	SSRProtoParam string `json:"protocol-param,omitempty"`
+	SSRObfsParam  string `json:"obfs-param,omitempty"`
+	GrpcService   string `json:"grpc-service-name,omitempty"`
+	UDP           *bool  `json:"udp,omitempty"` // Clash YAML 的 udp: true/false 原样承载
 }
 
 // nodeHasCredential 节点是否具备连接凭据（含「该类型本就无需凭据」）。
