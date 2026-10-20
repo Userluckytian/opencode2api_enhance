@@ -87,8 +87,17 @@ func fetchSubscriptionWithMeta(url string) ([]SubscribeNode, SubscriptionMeta, e
 }
 
 // fetchSubscriptionWithMetaRep 同 fetchSubscriptionWithMeta，额外返回解析问题汇总（阶段 X B2）。
+// 阶段 X T5 最小下载加固（uniproxy safehttp 思路裁剪版，只加两闸门不动传输栈）：
+// ① 重定向 ≤4 跳（订阅站跳登录门户常见，无上限则可能被 30x 链拖住）；
+// ② 响应体是 HTML 页（`<!DOCTYPE`/`<html`）→ 拒收并明确报错——否则会「拉取成功 0 节点」难排查。
 func fetchSubscriptionWithMetaRep(url string) ([]SubscribeNode, SubscriptionMeta, *ParseReport, error) {
 	client := &http.Client{Timeout: 20 * time.Second}
+	client.CheckRedirect = func(req *http.Request, via []*http.Request) error {
+		if len(via) > 4 {
+			return fmt.Errorf("重定向超过 4 跳（疑似跳转循环或登录门户）")
+		}
+		return nil
+	}
 	resp, err := client.Get(url)
 	if err != nil {
 		return nil, SubscriptionMeta{}, nil, fmt.Errorf("订阅拉取失败: %v", err)
@@ -102,9 +111,18 @@ func fetchSubscriptionWithMetaRep(url string) ([]SubscribeNode, SubscriptionMeta
 	if err != nil {
 		return nil, SubscriptionMeta{}, nil, fmt.Errorf("读取订阅内容失败: %v", err)
 	}
+	if looksLikeHTMLPage(body) {
+		return nil, SubscriptionMeta{}, nil, fmt.Errorf("订阅地址返回的是网页而非订阅内容（常见原因：链接已失效/需要登录/该 URL 是订购页而非订阅直链）")
+	}
 	nodes, rep, err := parseSubscriptionWithReport(string(body))
 	meta.Profile = extractProfileName(string(body))
 	return nodes, meta, rep, err
+}
+
+// looksLikeHTMLPage 响应前 512 字节内出现 doctype/html 标签即判 HTML（大小写不敏感）。
+func looksLikeHTMLPage(b []byte) bool {
+	head := strings.ToLower(string(b[:min(len(b), 512)]))
+	return strings.Contains(head, "<!doctype html") || strings.Contains(head, "<html")
 }
 
 // parseSubscriptionHeaders 解析订阅响应头（clash-verge-rev 同款）：
