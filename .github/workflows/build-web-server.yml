@@ -1,12 +1,18 @@
 name: build-web-server
 
 # 网页自助领 Key 服务（web/）构建与发布
-# 触发：push 到 main / feature/web-self-service，且提交信息含「CI」时自动打包
+#
+# 触发：仅 push 到 main 时。若提交信息含「CI」，会在打包之后发布一个
+# GitHub Release（产物为 4 个平台的 web-server 二进制）。
+#
+# 其它分支（含 feature/web-self-service）**不触发**任何 job：
+# 推送分支只做代码同步与评审，不跑 CI、不打包、不发版。
+# 需要临时验证可在 Actions 页面手动触发（workflow_dispatch）。
 on:
   push:
     branches:
       - main
-      - feature/web-self-service
+  workflow_dispatch:
 
 jobs:
   test:
