@@ -1,0 +1,20 @@
+# 网页自助领 Key 服务 Docker Compose
+# 用法：
+#   docker compose -f deploy/web-server/compose.yml up -d
+# 首次启动看日志拿管理员初始密码：
+#   docker compose -f deploy/web-server/compose.yml logs web-server | head -20
+#
+# 数据持久化在 ./web-data（相对 compose 文件所在目录），改端口映射请同步改 config.json 的 port。
+services:
+  web-server:
+    build:
+      context: ../..
+      dockerfile: deploy/web-server/Dockerfile
+    container_name: opencode2api-web
+    restart: unless-stopped
+    ports:
+      - "23081:23081"
+    volumes:
+      - ./web-data:/app/web-data
+    environment:
+      TZ: Asia/Shanghai

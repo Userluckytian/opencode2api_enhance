@@ -106,3 +106,17 @@ docs/issue-log/*
 
 # AI 排查临时目录（一次性诊断脚本与构建产物，不入库；正式工具请放 scripts/）
 .scratch/
+
+# Web self-service runtime data
+web-data/
+dev-data/
+
+# Local API inspection dumps (GitHub release/run status)
+rel.json
+run_check.json
+
+# Rust/Tauri 构建产物（体积大，可随时重新构建）
+src-tauri/target*/
+
+# 本地构建的 web-server 二进制
+web.exe

@@ -207,3 +207,38 @@ bin/                      # 内嵌子程序源（opencode2api.exe / sing-box.exe
 docs/                     # 部署/自定义模型/性能模式/TESTING/FAQ 等文档
 docx/                     # 平台开发专题文档（Linux 开发与构建指南等）
 ```
+
+---
+
+## 网页自助领 Key 服务（`web/`）
+
+`web/` 是零外部依赖的 Go 网页版：提供「领 Key」网页与 `/v1` OpenAI 兼容网关，
+配合 nginx 反代对外提供 HTTP 服务。
+
+> **监听面（部署必读）**：web-server **默认只监听 `127.0.0.1`**。管理面
+> （`/admin.html`、`/api/admin/*`）与领取口（`/api/keys`）跑在同一个进程里，
+> 一旦绑到 `0.0.0.0`，同网段任何主机都能直连——历史上 dev 实例（23099）就因此
+> 变成绕过正式站配额/模型白名单的独立领 Key 入口。
+>
+> 生效监听地址优先级：`-listen` > `TOKEN_BUFFET_LISTEN` > `config.json` 的 `listen` >
+> 默认回环。启动日志会打印生效监听面与来源；非回环时额外打**高危告警**，
+> 开发/测试实例加 `-require-loopback` 可让进程**直接拒绝启动**。
+>
+> **生产不得暴露 18081 / 23099，管理面只经 nginx 反代暴露**，并叠加
+> Basic Auth + 来源网段白名单。
+>
+> - 反代模板：`deploy/web-server/nginx/web-server-hardened.conf`
+> - 密钥渲染（proxy_secret 不落明文）：`deploy/web-server/nginx/render-secret.sh` / `.ps1`
+> - 现网收口清单：[docs/HARDENING-CHECKLIST.md](docs/HARDENING-CHECKLIST.md)
+> - 部署文档：[docs/DEPLOY-WEB.md](docs/DEPLOY-WEB.md)
+
+```bash
+# 构建
+go build -trimpath -o web.exe ./web
+
+# 正式实例（默认只监听回环）
+./web.exe -data-dir ./web-data
+
+# 开发实例（仅本机，非回环直接拒绝启动）
+make web-dev      # 等价于 ./web.exe -data-dir ./dev-data -listen 127.0.0.1 -require-loopback
+```

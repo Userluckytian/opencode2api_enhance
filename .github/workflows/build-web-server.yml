@@ -1,0 +1,103 @@
+name: build-web-server
+
+# 网页自助领 Key 服务（web/）构建与发布
+# 触发：push 到 main / feature/web-self-service，且提交信息含「CI」时自动打包
+on:
+  push:
+    branches:
+      - main
+      - feature/web-self-service
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.22'
+      - name: Run web tests
+        run: go test ./web/... -count=1
+      - name: Run web tests with race detector
+        run: go test ./web/... -count=1 -race
+
+  release:
+    needs: test
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    if: contains(github.event.head_commit.message, 'CI')
+    strategy:
+      matrix:
+        include:
+          - os: linux
+            arch: amd64
+            ext: ""
+          - os: linux
+            arch: arm64
+            ext: ""
+          - os: windows
+            arch: amd64
+            ext: .exe
+          - os: darwin
+            arch: amd64
+            ext: ""
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.22'
+
+      - name: Build web-server (${{ matrix.os }}/${{ matrix.arch }})
+        shell: bash
+        env:
+          GOOS: ${{ matrix.os }}
+          GOARCH: ${{ matrix.arch }}
+          CGO_ENABLED: "0"
+        run: |
+          mkdir -p dist
+          go build -trimpath -ldflags "-s -w" -o dist/web-server-${{ matrix.os }}-${{ matrix.arch }}${{ matrix.ext }} ./web
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: web-server-${{ matrix.os }}-${{ matrix.arch }}
+          path: dist/web-server-${{ matrix.os }}-${{ matrix.arch }}${{ matrix.ext }}
+          if-no-files-found: error
+
+  publish:
+    needs: release
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    if: contains(github.event.head_commit.message, 'CI')
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: Extract release body from CHANGELOG
+        id: changelog
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const content = fs.readFileSync('CHANGELOG.md', 'utf8');
+            const m = content.match(/## v[\s\S]*?(?=\n## |$)/);
+            core.setOutput('body', m ? m[0].trim() : '');
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: web-v${{ github.run_number }}
+          name: "opencode2api 网页版 v${{ github.run_number }}"
+          body: ${{ steps.changelog.outputs.body }}
+          files: artifacts/*
+          draft: false
+          prerelease: false

@@ -1,0 +1,165 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>token自助餐厅</title>
+<link rel="stylesheet" href="style.css">
+<style>
+/* 领取页专属配色：与后台同一套 teal/slate 色系。
+   放在这里而不是改 style.css，是因为 style.css 被后台 admin.html 共用。 */
+body.claim {
+  min-height:100vh;
+  display:flex; flex-direction:column;
+  background:
+    radial-gradient(1100px 520px at 12% -8%, #d1fae5 0%, rgba(209,250,229,0) 62%),
+    radial-gradient(900px 460px at 92% 4%, #e0f2fe 0%, rgba(224,242,254,0) 58%),
+    linear-gradient(180deg, #f8fafc 0%, #f1f5f9 100%);
+  background-attachment:fixed;
+  color:#0f172a;
+}body.claim header {
+  background:rgba(255,255,255,.82);
+  backdrop-filter:saturate(180%) blur(12px);
+  border-bottom:1px solid #e2e8f0;
+  box-shadow:0 1px 0 rgba(15,23,42,.02);
+  padding:14px 24px;
+}
+body.claim .brand { display:flex; align-items:center; gap:9px; font-size:17px; color:#0f172a; }
+body.claim .brand::before {
+  content:""; width:9px; height:9px; border-radius:999px;
+  background:linear-gradient(135deg,#14b8a6,#0f766e);
+  box-shadow:0 0 0 4px rgba(20,184,166,.16);
+}
+body.claim .link-btn { border-color:#cbd5e1; color:#475569; background:#fff; border-radius:9px; }
+body.claim .link-btn:hover { border-color:#0f766e; color:#0f766e; background:#f0fdfa; }
+
+body.claim main.card {
+  max-width:520px; margin:32px auto 24px; padding:30px 32px 26px;
+  background:rgba(255,255,255,.92);
+  border:1px solid #e2e8f0;
+  border-radius:20px;
+  box-shadow:0 24px 60px -18px rgba(15,23,42,.18), 0 2px 6px rgba(15,23,42,.04);
+}
+body.claim .eyebrow {
+  display:inline-block; font-size:12px; font-weight:700; letter-spacing:.12em;
+  color:#0f766e; background:#ecfdf5; border:1px solid #a7f3d0;
+  padding:3px 10px; border-radius:999px; margin-bottom:12px;
+}
+body.claim h1 { font-size:23px; font-weight:700; color:#0f172a; letter-spacing:-.2px; margin-bottom:6px; }
+body.claim .hint { color:#64748b; font-size:13.5px; margin-bottom:18px; }
+body.claim label { color:#334155; font-weight:600; font-size:14px; margin-bottom:7px; }
+body.claim select {
+  width:100%; padding:10px 13px; font-size:15px; color:#0f172a;
+  border:1px solid #cbd5e1; border-radius:11px; background:#fff; margin-bottom:13px;
+  transition:border-color .15s, box-shadow .15s;
+}
+body.claim select:focus { outline:none; border-color:#0f766e; box-shadow:0 0 0 3px rgba(15,118,110,.14); }
+body.claim .primary {
+  width:100%; padding:11px 16px; font-size:15px; font-weight:600; border:none; border-radius:11px;
+  background:linear-gradient(135deg,#0d9488,#0f766e);
+  color:#fff; cursor:pointer; margin-bottom:0;
+  box-shadow:0 8px 20px -8px rgba(13,148,136,.65);
+  transition:transform .12s ease, box-shadow .12s ease, filter .12s ease;
+}
+body.claim .primary:hover { filter:brightness(1.06); transform:translateY(-1px); box-shadow:0 12px 24px -8px rgba(13,148,136,.7); }
+body.claim .primary:active { transform:translateY(0); }
+body.claim .primary:disabled { opacity:.55; cursor:not-allowed; transform:none; box-shadow:none; }
+
+/* 结果区：领取后展开，改用紧凑布局把整页高度压住，避免出现滚动条 */
+body.claim .result {
+  margin-top:16px; padding:14px; border-radius:14px;
+  background:linear-gradient(180deg,#f8fafc,#f1f5f9);
+  border:1px solid #e2e8f0;
+}
+body.claim .rules-box {
+  margin-top:16px; padding:13px 15px; border-radius:12px;
+  background:#f0fdfa; border:1px solid #a7f3d0;
+}
+body.claim .rules-box .rules { margin:0; padding-left:18px; }
+body.claim .rules-box .rules li { font-size:12.5px; color:#134e4a; line-height:1.8; }
+body.claim .rules-box .rules li b { color:#0f766e; }
+body.claim .result .row2 { display:grid; grid-template-columns:1fr; gap:9px; margin-bottom:10px; }
+body.claim .k {
+  display:block; font-size:11.5px; font-weight:600; color:#64748b; margin-bottom:3px;
+  letter-spacing:.04em;
+}
+body.claim code {
+  display:block; word-break:break-all; background:#fff; color:#0f172a;
+  border:1px solid #e2e8f0; border-left:3px solid #0f766e;
+  padding:7px 10px; border-radius:8px; font-size:12.5px; line-height:1.45;
+  font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+}
+body.claim #copyBtn {
+  margin-top:0; padding:8px 15px; border-radius:9px; font-size:13.5px; font-weight:600;
+  border:1px solid #0f766e; background:#fff; color:#0f766e; cursor:pointer;
+  transition:background .15s, color .15s;
+}
+body.claim #copyBtn:hover { background:#0f766e; color:#fff; }
+body.claim .tiny { color:#64748b; font-size:12px; margin-top:9px; line-height:1.55; }
+body.claim .error {
+  margin-top:14px; padding:10px 13px; border-radius:10px;
+  background:#fef2f2; border:1px solid #fecaca; color:#b91c1c; font-weight:600; font-size:14px;
+}
+body.claim footer {
+  margin-top:auto; padding:12px 24px 14px; text-align:center;
+  color:#94a3b8; font-size:12.5px;
+}
+/* 视口不够高时优先压掉页脚与上下留白，而不是让页面出现滚动条 */
+@media (max-height:780px) {
+  body.claim header { padding:11px 24px; }
+  body.claim main.card { margin:18px auto 12px; padding:22px 26px 20px; }
+  body.claim .eyebrow { margin-bottom:9px; }
+  body.claim h1 { font-size:21px; }
+  body.claim .hint { margin-bottom:13px; }
+  body.claim footer { padding:6px 24px 8px; font-size:12px; }
+}
+@media (max-height:680px) {
+  body.claim header { padding:9px 24px; }
+  body.claim main.card { margin:10px auto 8px; padding:16px 24px 15px; }
+  body.claim .eyebrow { display:none; }
+  body.claim h1 { font-size:19px; margin-bottom:4px; }
+  body.claim .hint { margin-bottom:10px; font-size:13px; }
+  body.claim select { margin-bottom:10px; padding:9px 12px; }
+  body.claim .primary { padding:10px 16px; }
+  body.claim .result { margin-top:12px; padding:12px; }
+  body.claim .result .row2 { gap:7px; margin-bottom:8px; }
+  body.claim code { padding:6px 9px; }
+  body.claim .tiny { margin-top:7px; font-size:11.5px; }
+  body.claim footer { display:none; }
+}
+@media (max-width:560px) {
+  body.claim main.card { margin:20px 16px; padding:24px 20px 22px; }
+  body.claim h1 { font-size:20px; }
+}
+</style>
+</head>
+<body class="claim">
+<header>
+  <div class="brand">token自助餐厅</div>
+  <button id="adminLink" class="link-btn">进入管理员入口</button>
+</header>
+
+<main class="card">
+  <span class="eyebrow">自助领取</span>
+  <h1>领取 API Key</h1>
+  <p class="hint">选择一个模型，点击获取，即可拿到你的访问地址和 Key。</p>
+  <label for="model">选择模型</label>
+  <select id="model"></select>
+  <button id="getKeyBtn" class="primary">获取 Key</button>
+  <div id="rules" class="rules-box"><div class="muted" style="font-size:12px">规则加载中…</div></div>
+  <div id="result" class="result hidden">
+    <div class="row2">
+      <div><span class="k">访问地址</span><code id="baseUrl"></code></div>
+      <div><span class="k">你的 Key</span><code id="apiKey"></code></div>
+    </div>
+    <button id="copyBtn">一键复制</button>
+    <p class="tiny" id="resultTip" style="display:none"></p>
+    <p class="tiny">把上面的地址和 Key 填到 OpenCode / Cherry Studio / Cursor 等客户端的自定义模型配置里即可使用。</p>
+  </div>
+  <div id="error" class="error hidden"></div>
+</main>
+
+<footer>token 自助餐厅 · 内部使用</footer>
+<script src="app.js"></script>
+</body>
+</html>

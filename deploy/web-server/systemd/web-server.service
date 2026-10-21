@@ -1,0 +1,33 @@
+# 网页自助领 Key 服务 systemd 单元
+#
+# 安装：
+#   1. 将 web-server 二进制放到 /opt/opencode2api-web/web-server 并 chmod +x
+#   2. sudo cp deploy/web-server/systemd/web-server.service /etc/systemd/system/
+#   3. sudo systemctl daemon-reload && sudo systemctl enable --now web-server
+#   4. 查看初始管理员密码：sudo journalctl -u web-server -n 20 | grep 首次启动
+#
+# 端口默认 23081，如需修改请同步改 /opt/opencode2api-web/web-data/config.json 的 port 字段。
+# 公网部署请务必在前面套 nginx + HTTPS 反向代理（见 deploy/web-server/nginx/）。
+
+[Unit]
+Description=opencode2api web self-service server
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/opencode2api-web
+ExecStart=/opt/opencode2api-web/web-server -data-dir /opt/opencode2api-web/web-data
+Restart=on-failure
+RestartSec=3
+# 建议以非 root 用户运行（先创建：sudo useradd -r -s /usr/sbin/nologin webuser）
+User=webuser
+Group=webuser
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/opt/opencode2api-web/web-data
+
+[Install]
+WantedBy=multi-user.target

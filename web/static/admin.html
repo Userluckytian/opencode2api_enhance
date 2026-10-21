@@ -1,0 +1,247 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>token自助餐厅 - 管理后台</title>
+<link rel="stylesheet" href="style.css">
+<style>
+:root { --ok:#0f766e; --warn:#b45309; --danger:#b91c1c; --line:#e5e7eb; --soft:#f8fafc; }
+body { background:#f1f5f9; }
+/* 侧栏固定贴左，右侧内容区自适应铺满剩余宽度 */
+.layout { display:flex; min-height:calc(100vh - 64px); }
+aside { width:216px; flex-shrink:0; background:#fff; border-right:1px solid var(--line); padding:18px 12px; }
+aside .brand { font-size:16px; font-weight:700; padding:0 10px 14px; color:#0f172a; }
+aside .brand small { display:block; font-weight:400; color:var(--muted); font-size:12px; margin-top:2px; }
+aside nav button { display:flex; align-items:center; gap:8px; width:100%; text-align:left; padding:10px 12px; border:none; background:none; cursor:pointer; border-radius:9px; font-size:14px; color:#334155; margin-bottom:2px; }
+aside nav button:hover { background:#f1f5f9; }
+aside nav button.active { background:#0f766e; color:#fff; font-weight:600; }
+/* 内容区：不再限宽，铺满侧栏右侧的剩余空间（1920 宽下自适应） */
+main.content { flex:1; min-width:0; padding:24px 28px 60px; }.view { display:none; } .view.active { display:block; }
+h2 { font-size:20px; margin-bottom:14px; }
+h3 { font-size:15px; margin-bottom:10px; }
+.page-head { display:flex; align-items:center; justify-content:space-between; gap:12px; margin-bottom:16px; flex-wrap:wrap; }
+.page-head h2 { margin:0; }
+.grid { display:grid; gap:14px; }
+.grid.c4 { grid-template-columns:repeat(4, minmax(0,1fr)); }
+.grid.c2 { grid-template-columns:repeat(2, minmax(0,1fr)); }
+/* 超宽屏下限制单列最大宽度，避免卡片被拉得过宽 */
+@media (min-width:1500px) {
+  .grid.c4 { grid-template-columns:repeat(4, minmax(0, 300px)); }
+  .grid.c2 { grid-template-columns:repeat(2, minmax(0, 460px)); }
+  .split { grid-template-columns:minmax(0,1.5fr) minmax(0,1fr); }
+}
+.card { background:#fff; border:1px solid var(--line); border-radius:14px; padding:16px 18px; }
+.card.stat .k { font-size:12px; color:var(--muted); display:block; margin-bottom:4px; }
+.card.stat .v { font-size:26px; font-weight:700; letter-spacing:-.5px; }
+.card.stat .sub { font-size:12px; color:var(--muted); margin-top:3px; }
+.row { display:flex; gap:12px; align-items:center; flex-wrap:wrap; }
+.spacer { flex:1; }
+input, select, textarea { width:100%; padding:8px 11px; border:1px solid #cbd5e1; border-radius:9px; font-size:14px; background:#fff; }
+input:focus, select:focus, textarea:focus { outline:2px solid #99f6e4; border-color:#0f766e; }
+input[type=checkbox] { width:auto; }
+label.f { display:block; font-size:12px; color:var(--muted); margin:10px 0 4px; }
+/* 覆盖 style.css 里为领取页设计的 `select, .primary { width:100% }`：
+   后台按钮应按内容宽度，否则会把同级输入框挤成一条缝。 */
+select { width:auto; }
+.btn { width:auto; margin:0; padding:8px 14px; border-radius:9px; border:1px solid #cbd5e1; background:#fff; cursor:pointer; font-size:14px; color:#334155; }
+.btn:hover { border-color:#0f766e; color:#0f766e; }
+.btn.primary { width:auto; margin:0; background:#0f766e; border-color:#0f766e; color:#fff; font-weight:600; }
+.btn.primary:hover { background:#115e59; color:#fff; }
+.btn.danger { color:var(--danger); border-color:#fecaca; }
+.btn.tiny { width:auto; margin:0; padding:4px 9px; font-size:12px; border-radius:7px; }
+table { width:100%; border-collapse:collapse; font-size:13px; }
+th, td { text-align:left; padding:9px 10px; border-bottom:1px solid #eef2f7; vertical-align:middle; }
+th { color:var(--muted); font-weight:600; white-space:nowrap; }
+tbody tr:hover { background:#f8fafc; }
+.table-wrap { overflow-x:auto; }
+.badge { display:inline-block; padding:2px 8px; border-radius:999px; font-size:12px; font-weight:600; white-space:nowrap; }
+.badge.ok { background:#ecfdf5; color:#047857; }
+.badge.warn { background:#fffbeb; color:#b45309; }
+.badge.err { background:#fef2f2; color:#b91c1c; }
+.badge.gray { background:#f1f5f9; color:#64748b; }
+.badge.blue { background:#eff6ff; color:#1d4ed8; }
+.bar { height:7px; background:#e2e8f0; border-radius:999px; overflow:hidden; min-width:90px; }
+.bar > i { display:block; height:100%; background:#0f766e; border-radius:999px; }
+.bar.warn > i { background:#d97706; } .bar.err > i { background:#dc2626; }
+.mono { font-family:ui-monospace,SFMono-Regular,Menlo,monospace; font-size:12px; }
+.muted { color:var(--muted); }
+.hint { color:var(--muted); font-size:13px; margin-bottom:10px; }
+.empty { color:var(--muted); padding:28px; text-align:center; }
+.icon-btn { border:none; background:none; cursor:pointer; color:#64748b; padding:2px 5px; border-radius:6px; }
+.icon-btn:hover { background:#f1f5f9; color:#0f766e; }
+.seg { display:inline-flex; background:#e2e8f0; border-radius:9px; padding:3px; }
+.seg button { border:none; background:none; padding:6px 14px; border-radius:7px; cursor:pointer; font-size:13px; color:#475569; }
+.seg button.on { background:#fff; color:#0f766e; font-weight:600; box-shadow:0 1px 2px rgba(0,0,0,.06); }
+.chart { display:flex; align-items:flex-end; gap:10px; height:150px; padding-top:8px; }
+.chart .col { flex:1; display:flex; flex-direction:column; align-items:center; gap:6px; min-width:0; }
+.chart .bars { width:100%; display:flex; align-items:flex-end; justify-content:center; gap:3px; height:118px; }
+.chart .bars i { width:45%; max-width:18px; background:#99f6e4; border-radius:4px 4px 0 0; min-height:2px; }
+.chart .bars i.req { background:#0f766e; }
+.chart .lab { font-size:11px; color:var(--muted); white-space:nowrap; }
+.legend { display:flex; gap:14px; font-size:12px; color:var(--muted); }
+.legend i { display:inline-block; width:9px; height:9px; border-radius:2px; margin-right:4px; }
+.kv { display:flex; justify-content:space-between; padding:6px 0; border-bottom:1px dashed #eef2f7; font-size:13px; }
+.kv:last-child { border-bottom:none; }
+.list-ip { display:flex; justify-content:space-between; gap:10px; padding:7px 0; border-bottom:1px dashed #eef2f7; font-size:13px; }
+.list-ip:last-child { border-bottom:none; }
+.login-wrap { min-height:100vh; display:flex; align-items:center; justify-content:center; background:linear-gradient(160deg,#ecfdf5,#f1f5f9 55%); }
+.login-card { width:360px; background:#fff; border-radius:18px; padding:32px; box-shadow:0 20px 50px rgba(15,23,42,.12); }
+.login-card h1 { font-size:20px; margin-bottom:4px; }
+.login-card p { color:var(--muted); font-size:13px; margin-bottom:18px; }
+.login-err { color:var(--danger); font-size:13px; margin-top:10px; min-height:18px; }
+.login-foot {
+  display:flex; align-items:center; justify-content:space-between; gap:8px 12px; flex-wrap:wrap;
+  margin-top:16px; padding-top:14px; border-top:1px solid #e2e8f0;
+}
+.login-back { font-size:13px; color:#0f766e; text-decoration:none; font-weight:600; white-space:nowrap; }
+.login-back:hover { text-decoration:underline; }
+#toasts { position:fixed; right:20px; bottom:20px; display:flex; flex-direction:column; gap:8px; z-index:80; }
+.toast { background:#0f172a; color:#fff; padding:10px 16px; border-radius:10px; font-size:13px; box-shadow:0 8px 24px rgba(2,6,23,.2); animation:tin .18s ease-out; }
+.toast.ok { background:#065f46; } .toast.err { background:#991b1b; }
+@keyframes tin { from { opacity:0; transform:translateY(6px); } to { opacity:1; transform:none; } }
+#modalRoot { position:fixed; inset:0; background:rgba(15,23,42,.45); display:none; align-items:center; justify-content:center; padding:20px; z-index:70; }
+#modalRoot.open { display:flex; }
+.modal { background:#fff; border-radius:16px; padding:22px; width:min(520px,100%); max-height:88vh; overflow:auto; box-shadow:0 24px 60px rgba(2,6,23,.25); }
+.modal h3 { font-size:17px; margin-bottom:6px; }
+.modal .actions { display:flex; justify-content:flex-end; gap:8px; margin-top:18px; }
+.chat { display:flex; flex-direction:column; gap:12px; min-height:360px; max-height:58vh; overflow:auto; padding:4px 2px; }
+.bubble { max-width:88%; padding:11px 15px; border-radius:12px; font-size:14px; line-height:1.7; white-space:pre-wrap; word-break:break-word; overflow-wrap:anywhere; }
+.bubble.me { align-self:flex-end; background:#0f766e; color:#fff; border-bottom-right-radius:3px; max-width:76%; white-space:pre-wrap; }
+.bubble.ai { align-self:flex-start; background:#f8fafc; color:#0f172a; border:1px solid #e2e8f0; border-bottom-left-radius:3px; width:88%; white-space:normal; }
+.bubble.err { align-self:flex-start; background:#fef2f2; color:#991b1b; border:1px solid #fecaca; }
+.dots::after { content:'…'; animation:dot 1.2s steps(4,end) infinite; }
+@keyframes dot { 0%{content:''} 25%{content:'.'} 50%{content:'..'} 75%{content:'...'} }
+.md-p { margin:0 0 6px; }
+.md-p:last-child { margin-bottom:0; }
+.md-h { font-weight:700; font-size:14.5px; margin:10px 0 6px; color:#0f172a; }
+.md-h:first-child { margin-top:0; }
+.md-list { margin:4px 0 8px; padding-left:20px; }
+.md-list li { margin:3px 0; }
+.bubble.ai code { display:inline; background:#e2e8f0; padding:1px 5px; border-radius:5px; font-size:12.5px; font-family:ui-monospace,SFMono-Regular,Menlo,monospace; }
+.md-table { width:100%; border-collapse:collapse; margin:8px 0; font-size:13px; display:block; overflow-x:auto; }
+.md-table th, .md-table td { border:1px solid #e2e8f0; padding:6px 9px; text-align:left; white-space:nowrap; }
+.md-table th { background:#f1f5f9; font-weight:600; }
+.chips { display:flex; gap:8px; flex-wrap:wrap; margin:12px 0; }
+.chip { border:1px solid #cbd5e1; background:#fff; border-radius:999px; padding:6px 12px; font-size:12px; cursor:pointer; color:#475569; }
+.chip:hover { border-color:#0f766e; color:#0f766e; }
+.chat-in { display:flex; gap:8px; align-items:stretch; }
+.chat-in input { flex:1 1 auto; min-width:0; width:auto; }
+.chat-in .btn { flex:0 0 auto; white-space:nowrap; align-self:center; }
+.split { display:grid; grid-template-columns:1.5fr 1fr; gap:14px; }
+@media (max-width:1100px) { .grid.c4 { grid-template-columns:repeat(2,minmax(0,1fr)); } .split { grid-template-columns:1fr; } }
+
+/* ---- 平板：表格列多，必须让表格在自己容器内横向滚动，而不是撑破页面 ---- */
+@media (max-width:1000px) {
+  .table-wrap { overflow-x:auto; -webkit-overflow-scrolling:touch; }
+  .table-wrap table { min-width:700px; }
+  .table-wrap th, .table-wrap td { white-space:nowrap; }
+  .grid.c4 { grid-template-columns:repeat(2,minmax(0,1fr)); }
+  .split { grid-template-columns:1fr; }
+}
+
+/* ---- 手机 / 窄平板：侧栏改顶部横向导航 ---- */
+@media (max-width:900px) {
+  .layout { flex-direction:column; }
+  aside { width:100%; border-right:none; border-bottom:1px solid var(--line); position:sticky; top:0; z-index:20; background:#fff; }
+  /* 导航在窄屏横向滚动，右侧加渐隐提示还有内容 */
+  aside nav {
+    display:flex; gap:4px; overflow-x:auto; -webkit-overflow-scrolling:touch;
+    scrollbar-width:none; padding-right:22px;
+    -webkit-mask-image:linear-gradient(90deg,#000 calc(100% - 22px),transparent);
+    mask-image:linear-gradient(90deg,#000 calc(100% - 22px),transparent);
+  }
+  aside nav::-webkit-scrollbar { display:none; }
+  aside nav button { width:auto; white-space:nowrap; flex:0 0 auto; }
+  aside .brand { padding-bottom:8px; }
+  main.content { padding:14px 12px 40px; }
+  .grid.c4, .grid.c2 { grid-template-columns:1fr; }
+  header { padding:12px 14px; }
+  .card { padding:14px; border-radius:12px; }
+  .page-head { gap:8px; }
+  .page-head h2 { font-size:18px; }
+
+  /* 表单行改成两列网格，控件不再各占一行 */
+  .form-grid { display:grid; grid-template-columns:1fr 1fr; gap:10px; }
+  .form-grid .full { grid-column:1 / -1; }
+  .form-grid label.f { margin:0 0 4px; }
+  .form-grid input, .form-grid select { width:100%; }
+
+  /* 表格在手机上可横向滚动（容器内），表头不换行 */
+  .table-wrap { overflow-x:auto; -webkit-overflow-scrolling:touch; }
+  .table-wrap table { min-width:640px; }
+  .table-wrap th, .table-wrap td { white-space:nowrap; }
+
+  /* 概览统计卡两列 */
+  .grid.c4 { grid-template-columns:1fr 1fr; }
+  .card.stat .v { font-size:21px; }
+
+  /* 对话气泡占满宽度，避免窄栏里长句折行过碎 */
+  .bubble.me { max-width:88%; }
+  .bubble.ai { width:96%; max-width:96%; }
+  .chat { min-height:280px; max-height:none; }
+  .chips { gap:6px; }
+  .chip { font-size:11.5px; padding:5px 10px; }
+}
+@media (max-width:420px) {
+  .grid.c4 { grid-template-columns:1fr 1fr; gap:10px; }
+  .form-grid { grid-template-columns:1fr; }
+  .login-card { width:calc(100vw - 32px); padding:26px 22px 22px; }
+  .login-foot { flex-direction:column; align-items:flex-start; gap:6px; }
+}
+</style>
+</head>
+<body>
+
+<div id="loginView" class="login-wrap">
+  <form class="login-card" id="loginForm">
+    <h1>token 自助餐厅</h1>
+    <p>管理后台 · 请输入管理员密码</p>
+    <input id="loginPw" type="password" placeholder="管理员密码" autocomplete="current-password" autofocus>
+    <button class="btn primary" style="width:100%;margin-top:10px;" type="submit">登录</button>
+    <div class="login-err" id="loginErr"></div>
+    <div class="login-foot">
+      <a class="login-back" href="../" id="backToClaim" data-claim-link>← 返回领取页</a>
+      <span class="muted" style="font-size:12px">没有密码？联系管理员获取</span>
+    </div>
+  </form>
+</div>
+
+<div id="appView" style="display:none;">
+  <header>
+    <div class="brand">token 自助餐厅 <span class="muted" style="font-weight:400;font-size:13px;">管理后台</span></div>
+    <div class="row">
+      <a class="btn tiny" href="../" data-claim-link target="_blank" rel="noopener">领取页</a>
+      <button id="logout" class="btn tiny">退出</button>
+    </div>
+  </header>
+  <div class="layout">
+    <aside>
+      <nav>
+        <button data-view="overview" class="active">概览</button>
+        <button data-view="keys">Key 管理</button>
+        <button data-view="logs">调用日志</button>
+        <button data-view="ips">IP 管理</button>
+        <button data-view="models">模型管理</button>
+        <button data-view="settings">参数设置</button>
+        <button data-view="ask">AI 问答</button>
+      </nav>
+    </aside>
+    <main class="content">
+      <div id="overview" class="view active"></div>
+      <div id="keys" class="view"></div>
+      <div id="logs" class="view"></div>
+      <div id="ips" class="view"></div>
+      <div id="models" class="view"></div>
+      <div id="settings" class="view"></div>
+      <div id="ask" class="view"></div>
+    </main>
+  </div>
+</div>
+
+<div id="toasts"></div>
+<div id="modalRoot"><div class="modal" id="modalBox"></div></div>
+
+<script src="admin.js"></script>
+</body>
+</html>
