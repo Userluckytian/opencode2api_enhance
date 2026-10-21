@@ -603,7 +603,7 @@ curl.exe -s -o NUL -w "noauth=%{http_code}`n" "http://192.168.12.17/token-buffet
 
 | 密钥 | 现网位置 | 危害 | 轮换步骤 |
 |---|---|---|---|
-| `proxy_secret` = `10baaee90658e38fd393d6540b507650` | 现场 nginx conf **明文** + `D:\nginx\opencode2api-web\web-data\config.json` | 同机任意低权限进程可读 → 可伪造 `X-Proxy-Secret` + `X-Real-IP`，**绕过全部 IP 策略 / 限领 / 白名单**（fact 594、fact 592 已在 23099 实测落盘伪造 IP `10.0.0.55`） | ① 在 `web-data\config.json` 写入**新随机值**（≥32 字节随机）；② 重启 web-server；③ 用 `deploy\web-server\nginx\render-secret.ps1` 重新渲染 0600 的 include 片段；④ nginx conf 里的明文 `proxy_set_header X-Proxy-Secret "..."` 换成 `include D:/nginx/conf/snippets/token-buffet-proxy-secret.conf;`；⑤ `nginx -t && nginx -s reload`；⑥ **旧值作废** |
+| `proxy_secret` = `10baaee9…（已作废，需轮换）` | 现场 nginx conf **明文** + `D:\nginx\opencode2api-web\web-data\config.json` | 同机任意低权限进程可读 → 可伪造 `X-Proxy-Secret` + `X-Real-IP`，**绕过全部 IP 策略 / 限领 / 白名单**（fact 594、fact 592 已在 23099 实测落盘伪造 IP `10.0.0.55`） | ① 在 `web-data\config.json` 写入**新随机值**（≥32 字节随机）；② 重启 web-server；③ 用 `deploy\web-server\nginx\render-secret.ps1` 重新渲染 0600 的 include 片段；④ nginx conf 里的明文 `proxy_set_header X-Proxy-Secret "..."` 换成 `include D:/nginx/conf/snippets/token-buffet-proxy-secret.conf;`；⑤ `nginx -t && nginx -s reload`；⑥ **旧值作废** |
 | `upstream_api_key` = `sk-unified-local` | `web-data\config.json` **明文**（正式 + dev 两份都有） | 已在公开前端包泄露（finding 560）；且**兼作 40080 管理面板口令** | ① 改为环境变量注入 `TOKEN_BUFFET_UPSTREAM_API_KEY`（`web/config.go` 已支持，优先级高于 config.json）；② 从 `config.json` 里删除该字段；③ 轮换 40080 侧面板口令；④ 同步清理 dev 实例 |
 | 6 个生产实例的明文管理口令 | `40080` 的 `GET /api/admin/instances` 可明文读走 | 拿到即可逐台接管实例 | 逐台登录 `40080` 管理面改口令，或在 `src-tauri` 侧重新生成并写回实例配置；改完后旧的 6 条一律作废 |
 | **119 条第三方上游明文 API Key** | `40080` 的 `GET /api/admin/custom-providers` 明文可读 | 已确认泄露，可被二次利用直接消耗第三方额度 | 到各上游控制台**逐条重新生成并替换**；替换完成前，把这 119 条**一律视为已泄露**（不要因为「没人看到」而不换） |
@@ -661,10 +661,10 @@ curl.exe -s -o NUL -w "noauth=%{http_code}`n" "http://192.168.12.17/token-buffet
 
 ### 4.5 其它残留风险
 
-1. **历史泄露密钥必须视为已泄露（feature 树侧已轮换部分）**。`sk-unified-local` 曾出现在**可公开下载的前端包**里，并同时充当 40080 面板口令与 `/v1` 门禁密钥；`10baaee90658e38fd393d6540b507650` 明文躺在 nginx conf 与 `config.json` 里；119 条上游 Key 与 6 个实例口令可从 40080 明文读走。token-buffet 侧的 `upstream_api_key` 本次已轮换，但 119 条上游 Key 与 40080 面板口令的轮换**属 main 树，本次未做**。**删除代码里的常量 ≠ 轮换密钥**。
+1. **历史泄露密钥必须视为已泄露（feature 树侧已轮换部分）**。`sk-unified-local` 曾出现在**可公开下载的前端包**里，并同时充当 40080 面板口令与 `/v1` 门禁密钥；`10baaee9…（已作废，需轮换）` 明文躺在 nginx conf 与 `config.json` 里；119 条上游 Key 与 6 个实例口令可从 40080 明文读走。token-buffet 侧的 `upstream_api_key` 本次已轮换，但 119 条上游 Key 与 40080 面板口令的轮换**属 main 树，本次未做**。**删除代码里的常量 ≠ 轮换密钥**。
 2. **main 与 feature 两棵源码树并存，需要统一**。两棵树对同一套 `/api/admin/*` 管理面各自演进，安全修复会互相覆盖。建议：把 token-buffet 站点族收敛到**单一 feature 分支**并让 main 合入，main 侧只保留「对外网关 + 实例管理」职责。
 3. **web 包 `go test` 红灯已由意图 771 修复**（只改测试夹具注入 `cfg.PublicBaseURL`）。**每次合并/改码后必须复跑** `go test ./web/ -count=1`。
-4. **`proxy_secret` 仍为明文常量 `10baaee90658e38fd393d6540b507650`**（`config.json`）。生产 nginx conf 若仍明文携带该值，则同机任意低权限进程可伪造 `X-Proxy-Secret` + `X-Real-IP` 绕过 IP 策略。建议按第三章 3.5 轮换并改走 include 片段。
+4. **`proxy_secret` 仍为明文常量 `10baaee9…（已作废，需轮换）`**（`config.json`）。生产 nginx conf 若仍明文携带该值，则同机任意低权限进程可伪造 `X-Proxy-Secret` + `X-Real-IP` 绕过 IP 策略。建议按第三章 3.5 轮换并改走 include 片段。
 5. **40000 端口的空口令实例仍在运行**（finding 701，**main 树**）—— 见第六章，**本次未修**。
 6. **本任务未覆盖的面**：`ask`（AI 问数）链路的额度与配额一致性、跨实例 Key 的隔离、`src-tauri` 与后端之间的 IPC 授权面，均未做专项测试。
 

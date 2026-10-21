@@ -153,7 +153,7 @@ $env:TOKEN_BUFFET_PROXY_SECRET = '<proxy_secret>'
 
 | 密钥 | 位置 | 风险 | 处理 |
 | --- | --- | --- | --- |
-| `proxy_secret` = `10baaee90658e38fd393d6540b507650` | 现场 nginx conf **明文** + `D:\nginx\opencode2api-web\web-data\config.json` | 同机任意低权限进程可读 → 可伪造 `X-Proxy-Secret` + `X-Real-IP`，**绕过全部 IP 策略/限领/白名单**（fact 594、fact 592 已在 23099 实测落盘伪造 IP 10.0.0.55） | ① 用 `web-data/config.json` 里的新值重跑 `render-secret.sh` / `render-secret.ps1` 覆盖片段；② nginx 侧只保留 `include`；③ 旧值作废 |
+| `proxy_secret` = `10baaee9…（已作废，需轮换）` | 现场 nginx conf **明文** + `D:\nginx\opencode2api-web\web-data\config.json` | 同机任意低权限进程可读 → 可伪造 `X-Proxy-Secret` + `X-Real-IP`，**绕过全部 IP 策略/限领/白名单**（fact 594、fact 592 已在 23099 实测落盘伪造 IP 10.0.0.55） | ① 用 `web-data/config.json` 里的新值重跑 `render-secret.sh` / `render-secret.ps1` 覆盖片段；② nginx 侧只保留 `include`；③ 旧值作废 |
 | `upstream_api_key` = `sk-unified-local` | `web-data/config.json` **明文**（正式 + dev 两份都有） | 已在公开前端包泄露（finding 560）；且**兼作 40080 管理面板口令** | ① 改为环境变量注入 `TOKEN_BUFFET_UPSTREAM_API_KEY`（`web/config.go` 已支持，优先级高于 config.json）；② 从 `config.json` 里删除该字段；③ 轮换 40080 侧口令；④ 同步清理 dev 实例 |
 | admin 口令 `0099` | 任务上下文给定 | 管理面唯一一道应用层防线 | 套用 nginx Basic Auth + IP 白名单后形成三道；仍建议定期轮换并与 nginx 口令不同 |
 
