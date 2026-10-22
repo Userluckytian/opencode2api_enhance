@@ -161,6 +161,8 @@ const ROUTE_VERDICT_TAGS: Record<string, RouteVerdictTag> = {
   direct_config_missing: { label: '配置丢失·已回退直连', color: 'bg-red-100 text-red-700' },
   // 免费层、SOCKS 有配置但节点仍空 → 灰色异常
   direct_unexpected: { label: '异常直连', color: 'bg-zinc-200 text-zinc-700' },
+  // 免费层已配代理、池内无可用节点 → 本地 503 快失败（不是直连）
+  no_healthy_node: { label: '无可用节点（池空）', color: 'bg-amber-100 text-amber-700' },
 }
 
 /** 取路由判定标签；空值 / 缺失 / 未知枚举 → null（调用方降级为 '-'） */
@@ -894,17 +896,6 @@ function ChevronUpIcon() {
   return <ChevronDown size={16} className="rotate-180" />
 }
 
-const lowerBound = (arr: number[], x: number): number => {
-  let lo = 0
-  let hi = arr.length
-  while (lo < hi) {
-    const mid = (lo + hi) >> 1
-    if ((arr[mid] as number) < x) lo = mid + 1
-    else hi = mid
-  }
-  return lo
-}
-
 const medianOf = (arr: number[]): number | null => {
   if (arr.length === 0) return null
   const a = [...arr].sort((x, y) => x - y)
@@ -919,6 +910,7 @@ const pctileOf = (arr: number[], p: number): number | null => {
 }
 
 const ERR_CLASS_LABELS: Record<string, string> = {
+  pool: '节点/账号池',
   rate_limit: '限流 (429)',
   quota: '额度 (402)',
   auth: '认证 (401/403)',
@@ -933,6 +925,7 @@ const DECISION_LABELS: Record<string, string> = {
   healthy: '健康选路',
   cooldown_fallback: '冷却回退',
   badpool_probe: '坏池探测',
+  badpool_relief: '坏池减压/探测',
   race: '节点竞速',
   direct: '直连',
   none: '无可用节点',
@@ -943,140 +936,269 @@ const DECISION_LABELS: Record<string, string> = {
 function attemptsChain(r: CallLogRecord): string {
   const a = r.attempts
   if (!a || a.length === 0) return ''
+  const empty = r.route_verdict === 'no_healthy_node' ? '无可用节点' : '直连'
   return a
-    .map((x) => `${(x.node || '直连').split('@').pop() || '直连'}:${x.status}${x.duration_ms >= 1000 ? `(${(x.duration_ms / 1000).toFixed(1)}s)` : ''}`)
+    .map((x) => `${(x.node || empty).split('@').pop() || empty}:${x.status}${x.duration_ms >= 1000 ? `(${(x.duration_ms / 1000).toFixed(1)}s)` : ''}`)
     .join(' → ')
 }
 
 /** 错误分析视图：429 频率与恢复、错误码/类分布、失败时池快照、CSV 导出。
  *  优先用 schema_version=2 的结构化字段，旧记录回退到正则文本匹配。 */
-function ErrorAnalysisView({ logs }: { logs: CallLogRecord[] }) {
-  const asc = useMemo(() => [...logs].sort((a, b) => String(a.ts).localeCompare(String(b.ts))), [logs])
+type ErrScope = 'pool' | 'all'
 
-  const nodeOf = (r: CallLogRecord) => r.nodes?.slice(-1)[0] ?? ''
-  const blobOf = (r: CallLogRecord) =>
-    ((r.err_msg || '') + ' ' + (r.events || []).map((e) => e.detail || '').join(' ')).toLowerCase()
-  const is429 = (r: CallLogRecord): boolean => {
-    if (r.upstream_status === 429 || r.error_class === 'rate_limit') return true
-    if (r.error_code && /rate_limit|429|freeusagelimit/i.test(r.error_code)) return true
-    if ((r.upstream_status ?? 0) > 0 && r.upstream_status !== 429) return false
-    const b = blobOf(r)
-    return /429|rate.?limit|免费额度|额度用尽|rate_limit_exceeded|freeusagelimit/.test(b)
-  }
-  const classOf = (r: CallLogRecord): string => {
-    if (r.error_class === 'other' && /context_length|max_context|context_window/i.test(r.error_code || '')) {
-      return 'context_length'
-    }
-    if (r.error_class) return r.error_class
-    const b = blobOf(r)
-    if (/context_length_exceeded|maximum context length/i.test(b)) return 'context_length'
-    if (/429|rate.?limit|额度用尽|freeusagelimit/.test(b)) return 'rate_limit'
-    if (/401|403|认证|forbidden/.test(b)) return 'auth'
-    if (/402/.test(b)) return 'quota'
-    if (/50[0234]|unexpected eof|upstream|超时|timeout/.test(b)) return 'upstream'
-    if (/dial|connect|refused|i\/o timeout|连接/.test(b)) return 'transport'
-    return 'other'
-  }
+/** 错误分析：口径优先使用 schema v3 结构化字段；旧记录回退文本匹配。
+ *  - 429 分「最终失败 / 中途已恢复 / 含 429 请求」，不再混成一个数；
+ *  - 恢复时间按「同节点 429 → 600s 内下一次 2xx」计算，超窗记删失；
+ *  - 默认只看 opencode 免费层，避免自定义厂商直连污染池指标。 */
+function ErrorAnalysisView({ logs }: { logs: CallLogRecord[] }) {
+  const [scope, setScope] = useState<ErrScope>('pool')
 
   const stats = useMemo(() => {
-    const okTimesAsc: number[] = []
+    const vendorOf = (r: CallLogRecord) => {
+      if (r.vendor) return r.vendor
+      const m = r.model || ''
+      const i = m.indexOf('/')
+      if (i > 0) return m.slice(0, i)
+      if (r.route_verdict === 'proxied' || r.route_verdict === 'no_healthy_node') return 'opencode'
+      return 'unknown'
+    }
+    const isPoolRecord = (r: CallLogRecord) => {
+      if (r.tier === 'paid') return false
+      if (r.vendor) return r.vendor === 'opencode'
+      if (r.route_verdict === 'proxied' || r.route_verdict === 'no_healthy_node') return true
+      if (r.route_verdict) return false
+      return !(r.model || '').includes('/')
+    }
+    const scoped = scope === 'pool' ? logs.filter(isPoolRecord) : logs
+    const asc = [...scoped].sort((a, b) => String(a.ts).localeCompare(String(b.ts)))
+
+    const attemptsOf = (r: CallLogRecord) => (r.attempts || []).filter((a) => a && typeof a.status === 'number')
+    const is2xx = (s: number) => s >= 200 && s < 300
+    const has429 = (r: CallLogRecord) => attemptsOf(r).some((a) => a.status === 429)
+    const final429 = (r: CallLogRecord) =>
+      r.status !== 'ok' &&
+      (r.upstream_status === 429 ||
+        r.error_class === 'rate_limit' ||
+        (r.error_code || '').toLowerCase().includes('rate_limit'))
+    const classOf = (r: CallLogRecord): string => {
+      if (r.error_class === 'other' && /context_length|max_context|context_window/i.test(r.error_code || '')) return 'context_length'
+      if (r.error_class) return r.error_class
+      const b = ((r.err_msg || '') + ' ' + (r.events || []).map((e) => e.detail || '').join(' ')).toLowerCase()
+      if (/context_length_exceeded|maximum context length/i.test(b)) return 'context_length'
+      if (/429|rate.?limit|额度用尽|freeusagelimit/.test(b)) return 'rate_limit'
+      if (/401|403|认证|forbidden/.test(b)) return 'auth'
+      if (/402/.test(b)) return 'quota'
+      if (/50[0234]|unexpected eof|upstream|超时|timeout/.test(b)) return 'upstream'
+      if (/dial|connect|refused|i\/o timeout|连接/.test(b)) return 'transport'
+      return 'other'
+    }
+
+    // ---- 同节点恢复：429 episode → 600s 内同节点下一次 2xx；超窗记删失 ----
+    const WINDOW_S = 600
+    const nodeSeq = new Map<string, Array<{ t: number; status: number }>>()
     for (const r of asc) {
-      if (r.status !== 'ok') continue
       const t = Date.parse(r.ts)
       if (Number.isNaN(t)) continue
-      okTimesAsc.push(t)
-    }
-    const p429 = asc.filter(is429)
-    const recAny: number[] = []
-    const detail = p429.map((r) => {
-      const t = Date.parse(r.ts)
-      const n = nodeOf(r) || '直连'
-      const arr = [...okTimesAsc].sort((a, b) => a - b)
-      const iAny = lowerBound(arr, t)
-      const rec = iAny < arr.length ? ((arr[iAny] as number) - t) / 1000 : null
-      if (rec != null) recAny.push(rec)
-      return { r, t, node: n, rec, hourKey: r.ts.slice(0, 13), classKey: classOf(r), codeKey: r.error_code || classOf(r) }
-    })
-    const hourly = new Map<string, number>()
-    const byModel = new Map<string, number>()
-    const byNode = new Map<string, number>()
-    const byClass = new Map<string, number>()
-    const byCode = new Map<string, number>()
-    const failClasses = new Map<string, number>()
-    const byDecision = new Map<string, number>()
-    const policyVers = new Map<string, number>()
-    let poolAvail = 0
-    let poolBad = 0
-    let poolN = 0
-    for (const d of detail) {
-      hourly.set(d.hourKey, (hourly.get(d.hourKey) || 0) + 1)
-      byModel.set(d.r.model || '未知', (byModel.get(d.r.model || '未知') || 0) + 1)
-      byNode.set(d.node, (byNode.get(d.node) || 0) + 1)
-      byClass.set(d.classKey, (byClass.get(d.classKey) || 0) + 1)
-      byCode.set(d.codeKey, (byCode.get(d.codeKey) || 0) + 1)
-      byDecision.set(d.r.decision?.reason || 'legacy', (byDecision.get(d.r.decision?.reason || 'legacy') || 0) + 1)
-      if (d.r.policy_ver) policyVers.set(d.r.policy_ver, (policyVers.get(d.r.policy_ver) || 0) + 1)
-      if (d.r.pool) {
-        poolAvail += d.r.pool.available
-        poolBad += d.r.pool.bad_quota + d.r.pool.bad_auth + d.r.pool.bad_link
-        poolN++
+      for (const a of attemptsOf(r)) {
+        const node = (a.node || '').trim()
+        if (!node) continue
+        const arr = nodeSeq.get(node)
+        if (arr) arr.push({ t, status: a.status })
+        else nodeSeq.set(node, [{ t, status: a.status }])
       }
     }
-    for (const r of asc) {
-      if (r.status === 'ok') continue
+    const nodeStats = new Map<string, { attempts: number; ok: number; n429: number; recovery: number[]; censored: number }>()
+    for (const [node, seq] of nodeSeq) {
+      seq.sort((a, b) => a.t - b.t)
+      const st = { attempts: seq.length, ok: 0, n429: 0, recovery: [] as number[], censored: 0 }
+      let pending: number | null = null
+      for (const it of seq) {
+        if (it.status === 429) {
+          st.n429++
+          if (pending == null) pending = it.t
+        } else if (is2xx(it.status)) {
+          st.ok++
+          if (pending != null) {
+            const gap = (it.t - pending) / 1000
+            if (gap >= 0 && gap <= WINDOW_S) st.recovery.push(gap)
+            else st.censored++
+            pending = null
+          }
+        }
+      }
+      if (pending != null) st.censored++
+      nodeStats.set(node, st)
+    }
+    const recoveryAll = [...nodeStats.values()].flatMap((s) => s.recovery)
+    const censoredN = [...nodeStats.values()].reduce((a, s) => a + s.censored, 0)
+
+    // ---- 请求级 429 口径 ----
+    const final429Rows = asc.filter(final429)
+    const transientRows = asc.filter((r) => r.status === 'ok' && has429(r))
+    const hit429Rows = asc.filter((r) => final429(r) || has429(r))
+    const failRows = asc.filter((r) => r.status !== 'ok')
+    const nodesOf = (r: CallLogRecord) => {
+      const set = new Set<string>()
+      for (const a of attemptsOf(r)) {
+        const n = (a.node || '').trim()
+        if (n) set.add(n)
+      }
+      return set
+    }
+    const cross = hit429Rows.filter((r) => nodesOf(r).size > 1)
+    const same = hit429Rows.filter((r) => attemptsOf(r).length > 1 && nodesOf(r).size === 1)
+
+    // ---- 429 后的下一跳 ----
+    const nextAfter429 = new Map<string, number>()
+    for (const r of hit429Rows) {
+      const a = attemptsOf(r)
+      const i = a.findIndex((x) => x.status === 429)
+      if (i < 0) {
+        nextAfter429.set('无尝试链（仅终态）', (nextAfter429.get('无尝试链（仅终态）') || 0) + 1)
+        continue
+      }
+      const nx = a[i + 1]
+      const k = !nx
+        ? '无后续尝试'
+        : is2xx(nx.status)
+          ? '下一跳 2xx'
+          : nx.status === 429
+            ? '下一跳仍 429'
+            : nx.status >= 500
+              ? '下一跳 5xx'
+              : '下一跳其它'
+      nextAfter429.set(k, (nextAfter429.get(k) || 0) + 1)
+    }
+
+    // ---- 429 后的尝试次数（仅最终成功） ----
+    const successAttempts = new Map<string, number>()
+    for (const r of hit429Rows) {
+      if (r.status !== 'ok') continue
+      const n = attemptsOf(r).length
+      const k = n <= 1 ? '1 次' : n === 2 ? '2 次' : n === 3 ? '3 次' : '4 次+'
+      successAttempts.set(k, (successAttempts.get(k) || 0) + 1)
+    }
+
+    // ---- 失败时池快照分布（替代均值） ----
+    const poolDist = { n: 0, availZero: 0, badQuota: 0, badAuth: 0, badLink: 0, breaker: 0 }
+    const poolTop = new Map<string, number>()
+    for (const r of failRows) {
+      const p = r.pool
+      if (!p) continue
+      poolDist.n++
+      if (p.available === 0) poolDist.availZero++
+      if (p.bad_quota > 0) poolDist.badQuota++
+      if (p.bad_auth > 0) poolDist.badAuth++
+      if (p.bad_link > 0) poolDist.badLink++
+      if (p.breaker_open > 0) poolDist.breaker++
+      const key = `可用 ${p.available} / 额度 ${p.bad_quota} / 认证 ${p.bad_auth} / 链路 ${p.bad_link} / 熔断 ${p.breaker_open}`
+      poolTop.set(key, (poolTop.get(key) || 0) + 1)
+    }
+
+    // ---- 失败错误类 ----
+    const failClasses = new Map<string, number>()
+    for (const r of failRows) {
       const c = classOf(r)
       failClasses.set(c, (failClasses.get(c) || 0) + 1)
     }
-    const sortedT = detail.map((d) => d.t).filter((x) => !Number.isNaN(x)).sort((a, b) => a - b)
-    let bursts = 0
-    let prev = -Infinity
-    for (const t of sortedT) {
-      if (t - prev > 30000) bursts++
-      prev = t
+
+    // ---- 429 维度 ----
+    const byModel = new Map<string, number>()
+    const byNode = new Map<string, number>()
+    const byCode = new Map<string, number>()
+    const byDecision = new Map<string, number>()
+    const policyVers = new Map<string, number>()
+    for (const r of final429Rows) {
+      byModel.set(r.model || '未知', (byModel.get(r.model || '未知') || 0) + 1)
+      const n = r.nodes?.slice(-1)[0] || (r.route_verdict === 'no_healthy_node' ? '无可用节点' : '未知')
+      byNode.set(n, (byNode.get(n) || 0) + 1)
+      const code = r.error_code || (r.upstream_status ? `http_${r.upstream_status}` : '无状态码')
+      byCode.set(code, (byCode.get(code) || 0) + 1)
+      if (r.policy_ver) policyVers.set(r.policy_ver, (policyVers.get(r.policy_ver) || 0) + 1)
     }
+    for (const r of hit429Rows) {
+      const reason = r.decision?.reason || 'legacy'
+      byDecision.set(reason, (byDecision.get(reason) || 0) + 1)
+    }
+
+    // ---- 按小时 ----
+    const hourly = new Map<string, { total: number; final429: number; any429: number }>()
+    for (const r of asc) {
+      const h = (r.ts || '').slice(0, 13)
+      if (!h) continue
+      const e = hourly.get(h) || { total: 0, final429: 0, any429: 0 }
+      e.total++
+      if (final429(r)) e.final429++
+      if (final429(r) || has429(r)) e.any429++
+      hourly.set(h, e)
+    }
+
+    const total = asc.length
+    const recoveryN = recoveryAll.length
+    const final429N = final429Rows.length
+    const any429N = hit429Rows.length
     return {
-      total: asc.length,
-      n429: p429.length,
-      recAny,
-      bursts,
-      detail,
-      hourly: [...hourly].sort((a, b) => (a[0] < b[0] ? 1 : -1)).slice(0, 18),
+      total,
+      final429N,
+      transientN: transientRows.length,
+      any429N,
+      final429Rate: total ? final429N / total : 0,
+      recoveryAll,
+      recoveryN,
+      censoredN,
+      recoveryP50: medianOf(recoveryAll),
+      recoveryP90: pctileOf(recoveryAll, 0.9),
+      within60: recoveryN ? recoveryAll.filter((x) => x <= 60).length / recoveryN : null,
+      censoredRate: recoveryN + censoredN ? censoredN / (recoveryN + censoredN) : null,
+      hit429Rows,
+      hit429Ok: hit429Rows.filter((r) => r.status === 'ok').length,
+      crossN: cross.length,
+      crossOk: cross.filter((r) => r.status === 'ok').length,
+      sameN: same.length,
+      sameOk: same.filter((r) => r.status === 'ok').length,
+      nextAfter429: [...nextAfter429].sort((a, b) => b[1] - a[1]),
+      successAttempts: [...successAttempts],
+      nodeRows: [...nodeStats].sort((a, b) => b[1].attempts - a[1].attempts).slice(0, 12),
+      poolDist,
+      poolTop: [...poolTop].sort((a, b) => b[1] - a[1]).slice(0, 6),
+      failClasses: [...failClasses].sort((a, b) => b[1] - a[1]),
       byModel: [...byModel].sort((a, b) => b[1] - a[1]).slice(0, 8),
       byNode: [...byNode].sort((a, b) => b[1] - a[1]).slice(0, 8),
-      byClass: [...byClass].sort((a, b) => b[1] - a[1]),
       byCode: [...byCode].sort((a, b) => b[1] - a[1]).slice(0, 10),
-      failClasses: [...failClasses].sort((a, b) => b[1] - a[1]),
       byDecision: [...byDecision].sort((a, b) => b[1] - a[1]),
       policyVers: [...policyVers].sort((a, b) => b[1] - a[1]),
-      poolAvail,
-      poolBad,
-      poolN,
+      hourly: [...hourly].sort((a, b) => (a[0] < b[0] ? 1 : -1)).slice(0, 18),
+      final429Rows,
+      vendorOf,
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [asc])
+  }, [logs, scope])
 
-  const recBuckets = [15, 30, 60, 120, 300]
-  const bucketCounts = recBuckets.map((b, i) =>
-    stats.recAny.filter((x) => (i === 0 ? x <= b : x > (recBuckets[i - 1] as number) && x <= b)).length,
-  )
-  const over300 = stats.recAny.filter((x) => x > 300).length
-  const p50 = medianOf(stats.recAny)
-  const p90 = pctileOf(stats.recAny, 0.9)
-  const within60 = stats.recAny.length ? stats.recAny.filter((x) => x <= 60).length / stats.recAny.length : null
-  const maxHour = Math.max(1, ...stats.hourly.map((h) => h[1]))
+  const buckets = [15, 30, 60, 120, 300, 600]
+  const bucketRows = buckets.map((b, i) => {
+    const lo = i === 0 ? 0 : (buckets[i - 1] as number)
+    return { label: i === 0 ? `≤${b}s` : `>${lo}s 且 ≤${b}s`, n: stats.recoveryAll.filter((x) => x > lo && x <= b).length }
+  })
+  const maxHour429 = Math.max(1, ...stats.hourly.map((h) => h[1].final429))
 
   const exportCsv = () => {
-    const head = ['ts', 'req_id', 'model', 'node', 'upstream_status', 'error_class', 'error_code', 'retry_after_ms', 'recovery_s', 'pool_available', 'pool_bad', 'decision_reason', 'attempts', 'policy_ver', 'err_msg']
+    const head = ['ts', 'req_id', 'kind', 'vendor', 'model', 'node', 'upstream_status', 'error_class', 'error_code', 'attempts', 'decision_reason', 'pool_available', 'pool_bad', 'policy_ver', 'err_msg']
     const esc = (v: unknown) => `"${String(v ?? '').replace(/"/g, '""')}"`
     const lines = [head.join(',')]
-    for (const d of [...stats.detail].reverse()) {
-      const r = d.r
-      const atts = (r.attempts || []).map((a) => `${a.node || '直连'}:${a.status}${a.error_code ? '/' + a.error_code : ''}`).join('|')
+    for (const r of [...stats.hit429Rows].reverse()) {
+      const empty = r.route_verdict === 'no_healthy_node' ? '无可用节点' : '直连'
+      const atts = (r.attempts || []).map((a) => `${a.node || empty}:${a.status}${a.error_code ? '/' + a.error_code : ''}`).join('|')
+      const kind = stats.final429Rows.includes(r) ? 'final' : 'transient'
       lines.push(
-        [r.ts, r.req_id, r.model, d.node, r.upstream_status ?? '', r.error_class ?? '', r.error_code ?? '', r.retry_after_ms ?? '', d.rec != null ? d.rec.toFixed(1) : '', r.pool?.available ?? '', r.pool ? r.pool.bad_quota + r.pool.bad_auth + r.pool.bad_link : '', r.decision?.reason ?? '', atts, r.policy_ver ?? '', r.err_msg ?? ''].map(esc).join(','),
+        [
+          r.ts, r.req_id, kind, stats.vendorOf(r), r.model, r.nodes?.slice(-1)[0] || empty,
+          r.upstream_status ?? '', r.error_class ?? '', r.error_code ?? '', atts,
+          r.decision?.reason ?? '', r.pool?.available ?? '',
+          r.pool ? r.pool.bad_quota + r.pool.bad_auth + r.pool.bad_link : '',
+          r.policy_ver ?? '', r.err_msg ?? '',
+        ].map(esc).join(','),
       )
     }
-    const blob = new Blob(['' + lines.join('\n')], { type: 'text/csv;charset=utf-8' })
+    const blob = new Blob(['\uFEFF' + lines.join('\n')], { type: 'text/csv;charset=utf-8' })
     const url = URL.createObjectURL(blob)
     const a = document.createElement('a')
     a.href = url
@@ -1085,84 +1207,97 @@ function ErrorAnalysisView({ logs }: { logs: CallLogRecord[] }) {
     URL.revokeObjectURL(url)
   }
 
-  const hasStructured = stats.detail.some((d) => (d.r.schema_version ?? 0) >= 2)
+  const scopeBtn = (v: ErrScope, label: string) => (
+    <button
+      type="button"
+      onClick={() => setScope(v)}
+      className={clsx(
+        'text-[12px] rounded-lg px-3 py-1.5 border',
+        scope === v ? 'bg-teal-50 text-teal-700 border-teal-200' : 'bg-white text-zinc-500 border-zinc-200 hover:bg-zinc-50',
+      )}
+    >
+      {label}
+    </button>
+  )
 
   return (
     <div className="space-y-4">
-      {/* 概览 */}
       <div className="bg-white rounded-2xl border border-zinc-200 p-5">
-        <div className="flex items-center justify-between mb-1">
+        <div className="flex flex-wrap items-center justify-between gap-3 mb-1">
           <div className="text-[14px] font-semibold text-zinc-900">错误分析</div>
-          <button
-            type="button"
-            onClick={exportCsv}
-            disabled={stats.n429 === 0}
-            className="flex items-center gap-1.5 text-[12px] text-teal-700 bg-teal-50 border border-teal-100 rounded-lg px-3 py-1.5 hover:bg-teal-100 disabled:opacity-40"
-          >
-            <Download size={13} />
-            导出 429 CSV
-          </button>
+          <div className="flex items-center gap-2">
+            {scopeBtn('pool', 'opencode 免费层')}
+            {scopeBtn('all', '全部厂商')}
+            <button
+              type="button"
+              onClick={exportCsv}
+              disabled={stats.any429N === 0}
+              className="flex items-center gap-1.5 text-[12px] text-teal-700 bg-teal-50 border border-teal-100 rounded-lg px-3 py-1.5 hover:bg-teal-100 disabled:opacity-40"
+            >
+              <Download size={13} />
+              导出 429 CSV
+            </button>
+          </div>
         </div>
         <div className="text-[12px] text-zinc-400 mb-4">
-          优先使用 call_log 的结构化字段（schema v3：error_class/error_code/upstream_status/retry_after_ms/pool/decision/attempts/policy_ver）；旧记录回退文本匹配。可用于评估节点策略与离线挖掘。
+          429 拆成「最终失败 / 中途已恢复 / 含 429 请求」；恢复时间按同节点 429 → 600s 内下一次 2xx 计算，超窗记为删失。
+          默认只看 opencode 免费层；旧记录无 vendor 时按模型前缀/route_verdict 推断。
         </div>
-        <div className="flex flex-wrap gap-5 text-sm">
+        <div className="flex flex-wrap gap-x-6 gap-y-2 text-sm">
           <span className="text-zinc-600">总请求 <b className="text-zinc-900">{stats.total}</b></span>
-          <span className="text-red-600">429 次数 <b>{stats.n429}</b></span>
-          <span className="text-amber-600">429 率 <b>{stats.total ? ((stats.n429 / stats.total) * 100).toFixed(1) + '%' : '-'}</b></span>
-          <span className="text-zinc-600">恢复中位 <b>{p50 != null ? p50.toFixed(0) + 's' : '-'}</b> · p90 <b>{p90 != null ? p90.toFixed(0) + 's' : '-'}</b></span>
-          <span className="text-zinc-600">≤60s 恢复 <b>{within60 != null ? (within60 * 100).toFixed(0) + '%' : '-'}</b></span>
-          <span className="text-zinc-600">429 突发段 <b>{stats.bursts}</b></span>
+          <span className="text-red-600">最终 429 <b>{stats.final429N}</b></span>
+          <span className="text-amber-600">中途 429 已恢复 <b>{stats.transientN}</b></span>
+          <span className="text-zinc-600">含 429 请求 <b>{stats.any429N}</b></span>
+          <span className="text-zinc-600">最终 429 率 <b>{stats.total ? (stats.final429Rate * 100).toFixed(1) + '%' : '-'}</b></span>
         </div>
-        {!hasStructured && stats.n429 > 0 && (
-          <div className="mt-3 text-[12px] text-zinc-400">当前记录多为旧版本日志（无结构化字段）；新版本失败会带 error_class/pool/node_state，分析会更精确。</div>
-        )}
-        {stats.poolN > 0 && (
-          <div className="mt-2 text-[12px] text-zinc-500">
-            失败时池快照均值：可用 {Math.round(stats.poolAvail / stats.poolN)} · 坏池 {Math.round(stats.poolBad / stats.poolN)}（样本 {stats.poolN}）
-          </div>
-        )}
+        <div className="flex flex-wrap gap-x-6 gap-y-2 text-sm mt-2">
+          <span className="text-zinc-600">同节点恢复中位 <b>{stats.recoveryP50 != null ? stats.recoveryP50.toFixed(0) + 's' : '-'}</b></span>
+          <span className="text-zinc-600">p90 <b>{stats.recoveryP90 != null ? stats.recoveryP90.toFixed(0) + 's' : '-'}</b></span>
+          <span className="text-zinc-600">≤60s <b>{stats.within60 != null ? (stats.within60 * 100).toFixed(0) + '%' : '-'}</b></span>
+          <span className="text-zinc-600">删失率 <b>{stats.censoredRate != null ? (stats.censoredRate * 100).toFixed(0) + '%' : '-'}</b></span>
+        </div>
+        <div className="flex flex-wrap gap-x-6 gap-y-2 text-sm mt-2 text-zinc-600">
+          <span>失败样本池快照：<b>{stats.poolDist.n}</b></span>
+          <span>可用=0 <b>{stats.poolDist.n ? ((stats.poolDist.availZero / stats.poolDist.n) * 100).toFixed(0) + '%' : '-'}</b></span>
+          <span>额度坏池&gt;0 <b>{stats.poolDist.n ? ((stats.poolDist.badQuota / stats.poolDist.n) * 100).toFixed(0) + '%' : '-'}</b></span>
+          <span>熔断 open <b>{stats.poolDist.n ? ((stats.poolDist.breaker / stats.poolDist.n) * 100).toFixed(0) + '%' : '-'}</b></span>
+        </div>
         {stats.policyVers.length > 0 && (
           <div className="mt-2 flex flex-wrap items-center gap-1.5 text-[12px] text-zinc-500">
-            <span>429 记录的策略版本：</span>
+            <span>最终 429 的策略版本：</span>
             {stats.policyVers.map(([v, n]) => (
               <span key={v} className="px-2 py-0.5 rounded-full bg-zinc-100 text-zinc-600 font-mono text-[11px]">{v} ×{n}</span>
             ))}
-            <span className="text-zinc-400">（对比不同版本参数的 429 率与恢复时间即可离线调参）</span>
           </div>
         )}
       </div>
 
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
-        {/* 恢复时间分布 */}
         <div className="bg-white rounded-2xl border border-zinc-200 p-5">
-          <div className="text-[14px] font-semibold text-zinc-900 mb-3">429 恢复时间分布</div>
-          {stats.recAny.length === 0 ? (
+          <div className="text-[14px] font-semibold text-zinc-900 mb-1">同节点 429 恢复分布</div>
+          <div className="text-[12px] text-zinc-400 mb-3">仅统计 600s 窗口内的同节点 2xx；超窗/无后续成功记为删失</div>
+          {stats.recoveryN === 0 ? (
             <div className="py-8 text-center text-zinc-400 text-sm">暂无可测量的恢复样本</div>
           ) : (
             <table className="w-full text-[13px]">
               <tbody>
-                {recBuckets.map((b, i) => {
-                  const label = i === 0 ? `≤${b}s` : `>${recBuckets[i - 1] as number}s 且 ≤${b}s`
-                  const c = bucketCounts[i] as number
-                  return (
-                    <tr key={b} className="border-b border-zinc-50">
-                      <td className="py-1.5 pr-3 text-zinc-700">{label}</td>
-                      <td className="py-1.5 pr-3 text-right tabular-nums w-16 text-zinc-600">{c}</td>
-                      <td className="py-1.5">
-                        <div className="h-1.5 bg-zinc-100 rounded-full overflow-hidden">
-                          <div className="h-full bg-teal-500 rounded-full" style={{ width: `${(c / stats.recAny.length) * 100}%` }} />
-                        </div>
-                      </td>
-                    </tr>
-                  )
-                })}
+                {bucketRows.map((b) => (
+                  <tr key={b.label} className="border-b border-zinc-50">
+                    <td className="py-1.5 pr-3 text-zinc-700">{b.label}</td>
+                    <td className="py-1.5 pr-3 text-right tabular-nums w-16 text-zinc-600">{b.n}</td>
+                    <td className="py-1.5">
+                      <div className="h-1.5 bg-zinc-100 rounded-full overflow-hidden">
+                        <div className="h-full bg-teal-500 rounded-full" style={{ width: `${(b.n / Math.max(1, stats.recoveryN)) * 100}%` }} />
+                      </div>
+                    </td>
+                  </tr>
+                ))}
                 <tr>
-                  <td className="py-1.5 pr-3 text-zinc-700">&gt;300s</td>
-                  <td className="py-1.5 pr-3 text-right tabular-nums w-16 text-zinc-600">{over300}</td>
+                  <td className="py-1.5 pr-3 text-amber-700">删失（&gt;600s / 无后续成功）</td>
+                  <td className="py-1.5 pr-3 text-right tabular-nums w-16 text-amber-700">{stats.censoredN}</td>
                   <td className="py-1.5">
                     <div className="h-1.5 bg-zinc-100 rounded-full overflow-hidden">
-                      <div className="h-full bg-red-400 rounded-full" style={{ width: `${(over300 / stats.recAny.length) * 100}%` }} />
+                      <div className="h-full bg-amber-400 rounded-full" style={{ width: `${(stats.censoredN / Math.max(1, stats.recoveryN + stats.censoredN)) * 100}%` }} />
                     </div>
                   </td>
                 </tr>
@@ -1171,24 +1306,19 @@ function ErrorAnalysisView({ logs }: { logs: CallLogRecord[] }) {
           )}
         </div>
 
-        {/* 失败错误类分布 */}
         <div className="bg-white rounded-2xl border border-zinc-200 p-5">
-          <div className="text-[14px] font-semibold text-zinc-900 mb-3">失败错误类分布</div>
+          <div className="text-[14px] font-semibold text-zinc-900 mb-1">失败错误类分布</div>
+          <div className="text-[12px] text-zinc-400 mb-3">全部最终失败（当前范围）；pool 为网关本地池空，不是上游 5xx</div>
           {stats.failClasses.length === 0 ? (
             <div className="py-8 text-center text-zinc-400 text-sm">无失败记录</div>
           ) : (
             <table className="w-full text-[13px]">
-              <thead>
-                <tr className="text-left text-[12px] text-zinc-500 border-b border-zinc-100">
-                  <th className="py-2 pr-3 font-medium">类型</th>
-                  <th className="py-2 text-right font-medium">次数</th>
-                </tr>
-              </thead>
               <tbody>
                 {stats.failClasses.map(([c, n]) => (
                   <tr key={c} className="border-b border-zinc-50">
                     <td className="py-1.5 pr-3 text-zinc-700">{ERR_CLASS_LABELS[c] || c}</td>
-                    <td className="py-1.5 text-right tabular-nums text-zinc-600">{n}</td>
+                    <td className="py-1.5 pr-3 text-right tabular-nums w-16 text-zinc-600">{n}</td>
+                    <td className="py-1.5 text-right tabular-nums text-zinc-400 text-[12px]">{((n / Math.max(1, stats.failClasses.reduce((a, x) => a + x[1], 0))) * 100).toFixed(0)}%</td>
                   </tr>
                 ))}
               </tbody>
@@ -1197,11 +1327,115 @@ function ErrorAnalysisView({ logs }: { logs: CallLogRecord[] }) {
         </div>
       </div>
 
-      {/* 429 选路决策分布 */}
       <div className="bg-white rounded-2xl border border-zinc-200 p-5">
-        <div className="text-[14px] font-semibold text-zinc-900 mb-3">429 选路决策分布</div>
+        <div className="text-[14px] font-semibold text-zinc-900 mb-1">429 切换效果</div>
+        <div className="text-[12px] text-zinc-400 mb-3">含 429 的请求最终是否成功；跨节点切换 vs 同节点重试（仅请求级统计）</div>
+        <div className="flex flex-wrap gap-x-6 gap-y-2 text-sm">
+          <span className="text-zinc-600">含 429 请求最终成功 <b className="text-teal-700">{stats.hit429Ok}/{stats.any429N}</b></span>
+          <span className="text-zinc-600">跨节点 <b>{stats.crossOk}/{stats.crossN}</b>（{stats.crossN ? ((stats.crossOk / stats.crossN) * 100).toFixed(0) + '%' : '-'}）</span>
+          <span className="text-zinc-600">同节点重试 <b>{stats.sameOk}/{stats.sameN}</b>（{stats.sameN ? ((stats.sameOk / stats.sameN) * 100).toFixed(0) + '%' : '-'}）</span>
+        </div>
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mt-4">
+          <table className="w-full text-[13px]">
+            <thead><tr className="text-left text-[12px] text-zinc-500 border-b border-zinc-100"><th className="py-1.5 font-medium">成功请求的尝试次数</th><th className="py-1.5 text-right font-medium">次数</th></tr></thead>
+            <tbody>
+              {stats.successAttempts.map(([k, n]) => (
+                <tr key={k} className="border-b border-zinc-50"><td className="py-1.5 text-zinc-700">{k}</td><td className="py-1.5 text-right tabular-nums text-zinc-600">{n}</td></tr>
+              ))}
+            </tbody>
+          </table>
+          <table className="w-full text-[13px]">
+            <thead><tr className="text-left text-[12px] text-zinc-500 border-b border-zinc-100"><th className="py-1.5 font-medium">首次 429 之后</th><th className="py-1.5 text-right font-medium">次数</th></tr></thead>
+            <tbody>
+              {stats.nextAfter429.map(([k, n]) => (
+                <tr key={k} className="border-b border-zinc-50"><td className="py-1.5 text-zinc-700">{k}</td><td className="py-1.5 text-right tabular-nums text-zinc-600">{n}</td></tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      <div className="bg-white rounded-2xl border border-zinc-200 p-5 overflow-x-auto">
+        <div className="text-[14px] font-semibold text-zinc-900 mb-1">节点尝试份额与成功率</div>
+        <div className="text-[12px] text-zinc-400 mb-3">尝试级统计（含竞速落选）；份额 = 该节点尝试数 / 全部节点尝试数</div>
+        <table className="w-full text-[13px] min-w-[760px]">
+          <thead>
+            <tr className="text-left text-[12px] text-zinc-500 border-b border-zinc-100">
+              <th className="py-2 pr-3 font-medium">节点</th>
+              <th className="py-2 pr-3 font-medium text-right">尝试</th>
+              <th className="py-2 pr-3 font-medium text-right">份额</th>
+              <th className="py-2 pr-3 font-medium text-right">2xx</th>
+              <th className="py-2 pr-3 font-medium text-right">成功率</th>
+              <th className="py-2 pr-3 font-medium text-right">429</th>
+              <th className="py-2 pr-3 font-medium text-right">429 率</th>
+              <th className="py-2 font-medium text-right">恢复中位/删失</th>
+            </tr>
+          </thead>
+          <tbody>
+            {stats.nodeRows.map(([node, s]) => {
+              const totalAttempts = stats.nodeRows.reduce((a, [, x]) => a + x.attempts, 0)
+              const med = medianOf(s.recovery)
+              return (
+                <tr key={node} className="border-b border-zinc-50">
+                  <td className="py-1.5 pr-3 font-mono text-[12px] text-zinc-700">{node}</td>
+                  <td className="py-1.5 pr-3 text-right tabular-nums text-zinc-600">{s.attempts}</td>
+                  <td className="py-1.5 pr-3 text-right tabular-nums text-zinc-600">{((s.attempts / Math.max(1, totalAttempts)) * 100).toFixed(1)}%</td>
+                  <td className="py-1.5 pr-3 text-right tabular-nums text-zinc-600">{s.ok}</td>
+                  <td className="py-1.5 pr-3 text-right tabular-nums text-zinc-600">{((s.ok / Math.max(1, s.attempts)) * 100).toFixed(0)}%</td>
+                  <td className="py-1.5 pr-3 text-right tabular-nums text-amber-700">{s.n429}</td>
+                  <td className="py-1.5 pr-3 text-right tabular-nums text-amber-700">{((s.n429 / Math.max(1, s.attempts)) * 100).toFixed(0)}%</td>
+                  <td className="py-1.5 text-right tabular-nums text-zinc-600">{med != null ? med.toFixed(0) + 's' : '-'} / {s.censored}</td>
+                </tr>
+              )
+            })}
+          </tbody>
+        </table>
+      </div>
+
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+        <div className="bg-white rounded-2xl border border-zinc-200 p-5">
+          <div className="text-[14px] font-semibold text-zinc-900 mb-1">失败时池快照分布</div>
+          <div className="text-[12px] text-zinc-400 mb-3">替代原来的均值：均值会掩盖「全池 0 可用」的悬崖</div>
+          <div className="grid grid-cols-2 gap-2 text-[13px]">
+            {[
+              ['可用 = 0', stats.poolDist.availZero],
+              ['额度坏池 > 0', stats.poolDist.badQuota],
+              ['认证坏池 > 0', stats.poolDist.badAuth],
+              ['链路坏池 > 0', stats.poolDist.badLink],
+              ['熔断 open > 0', stats.poolDist.breaker],
+            ].map(([k, v]) => (
+              <div key={k as string} className="flex items-center justify-between border-b border-zinc-50 py-1.5">
+                <span className="text-zinc-600">{k}</span>
+                <span className="tabular-nums text-zinc-700">{stats.poolDist.n ? ((Number(v) / stats.poolDist.n) * 100).toFixed(0) + '%' : '-'}</span>
+              </div>
+            ))}
+          </div>
+          <div className="mt-3 text-[12px] text-zinc-500">样本 {stats.poolDist.n} 条失败记录</div>
+        </div>
+
+        <div className="bg-white rounded-2xl border border-zinc-200 p-5">
+          <div className="text-[14px] font-semibold text-zinc-900 mb-3">Top 池快照</div>
+          {stats.poolTop.length === 0 ? (
+            <div className="py-8 text-center text-zinc-400 text-sm">暂无池快照</div>
+          ) : (
+            <table className="w-full text-[12px]">
+              <tbody>
+                {stats.poolTop.map(([k, n]) => (
+                  <tr key={k} className="border-b border-zinc-50">
+                    <td className="py-1.5 pr-3 text-zinc-600">{k}</td>
+                    <td className="py-1.5 text-right tabular-nums text-zinc-700">{n}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          )}
+        </div>
+      </div>
+
+      <div className="bg-white rounded-2xl border border-zinc-200 p-5">
+        <div className="text-[14px] font-semibold text-zinc-900 mb-3">含 429 请求的选路决策分布</div>
         {stats.byDecision.length === 0 ? (
-          <div className="py-8 text-center text-zinc-400 text-sm">暂无数据（旧日志无 decision 字段；新版本失败记录自带选路决策快照）</div>
+          <div className="py-8 text-center text-zinc-400 text-sm">暂无数据</div>
         ) : (
           <table className="w-full text-[13px]">
             <tbody>
@@ -1211,7 +1445,7 @@ function ErrorAnalysisView({ logs }: { logs: CallLogRecord[] }) {
                   <td className="py-1.5 pr-3 text-right tabular-nums w-16 text-zinc-600">{n}</td>
                   <td className="py-1.5">
                     <div className="h-1.5 bg-zinc-100 rounded-full overflow-hidden">
-                      <div className="h-full bg-indigo-400 rounded-full" style={{ width: `${(n / stats.n429) * 100}%` }} />
+                      <div className="h-full bg-indigo-400 rounded-full" style={{ width: `${(n / Math.max(1, stats.any429N)) * 100}%` }} />
                     </div>
                   </td>
                 </tr>
@@ -1221,21 +1455,32 @@ function ErrorAnalysisView({ logs }: { logs: CallLogRecord[] }) {
         )}
       </div>
 
-      {/* 429 按小时 */}
       <div className="bg-white rounded-2xl border border-zinc-200 p-5">
-        <div className="text-[14px] font-semibold text-zinc-900 mb-3">429 按小时分布</div>
+        <div className="text-[14px] font-semibold text-zinc-900 mb-1">按小时：总请求 / 最终 429 / 含 429</div>
+        <div className="text-[12px] text-zinc-400 mb-3">最近 18 个有数据的小时；柱高为最终 429 数</div>
         {stats.hourly.length === 0 ? (
-          <div className="py-8 text-center text-zinc-400 text-sm">无 429 记录</div>
+          <div className="py-8 text-center text-zinc-400 text-sm">暂无数据</div>
         ) : (
           <table className="w-full text-[13px]">
+            <thead>
+              <tr className="text-left text-[12px] text-zinc-500 border-b border-zinc-100">
+                <th className="py-2 pr-3 font-medium">小时</th>
+                <th className="py-2 pr-3 font-medium text-right">总请求</th>
+                <th className="py-2 pr-3 font-medium text-right">最终 429</th>
+                <th className="py-2 pr-3 font-medium text-right">含 429</th>
+                <th className="py-2 font-medium">最终 429 占比</th>
+              </tr>
+            </thead>
             <tbody>
-              {stats.hourly.map(([h, n]) => (
-                <tr key={h}>
-                  <td className="py-1 pr-3 text-zinc-700 whitespace-nowrap font-mono text-[12px]">{h.replace('T', ' ')}:00</td>
-                  <td className="py-1 pr-3 text-right tabular-nums w-12 text-zinc-600">{n}</td>
-                  <td className="py-1">
+              {stats.hourly.map(([h, v]) => (
+                <tr key={h} className="border-b border-zinc-50">
+                  <td className="py-1.5 pr-3 text-zinc-700 whitespace-nowrap font-mono text-[12px]">{h.replace('T', ' ')}:00</td>
+                  <td className="py-1.5 pr-3 text-right tabular-nums text-zinc-600">{v.total}</td>
+                  <td className="py-1.5 pr-3 text-right tabular-nums text-red-600">{v.final429}</td>
+                  <td className="py-1.5 pr-3 text-right tabular-nums text-amber-600">{v.any429}</td>
+                  <td className="py-1.5">
                     <div className="h-1.5 bg-zinc-100 rounded-full overflow-hidden">
-                      <div className="h-full bg-amber-400 rounded-full" style={{ width: `${(n / maxHour) * 100}%` }} />
+                      <div className="h-full bg-amber-400 rounded-full" style={{ width: `${(v.final429 / maxHour429) * 100}%` }} />
                     </div>
                   </td>
                 </tr>
@@ -1245,12 +1490,11 @@ function ErrorAnalysisView({ logs }: { logs: CallLogRecord[] }) {
         )}
       </div>
 
-      {/* 维度表：模型 / 节点 / 错误码 */}
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
         {[
-          { title: '429 按模型', rows: stats.byModel },
-          { title: '429 按节点', rows: stats.byNode },
-          { title: '错误码分布', rows: stats.byCode },
+          { title: '最终 429 按模型', rows: stats.byModel },
+          { title: '最终 429 按节点', rows: stats.byNode },
+          { title: '最终 429 错误码', rows: stats.byCode },
         ].map((blk) => (
           <div key={blk.title} className="bg-white rounded-2xl border border-zinc-200 p-5">
             <div className="text-[14px] font-semibold text-zinc-900 mb-3">{blk.title}</div>
@@ -1261,7 +1505,7 @@ function ErrorAnalysisView({ logs }: { logs: CallLogRecord[] }) {
                 <tbody>
                   {blk.rows.map(([k, n]) => (
                     <tr key={k} className="border-b border-zinc-50">
-                      <td className="py-1.5 pr-3 text-zinc-700 truncate max-w-[160px]" title={k}>{k}</td>
+                      <td className="py-1.5 pr-3 text-zinc-700 truncate max-w-[180px]" title={k}>{k}</td>
                       <td className="py-1.5 text-right tabular-nums text-zinc-600">{n}</td>
                     </tr>
                   ))}
@@ -1272,42 +1516,46 @@ function ErrorAnalysisView({ logs }: { logs: CallLogRecord[] }) {
         ))}
       </div>
 
-      {/* 最近 429 明细 */}
       <div className="bg-white rounded-2xl border border-zinc-200 p-5 overflow-x-auto">
-        <div className="text-[14px] font-semibold text-zinc-900 mb-3">最近 429 记录（最近 20 条）</div>
-        {stats.detail.length === 0 ? (
+        <div className="text-[14px] font-semibold text-zinc-900 mb-3">最近 429 记录（最终 + 中途，最近 20 条）</div>
+        {stats.hit429Rows.length === 0 ? (
           <div className="py-8 text-center text-zinc-400 text-sm">无 429 记录</div>
         ) : (
-          <table className="w-full text-[13px] min-w-[960px]">
+          <table className="w-full text-[13px] min-w-[980px]">
             <thead>
               <tr className="text-left text-[12px] text-zinc-500 border-b border-zinc-100">
                 <th className="py-2 pr-3 font-medium">时间</th>
+                <th className="py-2 pr-3 font-medium">类型</th>
                 <th className="py-2 pr-3 font-medium">模型</th>
                 <th className="py-2 pr-3 font-medium">节点</th>
                 <th className="py-2 pr-3 font-medium text-right">HTTP</th>
                 <th className="py-2 pr-3 font-medium">错误码</th>
-                <th className="py-2 pr-3 font-medium text-right">Retry-After</th>
-                <th className="py-2 pr-3 font-medium text-right">恢复</th>
                 <th className="py-2 pr-3 font-medium">池(可用/坏)</th>
                 <th className="py-2 pr-3 font-medium">决策</th>
                 <th className="py-2 font-medium">尝试链</th>
               </tr>
             </thead>
             <tbody>
-              {[...stats.detail].reverse().slice(0, 20).map((d) => (
-                <tr key={d.r.req_id} className="border-b border-zinc-50">
-                  <td className="py-1.5 pr-3 whitespace-nowrap text-zinc-700">{fmtTime(d.r.ts)}</td>
-                  <td className="py-1.5 pr-3 truncate max-w-[160px]" title={d.r.model}>{d.r.model}</td>
-                  <td className="py-1.5 pr-3 font-mono text-[12px] text-zinc-600">{d.node}</td>
-                  <td className="py-1.5 pr-3 text-right tabular-nums text-zinc-600">{d.r.upstream_status ?? '—'}</td>
-                  <td className="py-1.5 pr-3 text-zinc-700 truncate max-w-[160px]" title={d.r.error_code}>{d.r.error_code ?? '—'}</td>
-                  <td className="py-1.5 pr-3 text-right tabular-nums text-zinc-600">{d.r.retry_after_ms ? `${Math.round(d.r.retry_after_ms / 1000)}s` : '—'}</td>
-                  <td className="py-1.5 pr-3 text-right tabular-nums">{d.rec != null ? <span className={d.rec <= 30 ? 'text-teal-600' : 'text-amber-600'}>{d.rec.toFixed(0)}s</span> : '—'}</td>
-                  <td className="py-1.5 pr-3 text-zinc-600">{d.r.pool ? `${d.r.pool.available}/${d.r.pool.bad_quota + d.r.pool.bad_auth + d.r.pool.bad_link}` : '—'}</td>
-                  <td className="py-1.5 pr-3 whitespace-nowrap text-zinc-600">{d.r.decision ? (DECISION_LABELS[d.r.decision.reason] || d.r.decision.reason) : '—'}</td>
-                  <td className="py-1.5 text-zinc-500 text-[12px] truncate max-w-[260px]" title={attemptsChain(d.r)}>{attemptsChain(d.r) || '—'}</td>
-                </tr>
-              ))}
+              {[...stats.hit429Rows].reverse().slice(0, 20).map((r) => {
+                const isFinal = stats.final429Rows.includes(r)
+                return (
+                  <tr key={r.req_id} className="border-b border-zinc-50">
+                    <td className="py-1.5 pr-3 whitespace-nowrap text-zinc-700">{fmtTime(r.ts)}</td>
+                    <td className="py-1.5 pr-3">
+                      <span className={clsx('px-1.5 py-0.5 rounded text-[11px]', isFinal ? 'bg-red-50 text-red-700' : 'bg-amber-50 text-amber-700')}>
+                        {isFinal ? '最终失败' : '中途已恢复'}
+                      </span>
+                    </td>
+                    <td className="py-1.5 pr-3 truncate max-w-[160px]" title={r.model}>{r.model}</td>
+                    <td className="py-1.5 pr-3 font-mono text-[12px] text-zinc-600">{r.nodes?.slice(-1)[0] || (r.route_verdict === 'no_healthy_node' ? '无可用节点' : '直连')}</td>
+                    <td className="py-1.5 pr-3 text-right tabular-nums text-zinc-600">{r.upstream_status ?? '—'}</td>
+                    <td className="py-1.5 pr-3 text-zinc-700 truncate max-w-[160px]" title={r.error_code}>{r.error_code ?? '—'}</td>
+                    <td className="py-1.5 pr-3 text-zinc-600">{r.pool ? `${r.pool.available}/${r.pool.bad_quota + r.pool.bad_auth + r.pool.bad_link}` : '—'}</td>
+                    <td className="py-1.5 pr-3 whitespace-nowrap text-zinc-600">{r.decision ? (DECISION_LABELS[r.decision.reason] || r.decision.reason) : '—'}</td>
+                    <td className="py-1.5 text-zinc-500 text-[12px] truncate max-w-[260px]" title={attemptsChain(r)}>{attemptsChain(r) || '—'}</td>
+                  </tr>
+                )
+              })}
             </tbody>
           </table>
         )}
