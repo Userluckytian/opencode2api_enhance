@@ -7,9 +7,11 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"math"
 	"math/rand/v2"
 	"net"
 	"net/http"
+	"sort"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -223,8 +225,19 @@ var badPoolResetSec atomic.Int64
 // G5：配置热重载原子写（applyConfig Store），请求路径无锁 Load；默认值写于 init。
 var quotaBadPoolResetSec atomic.Int64
 
-// quotaBadPoolResetMaxSec 额度类坏池冷却上限（秒）。
+// quotaBadPoolResetMaxSec 额度类坏池单次冷却上限（秒）。
 const quotaBadPoolResetMaxSec = 600
+
+// badPoolMaxExtensions 坏池节点再次失败时允许「续期」的最大次数。
+// 达到上限后不再把 badUntil 往后推，避免持续流量下冷却窗口无限滑动：
+// 单次冷却有 600s 上限，总续期次数也有硬上限，节点不会永久被锁在坏池。
+// 额度类（429）与链路类（503）共用；认证类（401）本来就不自动恢复。
+const badPoolMaxExtensions = 10
+
+// badCountMax 坏池计数展示/退避指数的全局封顶（429 阈值 + 最大续期次数）。
+// 用全局值而不是按当前状态的 threshold 计算：节点从 quota 转为 link 时
+// 阈值会从 5 变 3，按局部阈值封顶会把已有计数反向压低，破坏历史语义。
+const badCountMax = rateLimitBadThreshold + badPoolMaxExtensions
 
 // rateLimitNodeCooldownSec 单次 429 的节点临时冷却（默认 15s），早于进坏池。
 var rateLimitNodeCooldownSec atomic.Int64
@@ -244,6 +257,21 @@ func init() {
 	rateLimitNodeCooldownSec.Store(15)
 }
 
+// badPoolProbeLease 探针配额租约：探针放行后若在该时长内没有结果回写
+// （请求被取消、或某条内部路径未 Mark），视为配额丢失并自动回收。
+// 取值需大于单个请求的最长生命周期（非流式 client.Timeout=300s；流式在
+// 2xx 响应头到达时即已回写），600s 留足余量。
+const badPoolProbeLease = 10 * time.Minute
+
+// badPoolReliefRatio 全池坏池时的减压比例：按「进入坏池时间」从早到晚排序，
+// 取前 60% 的节点继续尝试（不改变其坏池状态，仅绕过整池 503 快失败）。
+// 这是最后的可用性兜底：宁可让请求在坏节点上真打一次上游并如实报错，
+// 也不要直接合成 no_healthy_node。认证类（401 永久禁用）不参与。
+const badPoolReliefRatio = 0.6
+
+// reliefLogInterval 减压日志节流：整池坏池是持续状态，避免每请求刷一条告警。
+const reliefLogInterval = 30 * time.Second
+
 type socks5HealthState struct {
 	failures  int
 	until     time.Time
@@ -254,6 +282,12 @@ type socks5HealthState struct {
 	badUntil time.Time
 	// badProbeUsed 链路类/额度类坏池到期后的半开放行配额是否已消费（1 次/quota）。
 	badProbeUsed bool
+	// badProbeAt 探针放行时刻；badProbeUsed 为 true 时用于租约兜底回收。
+	badProbeAt time.Time
+	// badSince 首次进入坏池的时刻；全池坏池减压按此从早到晚取前 60%。
+	badSince time.Time
+	// badExtendCount 进入坏池后已续期次数；达到 badPoolMaxExtensions 后冻结 badUntil。
+	badExtendCount int
 }
 
 // badPoolClass 坏池分类：
@@ -308,6 +342,19 @@ func quotaBadPoolResetDuration(badCount int) time.Duration {
 	return time.Duration(total) * time.Second
 }
 
+// applyBadUntil 按坏池分类设置到期时间（auth 永久、quota 指数退避、link 固定冷却）。
+func applyBadUntil(state *socks5HealthState, status int, now time.Time) {
+	switch state.badClass {
+	case "auth":
+		state.badUntil = time.Time{}
+	case "quota":
+		state.badUntil = now.Add(quotaBadPoolResetDuration(state.badCount))
+	default:
+		state.badUntil = now.Add(badPoolResetDuration())
+	}
+}
+
+// minInt 返回较小值。
 func minInt(a, b int) int {
 	if a < b {
 		return a
@@ -315,13 +362,35 @@ func minInt(a, b int) int {
 	return b
 }
 
-// badPoolProbeReady 非消费式检查：链路类/额度类坏池已过期且探测配额未消费。
+// nodeInBadPool 报告 addr 当前是否处于坏池（含探针/减压选中的节点）。
+func nodeInBadPool(addr string) bool {
+	if addr == "" {
+		return false
+	}
+	socks5HealthMu.Lock()
+	st := socks5Health[addr]
+	socks5HealthMu.Unlock()
+	return st.badReason != ""
+}
+
+// badPoolProbeReady 非消费式检查：链路类/额度类坏池已过期且探测配额可用。
+// 配额已消费但超过 badPoolProbeLease 仍无结果 → 视为丢失，重新放行。
 // 零值 badUntil（认证类）永不放行；调用方需持有 socks5HealthMu。
 func badPoolProbeReady(state socks5HealthState, now time.Time) bool {
 	if state.badReason == "" || state.badUntil.IsZero() {
 		return false
 	}
-	return !now.Before(state.badUntil) && !state.badProbeUsed
+	if now.Before(state.badUntil) {
+		return false
+	}
+	if !state.badProbeUsed {
+		return true
+	}
+	// badProbeAt 为零值属异常/旧状态：直接放行，避免永久锁死。
+	if state.badProbeAt.IsZero() {
+		return true
+	}
+	return now.Sub(state.badProbeAt) >= badPoolProbeLease
 }
 
 // badPoolProbeRelease 放行链路类坏池 1 次探测（消费配额，复用熔断 half-open 语义）。
@@ -331,8 +400,111 @@ func badPoolProbeRelease(addr string, state *socks5HealthState, now time.Time) b
 		return false
 	}
 	state.badProbeUsed = true
+	state.badProbeAt = now
 	socks5Health[addr] = *state
 	return true
+}
+
+// releaseSocks5Probe 归还 addr 的恢复探针配额（坏池探针 + 熔断半开探针）。
+// 用于请求在产生任何上游结果前被取消的场景：厂商侧不 Mark（取消不算节点失败），
+// 但探针配额必须归还，否则节点会永久 excluded。
+// 未持有配额时为无操作；不重置 badUntil / openUntil，节点仍需等到期才能再探测。
+func releaseSocks5Probe(addr string) {
+	if addr == "" {
+		return
+	}
+	socks5HealthMu.Lock()
+	if st, ok := socks5Health[addr]; ok && st.badProbeUsed {
+		st.badProbeUsed = false
+		st.badProbeAt = time.Time{}
+		socks5Health[addr] = st
+	}
+	socks5HealthMu.Unlock()
+
+	poolBreakerMu.Lock()
+	if b := poolBreakers[addr]; b != nil && b.probeUsed {
+		b.probeUsed = false
+		b.probeAt = time.Time{}
+	}
+	poolBreakerMu.Unlock()
+}
+
+// badPoolReliefCandidatesLocked 构造「全池坏池减压候选」：只纳入可恢复坏池
+// （quota/link，排除 auth），按首次进入坏池时间从早到晚排序，取前 60%（向上取整）。
+// 调用方需持有 socks5HealthMu；不修改任何健康状态。
+func badPoolReliefCandidatesLocked(proxies []Socks5Proxy, now time.Time) []Socks5Proxy {
+	type entry struct {
+		proxy Socks5Proxy
+		since time.Time
+	}
+	bad := make([]entry, 0, len(proxies))
+	for _, p := range proxies {
+		st := socks5Health[p.Addr]
+		if st.badReason == "" || st.badClass == "auth" {
+			continue
+		}
+		since := st.badSince
+		if since.IsZero() {
+			// 兼容旧状态：没有进入时刻时用恢复时间近似（仍是越早越优先）。
+			since = st.badUntil
+		}
+		bad = append(bad, entry{proxy: p, since: since})
+	}
+	if len(bad) == 0 {
+		return nil
+	}
+	sort.SliceStable(bad, func(i, j int) bool {
+		if bad[i].since.Equal(bad[j].since) {
+			return bad[i].proxy.Addr < bad[j].proxy.Addr
+		}
+		return bad[i].since.Before(bad[j].since)
+	})
+	n := int(math.Ceil(float64(len(bad)) * badPoolReliefRatio))
+	if n < 1 {
+		n = 1
+	}
+	if n > len(bad) {
+		n = len(bad)
+	}
+	out := make([]Socks5Proxy, 0, n)
+	for i := 0; i < n; i++ {
+		out = append(out, bad[i].proxy)
+	}
+	return out
+}
+
+// badPoolReliefCandidates 加锁版本，供不持锁的调用方（加权选路）使用。
+func badPoolReliefCandidates(proxies []Socks5Proxy, now time.Time) []Socks5Proxy {
+	socks5HealthMu.Lock()
+	defer socks5HealthMu.Unlock()
+	return badPoolReliefCandidatesLocked(proxies, now)
+}
+
+// pickRelief 在减压候选集合内轮转，避免所有请求砸向同一个最老节点。
+func pickRelief(relief []Socks5Proxy, start int) Socks5Proxy {
+	if len(relief) == 0 {
+		return Socks5Proxy{}
+	}
+	i := start % len(relief)
+	if i < 0 {
+		i += len(relief)
+	}
+	return relief[i]
+}
+
+var reliefLogTS atomic.Int64
+
+// logReliefUse 节流记录减压选路（整池坏池期间最多 30s 一条）。
+func logReliefUse(relief []Socks5Proxy, chosen Socks5Proxy) {
+	now := time.Now().UnixNano()
+	last := reliefLogTS.Load()
+	if now-last < int64(reliefLogInterval) {
+		return
+	}
+	if reliefLogTS.CompareAndSwap(last, now) {
+		slog.Warn("all proxies in bad pool, using relief candidates",
+			"relief", len(relief), "node", chosen.Addr)
+	}
 }
 
 var (
@@ -340,7 +512,8 @@ var (
 	socks5Health   = map[string]socks5HealthState{}
 )
 
-// pickHealthyProxy 从 start 位置起轮询，跳过冷却中代理；全冷→返回冷却最早结束的兜底。
+// pickHealthyProxy 从 start 位置起轮询，跳过冷却中代理；全冷→返回冷却最早结束的兜底；
+// 连冷却节点都没有（整池坏池）→ 取最早进入坏池的前 60% 作为减压候选继续尝试。
 func pickHealthyProxy(proxies []Socks5Proxy, start int) Socks5Proxy {
 	// S5: 单出口退化——池中仅 1 个可用出口时不叠加质量加权/熔断选择，
 	// 直接走默认请求（请求层的健康计数/超时切换兜底），避免聪明逻辑只服务同一个节点。
@@ -378,7 +551,16 @@ func pickHealthyProxy(proxies []Socks5Proxy, start int) Socks5Proxy {
 			fallbackUntil = state.until
 		}
 	}
-	return fallback
+	if fallback.Addr != "" {
+		return fallback
+	}
+	// 全池坏池：按进入坏池时间取最早 60% 减压候选继续尝试，绝不回退直连/503。
+	if relief := badPoolReliefCandidatesLocked(proxies, now); len(relief) > 0 {
+		chosen := pickRelief(relief, start)
+		logReliefUse(relief, chosen)
+		return chosen
+	}
+	return Socks5Proxy{}
 }
 
 // markSocks5Result 记录代理健康/冷却状态。
@@ -406,24 +588,43 @@ func markSocks5ResultWithRetry(addr string, status int, requestErr error, retryA
 	// 链路类（如 503）可自动恢复——badUntil = now + bad_pool_reset_sec，到期放行 1 次探测。
 	if reason, ok := badStatusCodes[status]; ok {
 		state := socks5Health[addr]
+		wasBad := state.badReason != ""
+		now := time.Now()
 		state.badCount++
 		threshold := badThreshold
 		if status == http.StatusTooManyRequests {
 			threshold = rateLimitBadThreshold
 		}
+		// badCount 只用于展示与退避指数；达到全局上限后封顶，
+		// 避免持续 429 时计数无限增长（历史上出现过 56）。
+		if state.badCount > badCountMax {
+			state.badCount = badCountMax
+		}
 		if state.badCount >= threshold {
 			state.badReason = reason
 			state.badClass = badPoolClass(status)
-			switch state.badClass {
-			case "auth":
+			if !wasBad {
+				// 首次进入坏池：记录 since、清零续期计数、设置初始冷却。
+				state.badSince = now
+				state.badExtendCount = 0
+				applyBadUntil(&state, status, now)
+				state.badProbeUsed = false
+				state.badProbeAt = time.Time{}
+				slog.Warn("proxy entered bad pool", "addr", addr, "reason", reason, "count", state.badCount, "class", state.badClass)
+			} else if state.badClass == "auth" {
+				// 分类变为认证类：永久禁用。
 				state.badUntil = time.Time{}
-			case "quota":
-				state.badUntil = time.Now().Add(quotaBadPoolResetDuration(state.badCount))
-			default:
-				state.badUntil = time.Now().Add(badPoolResetDuration())
+				state.badProbeUsed = false
+				state.badProbeAt = time.Time{}
+			} else if state.badExtendCount < badPoolMaxExtensions {
+				// 到期后再次失败：允许续期，但有硬上限。
+				state.badExtendCount++
+				applyBadUntil(&state, status, now)
+				state.badProbeUsed = false
+				state.badProbeAt = time.Time{}
 			}
-			state.badProbeUsed = false
-			slog.Warn("proxy entered bad pool", "addr", addr, "reason", reason, "count", state.badCount, "class", state.badClass)
+			// 已达 max：不再后移 badUntil（冻结在最后一次续期的值），
+			// 只保留下方的短时 until 冷却，避免冷却窗口无限滑动。
 		}
 		// 坏状态码也标记临时冷却（后续请求跳过，避免连续踩雷）。
 		// 429 用更短的 rateLimitNodeCooldownSec（默认 15s）：实测 429 多在十几秒内恢复，
@@ -463,14 +664,15 @@ func markSocks5ResultWithRetry(addr string, status int, requestErr error, retryA
 				cooldown = 2 * time.Minute
 			}
 			state.until = time.Now().Add(cooldown)
-			// 链路类/额度类坏池节点的探测失败 → 重新坏池（重置计时），避免探针配额耗尽后饿死。
+			// 链路类/额度类坏池节点的探测失败 → 重新坏池（重置计时），避免探针配额耗尽后饿死；
+			// 续期同样受 badPoolMaxExtensions 限制，达到上限后不再后移 badUntil。
 			if state.badReason != "" && !state.badUntil.IsZero() {
-				if state.badClass == "quota" {
-					state.badUntil = time.Now().Add(quotaBadPoolResetDuration(state.badCount))
-				} else {
-					state.badUntil = time.Now().Add(badPoolResetDuration())
+				if state.badExtendCount < badPoolMaxExtensions {
+					state.badExtendCount++
+					applyBadUntil(&state, status, time.Now())
 				}
 				state.badProbeUsed = false
+				state.badProbeAt = time.Time{}
 			}
 			socks5Health[addr] = state
 		}

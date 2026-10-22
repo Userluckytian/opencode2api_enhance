@@ -142,6 +142,8 @@ type CallRecord struct {
 	KeyTail string `json:"key_tail,omitempty"`
 	// Tier request layer: free (pool) / paid (direct).
 	Tier string `json:"tier,omitempty"`
+	// Vendor 本次请求命中的厂商 ID（opencode/custom 插件等）；旧记录为空。
+	Vendor string `json:"vendor,omitempty"`
 	// ServingPort actual ingress port of this request.
 	ServingPort string `json:"serving_port,omitempty"`
 	// RouteVerdict 路由结论：proxied / direct_by_design / direct_config_missing / direct_unexpected；空 = 旧记录或无法判定。
@@ -551,8 +553,24 @@ func initCallLog() {
 	callLog.SetPath(callLogPath)
 }
 
+// 调用日志里空节点的兜底文案：
+//   - 直连：付费层或未配置代理的设计路径；
+//   - 无可用节点：免费层已配代理但池空（本地 503），必须与直连区分。
+const (
+	callNodeDirectLabel      = "直连"
+	callNodeNoCandidateLabel = "无可用节点"
+)
+
+// callNodePlaceholder 按路由结论选择空节点占位文案。
+func callNodePlaceholder(routeVerdict string) string {
+	if routeVerdict == RouteVerdictNoHealthyNode {
+		return callNodeNoCandidateLabel
+	}
+	return callNodeDirectLabel
+}
+
 // recordCall 便捷包装：追加一条调用日志（失败不阻塞请求）。
-// 直连请求（无代理地址）在 Nodes/Events 中显示「直连」，避免空串不可读。
+// 空节点按路由结论显示「直连」或「无可用节点」，避免空串不可读。
 func recordCall(rec CallRecord) {
 	if !callLogEnabled {
 		return
@@ -563,21 +581,26 @@ func recordCall(rec CallRecord) {
 	if rec.PolicyVer == "" {
 		rec.PolicyVer = callPolicyVer
 	}
-	// 路由结论必须在下方「空节点兜底成『直连』」之前判定：Nodes 一旦被改写成
-	// 「直连」字符串，就再也分不出「本来就没有节点」与「节点名恰好叫直连」。
+	if rec.Vendor == "" && rec.Model != "" {
+		rec.Vendor = vendorOfModel(rec.Model)
+	}
+	// 路由结论必须在下方「空节点兜底」之前判定：Nodes 一旦被改写成占位字符串，
+	// 就再也分不出「本来就没有节点」与「节点名恰好叫直连」。
 	// 调用方已显式给值时不覆盖（留出未来更精确判定的入口）。
 	if rec.RouteVerdict == "" {
 		rec.RouteVerdict = routeVerdict(rec.Nodes, rec.Tier, socksProxyConfigured(), rec.ErrMsg)
 	}
-	direct := "直连"
+	// 池空的占位不能写「直连」：免费层已配代理时根本没有直连请求，
+	// 写成直连会把「本地 503 快失败」误读成「直连失败」。
+	placeholder := callNodePlaceholder(rec.RouteVerdict)
 	for i := range rec.Nodes {
 		if strings.TrimSpace(rec.Nodes[i]) == "" {
-			rec.Nodes[i] = direct
+			rec.Nodes[i] = placeholder
 		}
 	}
 	for i := range rec.Events {
 		if strings.TrimSpace(rec.Events[i].Node) == "" {
-			rec.Events[i].Node = direct
+			rec.Events[i].Node = placeholder
 		}
 	}
 	// callLog 指针启动时可能被替换（initCallLog），加锁读取

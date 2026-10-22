@@ -76,6 +76,12 @@ func (rootTransport) MarkWithRetry(proxyAddr string, status int, reqErr error, r
 	markSocks5ResultWithRetry(proxyAddr, status, reqErr, retryAfterMS)
 }
 
+// ReleaseProbe 实现 contract.ProbeReleaser：客户端取消导致请求没有结果时，
+// 归还该节点的坏池/熔断探针配额，避免节点永久假死。
+func (rootTransport) ReleaseProbe(proxyAddr string) {
+	releaseSocks5Probe(proxyAddr)
+}
+
 // PoolCounts 实现 contract.PoolCounter：竞速等旁路决策回填池计数。
 func (rootTransport) PoolCounts() (available, cooling, badQuota, badAuth, breakerOpen int) {
 	snap := snapshotPoolHealth()
@@ -97,6 +103,10 @@ func (t rootTransport) Pick(tier contract.Tier, streaming bool) (*http.Client, c
 		} else {
 			reason = "direct"
 		}
+	case nodeInBadPool(addr):
+		// 坏池到期探针或全池坏池减压选中：不是「健康选路」，单独标记，
+		// 便于错误分析页区分正常节点与被隔离节点。
+		reason = "badpool_relief"
 	}
 	dec := contract.Decision{Node: addr, Reason: reason}
 	dec.AvailableCount, dec.Cooling, dec.BadQuota, dec.BadAuth, dec.BreakerOpen = t.PoolCounts()
@@ -134,6 +144,11 @@ func (rootTransport) CandidateClients(tier contract.Tier, streaming bool, n int)
 	}
 	if tt == TierPaid {
 		return nil, nil // 付费层直连，不参与代理竞速
+	}
+	// 竞速只在 smart 模式启用：round_robin/failover 有明确的选路语义，
+	// 竞速会绕过游标/粘滞规则，使两种模式形同虚设。
+	if mode, _ := routeMode.Load().(string); mode != "smart" {
+		return nil, nil
 	}
 	proxies := raceCandidates(n)
 	if len(proxies) == 0 {

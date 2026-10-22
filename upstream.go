@@ -135,6 +135,23 @@ func chatCandidates(modelID string) []contract.Vendor {
 	return []contract.Vendor{mainCodeVendor()}
 }
 
+// vendorOfModel 返回模型的首选厂商 ID（供调用日志归类/错误分析过滤）。
+// 路由未装配时按 "prefix/model" 前缀推断，最后回退 opencode。
+func vendorOfModel(modelID string) string {
+	if modelID == "" {
+		return ""
+	}
+	if chatRouterVar != nil {
+		if cs := chatRouterVar.Candidates(modelID); len(cs) > 0 {
+			return cs[0].ID()
+		}
+	}
+	if prefix, _, ok := strings.Cut(modelID, "/"); ok && prefix != "" {
+		return prefix
+	}
+	return "opencode"
+}
+
 // seedVendorCatalog 把 globalAgg 中属于该厂商的模型推给它（SetCatalog 可选实现）。
 func seedVendorCatalog(v contract.Vendor) {
 	if globalAgg == nil {

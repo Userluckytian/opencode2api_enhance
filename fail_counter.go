@@ -59,14 +59,14 @@ func classifyFailReason(rec CallRecord) string {
 	}
 }
 
-// recordFailure 对本次失败涉及的每个真实节点累加对应原因计数（跳过空/「直连」占位）。
+// recordFailure 对本次失败涉及的每个真实节点累加对应原因计数（跳过空/占位文案）。
 func recordFailure(rec CallRecord) {
 	reason := classifyFailReason(rec)
 	failCountMu.Lock()
 	defer failCountMu.Unlock()
 	for _, n := range rec.Nodes {
 		node := strings.TrimSpace(n)
-		if node == "" || node == "直连" {
+		if node == "" || node == callNodeDirectLabel || node == callNodeNoCandidateLabel {
 			continue
 		}
 		if failCounts[node] == nil {

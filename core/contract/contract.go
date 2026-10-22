@@ -120,6 +120,15 @@ type Transport interface {
 	Mark(proxyAddr string, status int, reqErr error)
 }
 
+// ProbeReleaser 可选能力：请求尚未产生任何上游结果就被取消时，归还该出口的
+// 恢复探针配额。坏池/熔断节点到期后每次只放行 1 个探针；若探针请求随客户端
+// 取消而结束，厂商侧按既有语义不调用 Mark，配额必须显式归还，否则节点会
+// 永久停留在「探针已用、到期不可再放行」的假死状态。
+type ProbeReleaser interface {
+	// ReleaseProbe 归还 addr 的探针配额（未持有配额时为无操作）。
+	ReleaseProbe(addr string)
+}
+
 // Racer 可选的竞速传输（性能模式 P2b——请求级竞速）：
 // 一次请求并行扇出多个候选出口，第一个成功（流式 = 首个 chunk）胜出，其余取消。
 // Transport 实现方可选择性实现；厂商端做类型断言，未实现则退化为串行 Client。

@@ -2,13 +2,14 @@ package main
 
 import (
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/6Kmfi6HP/opencode2api/core/contract"
 )
 
 // callPolicyVer 选路/冷却策略版本戳：改参数时同步更新，便于日志里对比策略前后效果。
-const callPolicyVer = "b6-rate15x5"
+const callPolicyVer = "b7-relief60-cap10"
 
 // classifyUpstreamError 委托 contract 的统一分类（错误分析视图/离线挖掘共用）。
 func classifyUpstreamError(status int, body []byte) (class, code, message string) {
@@ -26,6 +27,14 @@ func attachUpstreamError(rec *CallRecord, status int, body []byte, headers http.
 	rec.SchemaVersion = 3
 	rec.UpstreamStatus = status
 	class, code, msg := classifyUpstreamError(status, body)
+	// 本地合成的池空错误不是上游 5xx：单独归类，避免污染 upstream 统计。
+	if localCode, ok := localPoolErrorCode(status, body); ok {
+		class = "pool"
+		code = localCode
+		if msg == "" {
+			msg = "pool has no healthy node"
+		}
+	}
 	rec.ErrorClass = class
 	rec.ErrorCode = code
 	rec.ErrorMessage = msg
@@ -39,6 +48,21 @@ func attachUpstreamError(rec *CallRecord, status int, body []byte, headers http.
 		Type: "upstream_error", Node: selected, Detail: detail, At: time.Now(),
 		Status: status, ErrorClass: class, ErrorCode: code, RetryAfterMS: rec.RetryAfterMS,
 	})
+}
+
+// localPoolErrorCode 识别网关本地合成的池空 503（不是上游 5xx）。
+func localPoolErrorCode(status int, body []byte) (string, bool) {
+	if status != http.StatusServiceUnavailable {
+		return "", false
+	}
+	s := string(body)
+	if strings.Contains(s, `"no_healthy_node"`) || strings.Contains(s, "no healthy proxy node") {
+		return "no_healthy_node", true
+	}
+	if strings.Contains(s, `"no_healthy_account"`) || strings.Contains(s, "no healthy account") {
+		return "no_healthy_account", true
+	}
+	return "", false
 }
 
 // attachPoolSnapshot 记录失败时的池状态与所选节点状态。

@@ -346,6 +346,7 @@ type poolBreaker struct {
 	failures  int
 	openUntil time.Time // 熔断到期；now >= openUntil 且未消费半开放行时放行 1 个
 	probeUsed bool      // 半开放行是否已消费
+	probeAt   time.Time // 半开探针放行时刻；用于租约兜底回收丢失的探针
 	tripped   bool      // 是否已跳闸（open 置 true；成功恢复置 false；G33 阈值热重载兼容）
 }
 
@@ -355,37 +356,41 @@ var (
 )
 
 // breakerState 返回熔断态：open（剔除）/ halfopen（本次放行 1 个探测）/ closed。
+// 半开探针超过 badPoolProbeLease 仍未回写（请求被取消等）→ 视为丢失，重新放行。
 func breakerState(addr string) string {
 	poolBreakerMu.Lock()
 	defer poolBreakerMu.Unlock()
 	b := poolBreakers[addr]
+	now := time.Now()
 	if b == nil || b.openUntil.IsZero() {
 		return "closed"
 	}
-	if time.Now().Before(b.openUntil) {
+	if now.Before(b.openUntil) {
 		return "open"
 	}
-	if !b.probeUsed {
-		b.probeUsed = true
-		return "halfopen"
+	if b.probeUsed && !b.probeAt.IsZero() && now.Sub(b.probeAt) < badPoolProbeLease {
+		return "open"
 	}
-	return "open"
+	b.probeUsed = true
+	b.probeAt = now
+	return "halfopen"
 }
 
-// breakerPeek 非消费式熔断态查看：open / halfopen（到期未消费探针）/ closed。
+// breakerPeek 非消费式熔断态查看：open / halfopen（到期且探针可用）/ closed。
 // 不消耗半开配额——竞速路径先收集、仅在真正放行时才消费，避免抢走单发路径的探针
 // （S3：熔断节点在竞速路径饿死的根因）。调用方需持有 poolBreakerMu 语义一致（内部加锁）。
 func breakerPeek(addr string) string {
 	poolBreakerMu.Lock()
 	defer poolBreakerMu.Unlock()
 	b := poolBreakers[addr]
+	now := time.Now()
 	if b == nil || b.openUntil.IsZero() {
 		return "closed"
 	}
-	if time.Now().Before(b.openUntil) {
+	if now.Before(b.openUntil) {
 		return "open"
 	}
-	if !b.probeUsed {
+	if !b.probeUsed || b.probeAt.IsZero() || now.Sub(b.probeAt) >= badPoolProbeLease {
 		return "halfopen"
 	}
 	return "open"
@@ -430,6 +435,7 @@ func applyPoolResult(addr string, status int, requestErr error) {
 			b.failures = 0
 			b.openUntil = time.Time{}
 			b.probeUsed = false
+			b.probeAt = time.Time{}
 			b.tripped = false
 		}
 		return
@@ -450,6 +456,7 @@ func applyPoolResult(addr string, status int, requestErr error) {
 		b.tripped = true
 		b.openUntil = time.Now().Add(time.Duration(poolHalfOpenIntervalSec.Load()) * time.Second)
 		b.probeUsed = false
+		b.probeAt = time.Time{}
 		slog.Warn("pool breaker opened", "addr", addr, "failures", b.failures)
 	}
 }
@@ -462,6 +469,7 @@ func applyPoolResult(addr string, status int, requestErr error) {
 //   - 熔断中节点剔除；到期后放行 1 个半开探测，成功即恢复
 //   - 质量分：down 剔除、flaky 跳过、degraded 降权、healthy 优先；同档按分排序
 //   - 请求反馈与探活分融合（7:3），失败快速反映到排序
+//   - 整池坏池且无探针/冷却兜底：取最早进入坏池的前 60% 继续尝试（不返回空）
 func pickWeightedProxy(proxies []Socks5Proxy, start int) Socks5Proxy {
 	// S5: 防御性退化——单出口直接返回（调用方 pickHealthyProxy 已前置，此处兜底）。
 	if len(proxies) <= 1 {
@@ -473,10 +481,11 @@ func pickWeightedProxy(proxies []Socks5Proxy, start int) Socks5Proxy {
 	now := time.Now()
 
 	type cand struct {
-		proxy  Socks5Proxy
-		score  int
-		tier   int     // 2 = healthy 档，1 = degraded 档
-		jitter float64 // [0,3) 同分/同档随机扰动（仅 smart 模式；避免连续选中同一高分节点）
+		proxy    Socks5Proxy
+		score    int
+		tier     int     // 2 = healthy 档，1 = degraded 档
+		jitter   float64 // [0,3) 同分/同档随机扰动（仅 smart 模式；避免连续选中同一高分节点）
+		inflight int     // 快照：用于 smart 的负载惩罚，避免单一高分节点吃掉全部流量
 	}
 	var cands []cand
 	var halfOpen Socks5Proxy
@@ -551,9 +560,9 @@ func pickWeightedProxy(proxies []Socks5Proxy, start int) Socks5Proxy {
 		case "down", "flaky":
 			continue
 		case "degraded":
-			cands = append(cands, cand{proxy: proxy, score: score, tier: 1, jitter: j})
+			cands = append(cands, cand{proxy: proxy, score: score, tier: 1, jitter: j, inflight: proxyInflightOf(proxy.Addr)})
 		default:
-			cands = append(cands, cand{proxy: proxy, score: score, tier: 2, jitter: j})
+			cands = append(cands, cand{proxy: proxy, score: score, tier: 2, jitter: j, inflight: proxyInflightOf(proxy.Addr)})
 		}
 	}
 
@@ -564,15 +573,46 @@ func pickWeightedProxy(proxies []Socks5Proxy, start int) Socks5Proxy {
 		return p
 	}
 	if len(cands) > 0 {
+		inCands := make(map[string]bool, len(cands))
+		for _, c := range cands {
+			inCands[c.proxy.Addr] = true
+		}
+		pickRotation := func() (Socks5Proxy, bool) {
+			for off := 0; off < len(proxies); off++ {
+				p := proxies[((start+off)%len(proxies)+len(proxies))%len(proxies)]
+				if inCands[p.Addr] {
+					return p, true
+				}
+			}
+			return Socks5Proxy{}, false
+		}
+		mode, _ := routeMode.Load().(string)
+		switch mode {
+		case "round_robin":
+			// 严格轮询：忽略质量分，只按游标在健康候选间轮转（性能模式此前会
+			// 退化成「永远选最高分」，导致 42102 这类高分节点吃掉大部分流量）。
+			if p, ok := pickRotation(); ok {
+				return p
+			}
+		case "failover":
+			// 粘滞：当前游标节点健康就继续用它；失败进冷却后 cands 不再包含它，
+			// 自然落到下一个健康节点，并由调用方推进游标。
+			cur := proxies[((start%len(proxies))+len(proxies))%len(proxies)]
+			if inCands[cur.Addr] {
+				return cur
+			}
+			if p, ok := pickRotation(); ok {
+				return p
+			}
+		}
 		sort.SliceStable(cands, func(i, j int) bool {
 			if cands[i].tier != cands[j].tier {
 				return cands[i].tier > cands[j].tier
 			}
-			// 同档按 score + [0,3) 扰动降序：分数显著差异仍优先高分（扰动 <3%），
-			// 同分/近分节点间分散——避免同一高分节点被连续选中导致实例扎堆。
-			// 稳定排序（SliceStable）保留 raws 的 start 轮转序：round_robin 模式
-			// 下 jitter=0 且同分时，按 start 偏移在候选间轮转（确定性）。
-			si, sj := float64(cands[i].score)+cands[i].jitter, float64(cands[j].score)+cands[j].jitter
+			// smart：质量分 + [0,3) 扰动，再减去 in-flight 惩罚（每个在途请求
+			// 约 5 分）。质量差显著时仍优先高分；同分/近分时向低负载节点分散。
+			si := float64(cands[i].score) + cands[i].jitter - float64(cands[i].inflight)*5
+			sj := float64(cands[j].score) + cands[j].jitter - float64(cands[j].inflight)*5
 			return si > sj
 		})
 		chosen := cands[0]
@@ -581,8 +621,17 @@ func pickWeightedProxy(proxies []Socks5Proxy, start int) Socks5Proxy {
 		}
 		return chosen.proxy
 	}
-	// 全池无可用候选：回退冷却最早结束的节点（与基线兜底一致）。
-	return fallback
+	// 全池无可用候选：先回退冷却最早结束的节点（与基线兜底一致）；
+	// 若连冷却节点都没有（全部坏池），按进入坏池时间取最早 60% 继续尝试。
+	if fallback.Addr != "" {
+		return fallback
+	}
+	if relief := badPoolReliefCandidates(proxies, now); len(relief) > 0 {
+		chosen := pickRelief(relief, start)
+		logReliefUse(relief, chosen)
+		return chosen
+	}
+	return Socks5Proxy{}
 }
 
 // raceCandidate 竞速候选（S5 扩展：scoreJitter 打破同分平局；L1 加 in-flight 快照）。
@@ -720,11 +769,8 @@ func raceCandidates(n int) []Socks5Proxy {
 	for i := 0; i < len(cands) && len(out) < n; i++ {
 		out = append(out, cands[i].proxy)
 	}
-	// 候选仍不足 n → 补 1 个恢复探针（候选充足时不进候选，正常候选均衡不受影响）。
-	if len(out) < n {
-		if p := raceProbeFallback(halfOpenProbe, badPoolProbe); p.Addr != "" {
-			out = append(out, p)
-		}
-	}
+	// 有常规候选时不再补恢复探针：探针一旦进入竞速，大概率落选并被取消，
+	// 而取消不 Mark → 探针配额白白烧掉（节点长期 open/bad_quota 假死）。
+	// 探针只在 len(cands)==0 时单独放行（见上方 early return）。
 	return out
 }

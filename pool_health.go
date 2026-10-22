@@ -11,13 +11,14 @@ import (
 
 // PoolHealthNode 单节点健康快照。
 type PoolHealthNode struct {
-	Addr     string `json:"addr"`
-	State    string `json:"state"`
-	Reason   string `json:"reason,omitempty"`
-	BadCount int    `json:"bad_count"`
-	Until    string `json:"until,omitempty"`
-	Breaker  string `json:"breaker"`
-	Failures int    `json:"failures"`
+	Addr       string `json:"addr"`
+	State      string `json:"state"`
+	Reason     string `json:"reason,omitempty"`
+	BadCount   int    `json:"bad_count"`
+	Extensions int    `json:"extensions,omitempty"`
+	Until      string `json:"until,omitempty"`
+	Breaker    string `json:"breaker"`
+	Failures   int    `json:"failures"`
 }
 
 // PoolHealthSnapshot 池健康聚合快照。
@@ -132,13 +133,14 @@ func snapshotPoolHealth() PoolHealthSnapshot {
 		}
 
 		node := PoolHealthNode{
-			Addr:     p.Addr,
-			State:    state,
-			Reason:   st.badReason,
-			BadCount: st.badCount,
-			Until:    untilStr,
-			Breaker:  breaker,
-			Failures: st.failures,
+			Addr:       p.Addr,
+			State:      state,
+			Reason:     st.badReason,
+			BadCount:   st.badCount,
+			Extensions: st.badExtendCount,
+			Until:      untilStr,
+			Breaker:    breaker,
+			Failures:   st.failures,
 		}
 		snap.Nodes = append(snap.Nodes, node)
 

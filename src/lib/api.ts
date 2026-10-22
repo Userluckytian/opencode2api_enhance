@@ -371,6 +371,8 @@ export type CallLogRecord = {
   /** 来源标注：空 = 统一网关；否则为独享实例名（S4 聚合读取） */
   source?: string
   tier?: "free" | "paid"
+  /** 本次请求命中的厂商 ID（opencode / 自定义插件）；旧记录为空 */
+  vendor?: string
   route_verdict?: RouteVerdict
   serving_port?: string
   /** 实际使用的 key 末 4 位；写入侧尚未接线，当前恒为空 */
@@ -379,7 +381,7 @@ export type CallLogRecord = {
   schema_version?: number
   /** 最后一次上游 HTTP 状态码（网络错误/未拿到响应为 0） */
   upstream_status?: number
-  /** 错误大类：rate_limit / quota / auth / upstream / transport / protocol / other */
+  /** 错误大类：pool / rate_limit / quota / auth / upstream / transport / protocol / other */
   error_class?: string
   /** 上游 error.type / error.code（如 rate_limit_exceeded） */
   error_code?: string

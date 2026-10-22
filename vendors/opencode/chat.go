@@ -197,6 +197,17 @@ type callResult struct {
 // 由 call 构造并透传给 raceDo/raceMarkOutcome/raceDrain。
 type markFn = func(addr string, status int, reqErr error, retryAfterMS int64)
 
+// releaseProbe 归还一次未产生结果的恢复探针配额。
+// 仅当 Transport 实现 contract.ProbeReleaser 时生效；直连传输为无操作。
+func releaseProbe(tr contract.Transport, addr string) {
+	if tr == nil || addr == "" {
+		return
+	}
+	if r, ok := tr.(contract.ProbeReleaser); ok {
+		r.ReleaseProbe(addr)
+	}
+}
+
 // attemptLog 收集一次 call 的结构化尝试链：主循环与 raceDrain 收尾 goroutine
 // 共享，需加锁；snapshot 返回副本。
 type attemptLog struct {
@@ -285,6 +296,9 @@ func (v *Vendor) call(ctx context.Context, msg *contract.Message, streaming bool
 		mark := func(addr string, status int, reqErr error, retryAfterMS int64) {
 			contract.MarkResult(tr, addr, status, reqErr, retryAfterMS)
 		}
+		release := func(addr string) {
+			releaseProbe(tr, addr)
+		}
 		// P2b 请求级竞速：首轮并行扇出 N 个候选，首个 2xx（流式 = 首个 chunk 到达）胜出。
 		// G1：付费层（TierPaid）跳过竞速直接走单发（与单发路径一致，付费 token 不走代理池扇出）。
 		racer, hasRacer := tr.(contract.Racer)
@@ -293,7 +307,7 @@ func (v *Vendor) call(ctx context.Context, msg *contract.Message, streaming bool
 		var proxyAddr string
 		start := time.Now()
 		if retryCount == 0 && a.tier() == contract.TierFree && hasRacer && v.raceCopies() > 1 && !v.inRateLimitCooldown() {
-			resp, proxyAddr, err = v.raceDo(ctx, racer, up, streaming, a.tier(), v.raceCopies(), mark, attemptsLog)
+			resp, proxyAddr, err = v.raceDo(ctx, racer, up, streaming, a.tier(), v.raceCopies(), mark, release, attemptsLog)
 			if err == nil && resp == nil {
 				// 竞速无候选：退化普通单发。
 				client, proxyAddr, decision = contract.PickTransport(tr, a.tier(), streaming)
@@ -313,7 +327,10 @@ func (v *Vendor) call(ctx context.Context, msg *contract.Message, streaming bool
 		if err != nil {
 			// G32：客户端断开（ctx.Canceled）不是节点链路失败——all-fail 竞速返回的
 			// Canceled 连带真实 addr 在此会被误标冷却/熔断，统一排除；真实网络错误仍标记。
-			if !errors.Is(err, context.Canceled) && !errors.Is(err, contract.ErrNoHealthyNode) {
+			// 但取消前若已消费恢复探针（坏池到期/熔断半开），必须归还配额，否则节点永久假死。
+			if errors.Is(err, context.Canceled) {
+				release(proxyAddr)
+			} else if !errors.Is(err, contract.ErrNoHealthyNode) {
 				mark(proxyAddr, 0, err, 0)
 			}
 			attemptsLog.add(contract.Attempt{
@@ -553,22 +570,26 @@ type prefixReadCloser struct {
 
 // raceOutcome 是竞速中单个候选的结果。
 type raceOutcome struct {
-	resp   *http.Response
-	addr   string
-	err    error
-	idx    int   // 候选下标：赢家锁流后只取消其它候选，保留赢家流
-	durMS  int64 // 该候选从发出到落定的耗时（供尝试链）
+	resp  *http.Response
+	addr  string
+	err   error
+	idx   int   // 候选下标：赢家锁流后只取消其它候选，保留赢家流
+	durMS int64 // 该候选从发出到落定的耗时（供尝试链）
 }
 
 // raceMarkOutcome 上报单个落选候选的最终结果（G6）：真实失败（非 2xx / 传输错误）才记；
 // 赢家与全败时返回给调用方的候选不上报（由 call 统一标记，避免重复）；
-// 被本竞速取消（ctx 已取消）的候选不算失败——它可能只是较慢的健康节点，误记会污染池健康。
+// 被本竞速取消（ctx 已取消）的候选不算失败——它可能只是较慢的健康节点，误记会污染池健康；
+// 但取消前该候选可能已消费恢复探针配额，必须归还（否则节点永久 bad_quota/open）。
 // 同时向 attempts 尝试链记录该候选（供埋点回流/离线挖掘）。
-func raceMarkOutcome(mark markFn, attempts *attemptLog, o raceOutcome) {
+func raceMarkOutcome(mark markFn, release func(string), attempts *attemptLog, o raceOutcome) {
 	if o.err == nil && o.resp != nil && o.resp.StatusCode >= 200 && o.resp.StatusCode < 300 {
 		return
 	}
 	if o.err != nil && errors.Is(o.err, context.Canceled) {
+		if release != nil {
+			release(o.addr)
+		}
 		return
 	}
 	status := 0
@@ -590,7 +611,7 @@ func raceMarkOutcome(mark markFn, attempts *attemptLog, o raceOutcome) {
 // 返回（nil, "", nil）表示无候选——调用方应退化普通单发。
 // tier 透传给 CandidateClients（G1：付费层直连，不进入代理池竞速）。
 // mark 上报落选候选的失败结果（G6：池健康/冷却可见；赢家与全败返回的候选由 call 统一标记，避免重复）。
-func (v *Vendor) raceDo(ctx context.Context, racer contract.Racer, req *http.Request, streaming bool, tier contract.Tier, copies int, mark markFn, attempts *attemptLog) (*http.Response, string, error) {
+func (v *Vendor) raceDo(ctx context.Context, racer contract.Racer, req *http.Request, streaming bool, tier contract.Tier, copies int, mark markFn, release func(string), attempts *attemptLog) (*http.Response, string, error) {
 	clients, addrs := racer.CandidateClients(tier, streaming, copies)
 	// G14：契约未强制 clients/addrs 等长——按下标访问（addrs[i]）前按短者截断，
 	// 防止某 transport 实现返回不等长列表时越界 panic 拖崩整个网关进程。
@@ -720,9 +741,9 @@ func (v *Vendor) raceDo(ctx context.Context, racer contract.Racer, req *http.Req
 				}
 				// G6：赢家锁流前已落定的首个失败此时确认落选，补报（赢家由 call 统一标记）。
 				if firstFail != nil {
-					raceMarkOutcome(mark, attempts, *firstFail)
+					raceMarkOutcome(mark, release, attempts, *firstFail)
 				}
-				go raceDrain(&wg, results, mark, attempts)
+				go raceDrain(&wg, results, mark, release, attempts)
 				return o.resp, o.addr, nil
 			}
 			f := o
@@ -731,13 +752,13 @@ func (v *Vendor) raceDo(ctx context.Context, racer contract.Racer, req *http.Req
 				firstFail = &f
 			} else {
 				// G6：后续失败候选必为落选，立即上报池健康。
-				raceMarkOutcome(mark, attempts, o)
+				raceMarkOutcome(mark, release, attempts, o)
 			}
 			if atomic.AddInt32(&done, 1) == int32(len(clients)) {
 				cancelAll()
 				// 全败逐个上报：首个失败返回给 call()（由其统一标记），
 				// 其余候选已在循环中上报；raceDrain 收尾通道余量。
-				go raceDrain(&wg, results, mark, attempts)
+				go raceDrain(&wg, results, mark, release, attempts)
 				if firstFail.err != nil {
 					return nil, firstFail.addr, firstFail.err
 				}
@@ -748,9 +769,9 @@ func (v *Vendor) raceDo(ctx context.Context, racer contract.Racer, req *http.Req
 			cancelAll()
 			// G6：预算前已落定的失败补报（无返回候选，全部算落选）。
 			if firstFail != nil {
-				raceMarkOutcome(mark, attempts, *firstFail)
+				raceMarkOutcome(mark, release, attempts, *firstFail)
 			}
-			go raceDrain(&wg, results, mark, attempts)
+			go raceDrain(&wg, results, mark, release, attempts)
 			return nil, "", fmt.Errorf("race budget exceeded")
 		}
 	}
@@ -758,7 +779,7 @@ func (v *Vendor) raceDo(ctx context.Context, racer contract.Racer, req *http.Req
 
 // raceDrain 竞速收尾：等所有候选 goroutine 退出后关闭落选响应的 Body（防连接泄漏），
 // 并把余下落选候选的失败结果上报池健康（G6；主循环已上报的不在此列）。
-func raceDrain(wg *sync.WaitGroup, results chan raceOutcome, mark markFn, attempts *attemptLog) {
+func raceDrain(wg *sync.WaitGroup, results chan raceOutcome, mark markFn, release func(string), attempts *attemptLog) {
 	wg.Wait()
 	for {
 		select {
@@ -766,7 +787,7 @@ func raceDrain(wg *sync.WaitGroup, results chan raceOutcome, mark markFn, attemp
 			if o.resp != nil {
 				o.resp.Body.Close()
 			}
-			raceMarkOutcome(mark, attempts, o)
+			raceMarkOutcome(mark, release, attempts, o)
 		default:
 			return
 		}
