@@ -84,7 +84,40 @@ fn pick_free_port(start: u16, budget: u16) -> u16 {
     start
 }
 
+/// 清理 updater 在 %TEMP% 留下的旧安装包目录（仅匹配本应用前缀，且只删 1 小时前的）。
+fn cleanup_stale_updater_dirs() {
+    use std::time::{Duration, SystemTime};
+
+    let Ok(entries) = std::fs::read_dir(std::env::temp_dir()) else {
+        return;
+    };
+    let now = SystemTime::now();
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if !name.starts_with("opencode2api-") || !name.contains("-updater-") {
+            continue;
+        }
+        let Ok(meta) = entry.metadata() else { continue };
+        if !meta.is_dir() {
+            continue;
+        }
+        let Ok(modified) = meta.modified() else { continue };
+        let Ok(age) = now.duration_since(modified) else {
+            continue;
+        };
+        if age < Duration::from_secs(3600) {
+            continue;
+        }
+        let _ = std::fs::remove_dir_all(entry.path());
+    }
+}
+
 pub fn run() {
+    // updater 会把安装包解压到 %TEMP%/opencode2api-<version>-updater-*（临时目录被刻意保留，
+    // 供安装器在应用退出后继续运行）。启动时清理一小时前的残留，避免长期累积。
+    cleanup_stale_updater_dirs();
+
     // --headless：无桌面（GTK/WinUI）模式，仅释放内嵌组件并拉起 core 管理器，
     // 供 SSH/服务器场景使用（管理界面走浏览器 http://127.0.0.1:<port>/）。
     // --headless 之后的参数原样透传给 core（如 -port/-listen，Go flag 后者覆盖前者）。
@@ -196,6 +229,8 @@ pub fn run() {
 
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
+        .plugin(tauri_plugin_process::init())
         .manage(AppState {
             manager,
             scan: Arc::new(probe::ScanController::new()),

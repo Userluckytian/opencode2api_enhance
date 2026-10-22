@@ -1,14 +1,31 @@
 import { useEffect, useRef, useState } from 'react'
 import clsx from 'clsx'
-import { Loader2, Search, Settings, Trash2 } from 'lucide-react'
+import { Loader2, RefreshCw, Search, Settings, Trash2 } from 'lucide-react'
 import { api, type OrphanProcess } from '../lib/api'
 import type { ConfigView, BinariesInfo } from '../lib/api'
 import { isDesktop } from '../lib/env'
+import type { UpdateInfo } from '../lib/updates'
 
 export default function SettingsPage({
   toast,
+  update,
+  checking,
+  checkedAt,
+  updateError,
+  onCheckUpdate,
+  onOpenRelease,
+  onInstallUpdate,
+  canNativeUpdate,
 }: {
   toast: (msg: string, ok?: boolean) => void
+  update: UpdateInfo | null
+  checking: boolean
+  checkedAt: number | null
+  updateError: string | null
+  onCheckUpdate: () => void
+  onOpenRelease: (url: string) => void
+  onInstallUpdate: () => void
+  canNativeUpdate: boolean
 }) {
   const [config, setConfig] = useState<ConfigView | null>(null)
   const [autostart, setAutostart] = useState<boolean>(false)
@@ -430,10 +447,62 @@ export default function SettingsPage({
         <h2 className="text-lg font-semibold text-zinc-900">关于</h2>
 
         <div className="space-y-2">
-          <label className="block text-sm font-medium text-zinc-700">版本</label>
-          <code className="block text-sm bg-zinc-100 px-3 py-2 rounded border font-mono">
-            v{__APP_VERSION__}
-          </code>
+          <label className="block text-sm font-medium text-zinc-700">版本与更新</label>
+          <div className="flex flex-wrap items-center gap-2">
+            <code className="text-sm bg-zinc-100 px-3 py-2 rounded border font-mono">v{__APP_VERSION__}</code>
+            <button
+              type="button"
+              onClick={onCheckUpdate}
+              disabled={checking}
+              className="flex items-center gap-1.5 px-3 py-2 rounded-lg border border-zinc-300 text-[13px] hover:bg-zinc-100 disabled:cursor-not-allowed disabled:opacity-50"
+            >
+              {checking ? <Loader2 size={14} className="animate-spin" /> : <RefreshCw size={14} />}
+              检查更新
+            </button>
+            {update && canNativeUpdate && (
+              <button
+                type="button"
+                onClick={onInstallUpdate}
+                className="flex items-center gap-1.5 px-3 py-2 rounded-lg bg-amber-600 text-white text-[13px] hover:bg-amber-700"
+              >
+                立即更新
+              </button>
+            )}
+            {update && !canNativeUpdate && (
+              <button
+                type="button"
+                onClick={() => onOpenRelease(update.url)}
+                className="flex items-center gap-1.5 px-3 py-2 rounded-lg bg-amber-600 text-white text-[13px] hover:bg-amber-700"
+              >
+                打开发布页
+              </button>
+            )}
+            {update && canNativeUpdate && (
+              <button
+                type="button"
+                onClick={() => onOpenRelease(update.url)}
+                className="px-3 py-2 rounded-lg border border-zinc-300 text-[13px] text-zinc-700 hover:bg-zinc-100"
+              >
+                发布说明
+              </button>
+            )}
+          </div>
+          <p className="text-[12px] text-zinc-600">
+            {update
+              ? `发现新版本 v${update.latest}${update.prerelease ? '（预发布）' : ''}`
+              : checkedAt
+                ? '已是最新版本'
+                : '尚未检查'}
+            {checkedAt ? ` · 上次检查 ${new Date(checkedAt).toLocaleString('zh-CN', { hour12: false })}` : ''}
+          </p>
+          {update?.publishedAt && (
+            <p className="text-[12px] text-zinc-500">发布时间：{new Date(update.publishedAt).toLocaleString('zh-CN', { hour12: false })}</p>
+          )}
+          {updateError && <p className="text-[12px] text-red-600">检查失败：{updateError}</p>}
+          <p className="text-[12px] text-zinc-500">
+            启动时及每 6 小时自动检查 GitHub Releases（按语义化版本取最高版本）。桌面版可在应用内下载并安装；
+            headless / 浏览器版只提醒并跳转发布页。
+          </p>
         </div>
 
         <div className="space-y-2">

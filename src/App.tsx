@@ -1,9 +1,12 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import clsx from 'clsx'
-import { Server, Layers, Radar, Settings, BarChart3, ScrollText, Plug } from 'lucide-react'
+import { Server, Layers, Radar, Settings, BarChart3, ScrollText, Plug, Sparkles } from 'lucide-react'
 import { api } from './lib/api'
+import { useUpdateCheck } from './lib/updates'
+import { nativeUpdateSupported } from './lib/nativeUpdate'
 import { TitleBar } from './components/TitleBar'
 import TaskPanel from './components/TaskPanel'
+import UpdateModal from './components/UpdateModal'
 import InstancesPage from './pages/InstancesPage'
 import PoolPage from './pages/PoolPage'
 import NodesPage from './pages/NodesPage'
@@ -52,6 +55,19 @@ export default function App() {
   const [toast, setToast] = useState<{ msg: string; ok: boolean } | null>(null)
   // V2: 全局任务悬浮栈（跨页面常驻，多任务并存堆叠）
   const [tasks, setTasks] = useState<TaskItem[]>([])
+  const updateState = useUpdateCheck(__APP_VERSION__)
+  const [updateModalOpen, setUpdateModalOpen] = useState(false)
+  const canNativeUpdate = nativeUpdateSupported()
+
+  const openExternal = useCallback(async (url: string) => {
+    try {
+      const r = await api.openUrl(url)
+      if (r.ok) return
+    } catch {
+      /* 浏览器模式兜底 */
+    }
+    window.open(url, '_blank', 'noopener')
+  }, [])
 
   // 任务镜像 ref：供超时兜底 interval 离线判断（避免在 setTasks 更新器里做副作用）
   const tasksRef = useRef<TaskItem[]>([])
@@ -208,6 +224,43 @@ export default function App() {
     <div className="h-full flex flex-col">
       <TitleBar />
 
+      {/* 更新提醒：启动/每 6 小时检查 GitHub Releases；只提醒，不自动下载 */}
+      {updateState.bannerUpdate && (
+        <div className="shrink-0 flex items-center gap-3 px-4 py-2 bg-amber-50 border-b border-amber-200 text-[12px] text-amber-900">
+          <Sparkles size={14} className="shrink-0" />
+          <span className="min-w-0 truncate">
+            发现新版本 <b>v{updateState.bannerUpdate.latest}</b>
+            <span className="text-amber-700/80">（当前 v{updateState.bannerUpdate.current}）</span>
+            {updateState.bannerUpdate.prerelease ? <span className="ml-1 px-1.5 py-0.5 rounded bg-amber-100 text-amber-800 text-[10px]">预发布</span> : null}
+          </span>
+          <span className="flex-1" />
+          {canNativeUpdate ? (
+            <button
+              type="button"
+              onClick={() => setUpdateModalOpen(true)}
+              className="shrink-0 px-2.5 py-1 rounded-md bg-amber-600 text-white hover:bg-amber-700"
+            >
+              立即更新
+            </button>
+          ) : (
+            <button
+              type="button"
+              onClick={() => void openExternal(updateState.bannerUpdate!.url)}
+              className="shrink-0 px-2.5 py-1 rounded-md bg-amber-600 text-white hover:bg-amber-700"
+            >
+              查看更新
+            </button>
+          )}
+          <button
+            type="button"
+            onClick={() => updateState.dismiss(updateState.bannerUpdate!.latest)}
+            className="shrink-0 px-2.5 py-1 rounded-md border border-amber-300 text-amber-800 hover:bg-amber-100"
+          >
+            稍后
+          </button>
+        </div>
+      )}
+
       <div className="flex-1 flex min-h-0">
         {/* 侧边栏导航 */}
         <aside className="w-44 shrink-0 border-r border-zinc-200/80 bg-white/60 backdrop-blur flex flex-col py-4 px-2 gap-1">
@@ -237,9 +290,30 @@ export default function App() {
           {tab === 'custom' && <CustomModelsPage toast={showToast} />}
           {tab === 'stats' && <StatsPage toast={showToast} />}
           {tab === 'logs' && <LogsPage toast={showToast} />}
-          {tab === 'settings' && <SettingsPage toast={showToast} />}
+          {tab === 'settings' && (
+            <SettingsPage
+              toast={showToast}
+              update={updateState.update}
+              checking={updateState.checking}
+              checkedAt={updateState.checkedAt}
+              updateError={updateState.error}
+              onCheckUpdate={() => void updateState.check(true)}
+              onOpenRelease={openExternal}
+              onInstallUpdate={() => setUpdateModalOpen(true)}
+              canNativeUpdate={canNativeUpdate}
+            />
+          )}
         </main>
       </div>
+
+      {/* 应用内更新：下载进度 + 立即安装（仅桌面壳） */}
+      <UpdateModal
+        open={updateModalOpen}
+        update={updateState.update}
+        onClose={() => setUpdateModalOpen(false)}
+        onOpenRelease={openExternal}
+        toast={showToast}
+      />
 
       {/* Toast */}
 

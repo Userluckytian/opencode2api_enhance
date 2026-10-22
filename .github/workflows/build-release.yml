@@ -24,6 +24,7 @@ jobs:
             sb_url: https://github.com/SagerNet/sing-box/releases/download/v1.13.16/sing-box-1.13.16-windows-amd64.zip
             sb_archive: zip
             bundles: nsis
+            updater_platform: windows-x86_64
             win_dll: true
           - os: ubuntu-latest
             go_bin: opencode2api
@@ -31,13 +32,15 @@ jobs:
             sb_url: https://github.com/SagerNet/sing-box/releases/download/v1.13.16/sing-box-1.13.16-linux-amd64.tar.gz
             sb_archive: targz
             bundles: deb,appimage
+            updater_platform: linux-x86_64
             win_dll: false
           - os: macos-latest
             go_bin: opencode2api
             sb_name: sing-box
             sb_url: https://github.com/SagerNet/sing-box/releases/download/v1.13.16/sing-box-1.13.16-darwin-arm64.tar.gz
             sb_archive: targz
-            bundles: dmg
+            bundles: dmg,app
+            updater_platform: darwin-aarch64
             win_dll: false
     runs-on: ${{ matrix.os }}
     permissions:
@@ -128,7 +131,62 @@ jobs:
 
       - name: Tauri build (bundles ${{ matrix.bundles }})
         shell: bash
+        env:
+          # 应用内更新（Tauri updater）所需签名；私钥与密码放在仓库 Secrets 中
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         run: npx tauri build --bundles ${{ matrix.bundles }}
+
+      # 每个平台产出 updater 元数据（平台标识 + 安装包相对路径 + 签名），
+      # 供 release job 生成 latest.json。macOS 的上传包名不含架构，不能靠文件名推断。
+      - name: Collect updater artifact metadata
+        shell: bash
+        run: |
+          PY=python3
+          command -v python3 >/dev/null 2>&1 || PY=python
+          "$PY" - <<'PY'
+          import json, os, pathlib, sys
+
+          root = pathlib.Path("src-tauri/target/release/bundle")
+          candidates = []
+          for p in root.rglob("*"):
+              if not p.is_file():
+                  continue
+              n = p.name.lower()
+              if n.endswith(".sig") or n.endswith(".deb") or n.endswith(".dmg"):
+                  continue
+              if n.endswith(".exe"):
+                  prio = 0
+              elif n.endswith(".appimage.tar.gz"):
+                  prio = 0
+              elif n.endswith(".appimage"):
+                  prio = 1
+              elif n.endswith(".app.tar.gz"):
+                  prio = 0
+              else:
+                  continue
+              candidates.append((prio, p))
+
+          if not candidates:
+              sys.exit("未找到 updater 安装包（NSIS .exe / AppImage / app.tar.gz）")
+
+          candidates.sort(key=lambda x: x[0])
+          _, artifact = candidates[0]
+          sig = pathlib.Path(str(artifact) + ".sig")
+          if not sig.exists():
+              sys.exit(f"缺少签名文件：{sig}（请确认 TAURI_SIGNING_PRIVATE_KEY 已配置）")
+
+          meta = {
+              "platform": os.environ["UPDATER_PLATFORM"],
+              "artifact": artifact.relative_to(root).as_posix(),
+              "signature": sig.read_text(encoding="utf-8").strip(),
+          }
+          out = root / f"updater-meta-{meta['platform']}.json"
+          out.write_text(json.dumps(meta, ensure_ascii=False), encoding="utf-8")
+          print(f"updater: {meta['platform']} -> {meta['artifact']}")
+          PY
+        env:
+          UPDATER_PLATFORM: ${{ matrix.updater_platform }}
 
       - name: Upload artifact (${{ matrix.os }})
         uses: actions/upload-artifact@v4
@@ -136,10 +194,16 @@ jobs:
           name: opencode2api-${{ matrix.os }}
           if-no-files-found: error
           path: |
+            src-tauri/target/release/bundle/updater-meta-*.json
             src-tauri/target/release/bundle/nsis/*.exe
+            src-tauri/target/release/bundle/nsis/*.sig
             src-tauri/target/release/bundle/deb/*.deb
             src-tauri/target/release/bundle/appimage/*.AppImage
+            src-tauri/target/release/bundle/appimage/*.AppImage.tar.gz
+            src-tauri/target/release/bundle/appimage/*.sig
             src-tauri/target/release/bundle/dmg/*.dmg
+            src-tauri/target/release/bundle/macos/*.app.tar.gz
+            src-tauri/target/release/bundle/macos/*.sig
 
   # GitHub Release：仅 tag（v*）触发时执行——汇总三平台产物并发布（首次新建，幂等）。
   release:
@@ -209,6 +273,47 @@ jobs:
         with:
           path: release
 
+      # 生成 Tauri updater 清单：读取各平台构建阶段产出的 updater-meta-*.json，
+      # 配对出安装包 URL（平台标识由构建矩阵给出，避免 macOS 文件名不含架构导致误判）。
+      - name: Generate updater manifest (latest.json)
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import datetime, json, os, pathlib, urllib.parse
+
+          tag = os.environ["GITHUB_REF_NAME"]
+          repo = os.environ["GITHUB_REPOSITORY"]
+          version = tag[1:] if tag.lower().startswith("v") else tag
+
+          metas = sorted(pathlib.Path("release").rglob("updater-meta-*.json"))
+          if not metas:
+              raise SystemExit("未找到 updater 元数据：请检查构建矩阵 updater_platform 与 createUpdaterArtifacts")
+
+          platforms = {}
+          for meta_path in metas:
+              meta = json.loads(meta_path.read_text(encoding="utf-8"))
+              key = meta["platform"]
+              artifact = meta_path.parent / meta["artifact"]
+              if not artifact.exists():
+                  raise SystemExit(f"updater 安装包缺失：{artifact}")
+              url = f"https://github.com/{repo}/releases/download/{tag}/{urllib.parse.quote(artifact.name)}"
+              platforms[key] = {
+                  "signature": meta["signature"],
+                  "url": url,
+              }
+
+          body = pathlib.Path("RELEASE_BODY.md")
+          manifest = {
+              "version": version,
+              "notes": body.read_text(encoding="utf-8").strip() if body.exists() else f"opencode2api {tag}",
+              "pub_date": datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+              "platforms": platforms,
+          }
+          out = pathlib.Path("release/latest.json")
+          out.write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
+          print(out.read_text(encoding="utf-8"))
+          PY
+
       - name: Publish GitHub Release
         uses: softprops/action-gh-release@v2
         with:
@@ -216,3 +321,17 @@ jobs:
           body_path: RELEASE_BODY.md
           name: opencode2api ${{ github.ref_name }}
           fail_on_unmatched_files: false
+
+      # 应用内更新的固定端点：rolling release updater-latest 上的 latest.json。
+      # 不用 /releases/latest（会排除预发布、且按创建时间而非版本号排序）。
+      - name: Publish updater manifest (rolling)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          gh release view updater-latest >/dev/null 2>&1 || \
+            gh release create updater-latest --prerelease \
+              --title "Updater manifest" \
+              --notes "由 CI 自动维护的应用内更新清单，请勿手动修改。"
+          gh release upload updater-latest release/latest.json --clobber

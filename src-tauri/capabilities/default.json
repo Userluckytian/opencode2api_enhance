@@ -22,6 +22,9 @@
     "core:window:allow-unminimize",
     "core:event:default",
     "core:tray:default",
-    "dialog:allow-open"
+    "dialog:allow-open",
+    "updater:default",
+    "process:allow-restart",
+    "process:allow-exit"
   ]
 }

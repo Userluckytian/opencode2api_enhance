@@ -1,7 +1,7 @@
 {
   "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
   "productName": "opencode2api",
-  "version": "1.7.8-beta.7",
+  "version": "1.7.8-beta.8",
   "identifier": "com.opencode2api.manager",
   "build": {
     "frontendDist": "../dist",
@@ -28,8 +28,20 @@
       "csp": null
     }
   },
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEM2QjlBOTlENkJGMkJDOTAKUldTUXZQSnJuYW01eGlVMXBNN0kwR3JhNlcwcmtoZUJHVXlyS0o1VVNQUWJPaklTNWh6ZHdVaWoK",
+      "endpoints": [
+        "https://github.com/Userluckytian/opencode2api_enhance/releases/download/updater-latest/latest.json"
+      ],
+      "windows": {
+        "installMode": "passive"
+      }
+    }
+  },
   "bundle": {
     "active": true,
+    "createUpdaterArtifacts": true,
     "targets": [
       "nsis",
       "deb",
