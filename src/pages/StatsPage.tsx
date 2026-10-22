@@ -424,7 +424,7 @@ export default function StatsPage({
       </div>
       <p className="text-[11px] text-zinc-400">
         全部日期 = 各日期之和（统一网关调用日志，含失败请求）；下方实例表为统计文件累计
-        （仅成功且有 usage 的记录，无时间维度），两者口径不同。历史流式记录（beta.8 之前）可能缺少
+        （仅成功且有 usage 的记录，无时间维度），两者口径不同。历史流式记录（1.7.9 之前）可能缺少
         usage，Token 合计会偏低，完整累计以下方实例表为准。
       </p>
 
