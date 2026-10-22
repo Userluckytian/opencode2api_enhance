@@ -155,7 +155,7 @@ func claudeMessagesHandler(w http.ResponseWriter, r *http.Request) {
 		}
 		callRec.Events = append(callRec.Events, CallEvent{Type: "connect_ok", Node: proxyAddr, Detail: "connected", At: time.Now()})
 		defer upResp.Close()
-		claudeStreamHandler(w, upResp, chatReq.Model, keepReasoning, proxyAddr)
+		claudeStreamHandler(w, upResp, chatReq.Model, keepReasoning, proxyAddr, &callRec)
 		callRec.DurationMS = time.Since(startTime).Milliseconds()
 		callRec.Events = append(callRec.Events, CallEvent{Type: "complete", Node: proxyAddr, Detail: "done", At: time.Now()})
 		if autoDec == nil {
@@ -220,7 +220,7 @@ func claudeMessagesHandler(w http.ResponseWriter, r *http.Request) {
 	w.Write(claudeRespBody)
 }
 
-func claudeStreamHandler(w http.ResponseWriter, respBody io.ReadCloser, model string, keepReasoning bool, proxyAddr string) {
+func claudeStreamHandler(w http.ResponseWriter, respBody io.ReadCloser, model string, keepReasoning bool, proxyAddr string, callRec *CallRecord) {
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
@@ -245,6 +245,11 @@ func claudeStreamHandler(w http.ResponseWriter, respBody io.ReadCloser, model st
 			tt, _ := fullUsage["total_tokens"].(float64)
 			if tt > 0 {
 				recordTokenUsage(model, int64(pt), int64(ct), int64(tt), proxyAddr)
+				// usage 必须回写调用日志：否则 /v1/messages 流式在按天统计里恒为 0 Token。
+				if callRec != nil {
+					callRec.PromptTok = int64(pt)
+					callRec.CompletionTok = int64(ct)
+				}
 			}
 		}
 	}()

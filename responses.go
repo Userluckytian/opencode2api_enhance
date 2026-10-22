@@ -927,7 +927,7 @@ func responsesHandler(w http.ResponseWriter, r *http.Request) {
 			Body:       upResp,
 			Header:     make(http.Header),
 		}
-		responsesStreamHandler(w, r, resp, chatReq.Model, chatReq.Model, wantReasoning, respReq.Tools, respReq.ToolChoice, respReq, proxyAddr)
+		responsesStreamHandler(w, r, resp, chatReq.Model, chatReq.Model, wantReasoning, respReq.Tools, respReq.ToolChoice, respReq, proxyAddr, &callRec)
 		callRec.DurationMS = time.Since(startTime).Milliseconds()
 		callRec.Events = append(callRec.Events, CallEvent{Type: "complete", Node: proxyAddr, Detail: "done", At: time.Now()})
 		if autoDec == nil {
@@ -999,7 +999,7 @@ func responsesHandler(w http.ResponseWriter, r *http.Request) {
 
 // ======================== Responses Stream Handler ========================
 
-func responsesStreamHandler(w http.ResponseWriter, _ *http.Request, resp *http.Response, model string, _ string, wantReasoning bool, tools []ResponsesTool, toolChoice any, originalReq ResponsesAPIRequest, proxyAddr string) {
+func responsesStreamHandler(w http.ResponseWriter, _ *http.Request, resp *http.Response, model string, _ string, wantReasoning bool, tools []ResponsesTool, toolChoice any, originalReq ResponsesAPIRequest, proxyAddr string, callRec *CallRecord) {
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
@@ -1496,6 +1496,11 @@ func responsesStreamHandler(w http.ResponseWriter, _ *http.Request, resp *http.R
 		tt, _ := totalUsage["total_tokens"].(float64)
 		if tt > 0 {
 			recordTokenUsage(model, int64(pt), int64(ct), int64(tt), proxyAddr)
+			// usage 回写调用日志：按天统计依赖 call_log 的 token 字段。
+			if callRec != nil {
+				callRec.PromptTok = int64(pt)
+				callRec.CompletionTok = int64(ct)
+			}
 		}
 	}
 

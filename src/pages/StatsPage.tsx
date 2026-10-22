@@ -19,6 +19,10 @@ type DayTrendPoint = {
   fail: number
 }
 
+/** 调用日志全量合计：与按天视图同一数据源，保证 Σ各日期 = 全部日期 */
+type LogTotals = { total: number; ok: number; fail: number; pt: number; ct: number }
+const EMPTY_LOG_TOTALS: LogTotals = { total: 0, ok: 0, fail: 0, pt: 0, ct: 0 }
+
 /** 成功/失败迷你条形图：绿=成功、红=失败，按占比宽度；无数据时灰色空态 */
 function MiniBar({ ok, fail }: { ok: number; fail: number }) {
   const total = ok + fail
@@ -146,6 +150,8 @@ export default function StatsPage({
   // 迷你条图数据（来自调用日志聚合）：每来源成功/失败、按天请求量/成功率
   const [insOkFail, setInsOkFail] = useState<Record<string, { ok: number; fail: number }>>({})
   const [dayTrend, setDayTrend] = useState<DayTrendPoint[]>([])
+  // 全部日期卡片：与按天视图同源（调用日志），避免与统计文件累计口径混淆
+  const [logTotals, setLogTotals] = useState<LogTotals>(EMPTY_LOG_TOTALS)
   // G29: 按天请求序号——快速切换日期时过期响应丢弃，防止数据串日期
   const dayReqSeq = useRef(0)
   // M9: 轮询代次守卫——load/loadDates 各记一代，响应后比对，过期响应丢弃（不叠加、旧快照不覆盖新状态）
@@ -163,6 +169,7 @@ export default function StatsPage({
       const s = new Set<string>()
       const bySrc = new Map<string, { ok: number; fail: number }>()
       const byDay = new Map<string, { total: number; ok: number }>()
+      const totals: LogTotals = { total: 0, ok: 0, fail: 0, pt: 0, ct: 0 }
       for (const l of recs) {
         if (resetAtRef.current > 0) {
           const ts = Date.parse(l.ts)
@@ -171,6 +178,11 @@ export default function StatsPage({
         const d = (l.ts || '').slice(0, 10)
         if (d) s.add(d)
         const ok = l.status === 'ok'
+        totals.total++
+        if (ok) totals.ok++
+        else totals.fail++
+        totals.pt += l.prompt_tokens || 0
+        totals.ct += l.completion_tokens || 0
         // 来源标注：空 = 统一网关；否则为独享实例名
         const src = (l.source || '').trim() || GATEWAY_DISPLAY
         const a = bySrc.get(src)
@@ -191,6 +203,7 @@ export default function StatsPage({
         }
       }
       setDates([...s].sort().reverse())
+      setLogTotals(totals)
       setInsOkFail(Object.fromEntries(bySrc))
       setDayTrend(
         [...byDay]
@@ -205,6 +218,7 @@ export default function StatsPage({
       setDates([])
       setInsOkFail({})
       setDayTrend([])
+      setLogTotals(EMPTY_LOG_TOTALS)
     }
   }, [])
 
@@ -360,7 +374,7 @@ export default function StatsPage({
             className="text-[13px] text-zinc-600 bg-transparent outline-none"
             title="按日期查看统计（数据来自统一网关调用日志）"
           >
-            <option value="">全部日期（累计）</option>
+            <option value="">全部日期（调用日志）</option>
             {dates.map((d) => (
               <option key={d} value={d}>
                 {d}
@@ -379,26 +393,40 @@ export default function StatsPage({
         )}
       </div>
 
-      {/* 总览卡片：按天 6 卡 / 累计 4 卡 */}
+      {/* 总览卡片：全部日期与按天都来自调用日志（Σ各日期 = 全部） */}
       <div className="flex flex-wrap gap-4">
-        {day && dayStats ? (
-          <>
-            <Card label="当日请求数" value={fmt(dayStats.total_requests)} />
-            <Card label="成功" value={fmt(dayStats.ok_requests)} />
-            <Card label="失败" value={fmt(dayStats.fail_requests)} />
-            <Card label="输入 Token" value={fmt(dayStats.total_prompt_tokens)} />
-            <Card label="输出 Token" value={fmt(dayStats.total_completion_tokens)} />
-            <Card label="总 Token" value={fmt(dayStats.total_tokens)} accent />
-          </>
+        {day ? (
+          dayStats ? (
+            <>
+              <Card label="当日请求数" value={fmt(dayStats.total_requests)} />
+              <Card label="成功" value={fmt(dayStats.ok_requests)} />
+              <Card label="失败" value={fmt(dayStats.fail_requests)} />
+              <Card label="输入 Token" value={fmt(dayStats.total_prompt_tokens)} />
+              <Card label="输出 Token" value={fmt(dayStats.total_completion_tokens)} />
+              <Card label="总 Token" value={fmt(dayStats.total_tokens)} accent />
+            </>
+          ) : (
+            <div className="flex items-center gap-2 py-3 text-[12px] text-zinc-400">
+              <Loader2 size={14} className="animate-spin" />
+              正在加载 {day} 的调用日志…
+            </div>
+          )
         ) : (
           <>
-            <Card label="总请求数" value={fmt(stats?.total_requests ?? 0)} />
-            <Card label="总输入 Token" value={fmt(stats?.total_prompt_tokens ?? 0)} />
-            <Card label="总输出 Token" value={fmt(stats?.total_completion_tokens ?? 0)} />
-            <Card label="总 Token" value={fmt(stats?.total_tokens ?? 0)} accent />
+            <Card label="总请求数（调用日志）" value={fmt(logTotals.total)} />
+            <Card label="成功" value={fmt(logTotals.ok)} />
+            <Card label="失败" value={fmt(logTotals.fail)} />
+            <Card label="输入 Token" value={fmt(logTotals.pt)} />
+            <Card label="输出 Token" value={fmt(logTotals.ct)} />
+            <Card label="总 Token" value={fmt(logTotals.pt + logTotals.ct)} accent />
           </>
         )}
       </div>
+      <p className="text-[11px] text-zinc-400">
+        全部日期 = 各日期之和（统一网关调用日志，含失败请求）；下方实例表为统计文件累计
+        （仅成功且有 usage 的记录，无时间维度），两者口径不同。历史流式记录（beta.8 之前）可能缺少
+        usage，Token 合计会偏低，完整累计以下方实例表为准。
+      </p>
 
       {/* 按天视图：请求量 / 成功率趋势条（纯 CSS 柱状，复用 Card 组件） */}
       {day && dayStats && (
@@ -534,8 +562,8 @@ export default function StatsPage({
             <thead>
               <tr className="text-left text-[12px] text-zinc-500 border-b border-zinc-100">
                 <th className="py-2 pr-3 font-medium">实例</th>
-                <th className="py-2 pr-3 font-medium text-right">请求数</th>
-                <th className="py-2 pr-3 font-medium">成功/失败</th>
+                <th className="py-2 pr-3 font-medium text-right" title="统计文件累计：仅成功且有 usage 的请求">请求数</th>
+                <th className="py-2 pr-3 font-medium" title="来自调用日志（含失败请求），与请求数列口径不同">成功/失败（日志）</th>
                 <th className="py-2 pr-3 font-medium text-right">输入 Token</th>
                 <th className="py-2 pr-3 font-medium text-right">输出 Token</th>
                 <th className="py-2 pr-3 font-medium text-right">总计</th>
@@ -655,7 +683,7 @@ export default function StatsPage({
         )}
         {!isEmpty && (
           <div className="mt-3 text-[11px] text-zinc-400">
-            每 5 秒自动刷新 · 已删除实例的统计仍保留在历史区
+            每 5 秒自动刷新 · 实例表为统计文件累计口径（成功 usage）· 已删除实例的统计仍保留在历史区
           </div>
         )}
           </>
