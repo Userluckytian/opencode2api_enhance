@@ -82,3 +82,13 @@ func routeVerdict(nodes []string, tier string, socksConfigured bool, errMsg stri
 		return ""
 	}
 }
+
+// hasNonEmptyNode 报告节点列表里是否存在真实节点（空/纯空白视为无节点）。
+func hasNonEmptyNode(nodes []string) bool {
+	for _, n := range nodes {
+		if strings.TrimSpace(n) != "" {
+			return true
+		}
+	}
+	return false
+}

@@ -588,7 +588,14 @@ func recordCall(rec CallRecord) {
 	// 就再也分不出「本来就没有节点」与「节点名恰好叫直连」。
 	// 调用方已显式给值时不覆盖（留出未来更精确判定的入口）。
 	if rec.RouteVerdict == "" {
-		rec.RouteVerdict = routeVerdict(rec.Nodes, rec.Tier, socksProxyConfigured(), rec.ErrMsg)
+		// 非 opencode 厂商当前都不走节点池（custom 默认 via_proxy=false、插件厂商按直连语义），
+		// 空节点是设计如此，不能判成「异常直连」。via_proxy=true 的自定义厂商正常会带节点，
+		// 若节点意外丢失会落到 direct_by_design，属于可接受的观测降级。
+		if rec.Tier == "free" && rec.Vendor != "" && rec.Vendor != "opencode" && !hasNonEmptyNode(rec.Nodes) {
+			rec.RouteVerdict = RouteVerdictDirectByDesign
+		} else {
+			rec.RouteVerdict = routeVerdict(rec.Nodes, rec.Tier, socksProxyConfigured(), rec.ErrMsg)
+		}
 	}
 	// 池空的占位不能写「直连」：免费层已配代理时根本没有直连请求，
 	// 写成直连会把「本地 503 快失败」误读成「直连失败」。
@@ -868,9 +875,10 @@ func streamWithResume(w http.ResponseWriter, r *http.Request, upstreamBody []byt
 					}
 					// 非 data 行原样转发（如 event:/id:）
 					sseDebugf("[%s] META>> %q", reqID, resLine.line)
-					// 诊断：首行非空且不像 SSE 格式（无 event:/id:/retry: 前缀），
+					// 诊断：首行非空且不像 SSE 格式（无 :/event:/id:/retry: 前缀），
 					// 可能是上游返回了 HTML/纯文本等非 SSE 内容。
-					if !gotFirst && line != "" && !strings.HasPrefix(line, "event:") && !strings.HasPrefix(line, "id:") && !strings.HasPrefix(line, "retry:") {
+					// 注意 ":" 开头是 SSE 注释/心跳（: keep-alive、: heartbeat），属正常流量。
+					if !gotFirst && line != "" && !strings.HasPrefix(line, ":") && !strings.HasPrefix(line, "event:") && !strings.HasPrefix(line, "id:") && !strings.HasPrefix(line, "retry:") {
 						snippet := line
 						if len(snippet) > 300 {
 							snippet = snippet[:300] + "...(truncated)"

@@ -412,9 +412,17 @@ func (m *Manager) savePoolQuality(recs []QualityRecord) {
 		slog.Warn("pool quality tmp close failed", "error", err)
 		return
 	}
-	if err := os.Rename(tmp.Name(), m.poolQualityFilePath()); err != nil {
-		slog.Warn("pool quality rename failed", "path", m.poolQualityFilePath(), "error", err)
+	// Windows 上目标文件可能正被网关读取（-pool-quality），Rename 会短暂报
+	//「Access is denied」；重试几次即可，下一轮探测也会再写，不必放大成告警。
+	var renameErr error
+	for attempt := 0; attempt < 3; attempt++ {
+		renameErr = os.Rename(tmp.Name(), m.poolQualityFilePath())
+		if renameErr == nil {
+			return
+		}
+		time.Sleep(20 * time.Millisecond)
 	}
+	slog.Warn("pool quality rename failed", "path", m.poolQualityFilePath(), "error", renameErr)
 }
 
 // ---- 探活调度 ----

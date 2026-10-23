@@ -4,7 +4,9 @@ package main
 
 import (
 	"bufio"
+	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"log/slog"
 	"net/http"
@@ -425,9 +427,9 @@ func buildResponseToolCallItem(tc ToolCall, outputType string) map[string]any {
 
 // L5（CONC-10）：storedResponses 有界化——常数上限 + TTL + 插入序淘汰。
 const (
-	maxStoredResponses = 2000              // 最大缓存条数（超限淘汰最旧）
-	storedResponseTTL  = time.Hour         // 条目有效期（超期惰性清理）
-	storedPurgeInterval = time.Minute      // 批量清理检查节流（避免每次写都全表扫）
+	maxStoredResponses  = 2000        // 最大缓存条数（超限淘汰最旧）
+	storedResponseTTL   = time.Hour   // 条目有效期（超期惰性清理）
+	storedPurgeInterval = time.Minute // 批量清理检查节流（避免每次写都全表扫）
 )
 
 // storedResponseEntry 缓存条目：状态 + 插入序（淘汰最旧用）+ 过期时间。
@@ -736,16 +738,16 @@ func responsesHandler(w http.ResponseWriter, r *http.Request) {
 	// 全流程调用日志：记录每个请求的决策链（网关模式下；对齐 chat_handler 三态）
 	startTime := time.Now()
 	callRec := CallRecord{
-		ReqID:     getReqID(r.Context()),
-		TS:        time.Now().Format(time.RFC3339),
-		Path:      r.URL.Path,
-		Model:     respReq.Model,
-		Stream:    respReq.Stream,
-		RouteMode:  routeMode.Load().(string),
-		Tier:       tierOfAuth(auth),
+		ReqID:       getReqID(r.Context()),
+		TS:          time.Now().Format(time.RFC3339),
+		Path:        r.URL.Path,
+		Model:       respReq.Model,
+		Stream:      respReq.Stream,
+		RouteMode:   routeMode.Load().(string),
+		Tier:        tierOfAuth(auth),
 		ServingPort: port,
 		TraceID:     getTraceID(r.Context()),
-		Status:     "ok",
+		Status:      "ok",
 	}
 	if callRec.ReqID == "" {
 		callRec.ReqID = "req_" + randomString(12)
@@ -1178,7 +1180,11 @@ func responsesStreamHandler(w http.ResponseWriter, _ *http.Request, resp *http.R
 			if err == io.EOF {
 				break
 			}
-			slog.Error("stream read error", "error", err)
+			if errors.Is(err, io.ErrUnexpectedEOF) || errors.Is(err, context.Canceled) {
+				slog.Warn("stream read error", "error", err)
+			} else {
+				slog.Error("stream read error", "error", err)
+			}
 			return
 		}
 		if strings.HasPrefix(line, "data: ") {

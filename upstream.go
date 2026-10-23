@@ -71,15 +71,15 @@ func mainCodeVendor() *opencode.Vendor {
 	}
 	ocAdapterOnce.Do(func() {
 		ocAdapterTarget = opencode.New(opencode.Config{
-			ID:                 "opencode",
-			Name:               "OpenCode",
-			Transport:          rootTransport{},
-			AdminPassword:      adminPassword,
-			RaceCopies:         int(poolRaceCopies.Load()),
-			RaceBudgetMS:       int(raceBudgetMS.Load()),
-			RacePressureLow:    poolRacePressureLow.Load().(float64),
-			RacePressureHigh:   poolRacePressureHigh.Load().(float64),
-			RateLimitCooldownSec:  int(rateLimitCooldownSec.Load()),
+			ID:                     "opencode",
+			Name:                   "OpenCode",
+			Transport:              rootTransport{},
+			AdminPassword:          adminPassword,
+			RaceCopies:             int(poolRaceCopies.Load()),
+			RaceBudgetMS:           int(raceBudgetMS.Load()),
+			RacePressureLow:        poolRacePressureLow.Load().(float64),
+			RacePressureHigh:       poolRacePressureHigh.Load().(float64),
+			RateLimitCooldownSec:   int(rateLimitCooldownSec.Load()),
 			RateLimitBackoffBaseMS: int(rateLimitBackoffBaseMS.Load()),
 			RateLimitBackoffCapMS:  int(rateLimitBackoffCapMS.Load()),
 		})
@@ -301,9 +301,12 @@ func shouldSwitchVendor(v contract.Vendor, status int, _ error) bool {
 const upstreamErrBodyMax = 512
 
 // upstreamErrMsg 组装上游失败信息：状态码 + 错误 + 响应体摘要（截断防刷屏）。
-// body 为上游返回的错误体（非 2xx 时由厂商透传）；空则退化为原「状态码 + err」格式。
+// body 为上游返回的错误体（非 2xx 时由厂商透传）；err 为空时不再输出无意义的 ": <nil>"。
 func upstreamErrMsg(status int, err error, body []byte) string {
-	msg := fmt.Sprintf("upstream status %d: %v", status, err)
+	msg := fmt.Sprintf("upstream status %d", status)
+	if err != nil {
+		msg += ": " + err.Error()
+	}
 	if len(body) > 0 {
 		s := strings.TrimSpace(string(body))
 		if s == "" {

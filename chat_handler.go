@@ -46,16 +46,16 @@ func chatCompletionsHandler(w http.ResponseWriter, r *http.Request) {
 	// 全流程调用日志：记录每个请求的决策链（网关模式下）
 	startTime := time.Now()
 	callRec := CallRecord{
-		ReqID:     getReqID(r.Context()),
-		TS:        time.Now().Format(time.RFC3339),
-		Path:      r.URL.Path,
-		Model:     req.Model,
-		Stream:    req.Stream,
-		RouteMode:  routeMode.Load().(string),
-		Tier:       tierOfAuth(auth),
+		ReqID:       getReqID(r.Context()),
+		TS:          time.Now().Format(time.RFC3339),
+		Path:        r.URL.Path,
+		Model:       req.Model,
+		Stream:      req.Stream,
+		RouteMode:   routeMode.Load().(string),
+		Tier:        tierOfAuth(auth),
 		ServingPort: port,
 		TraceID:     getTraceID(r.Context()),
-		Status:     "ok",
+		Status:      "ok",
 	}
 	if callRec.ReqID == "" {
 		callRec.ReqID = "req_" + randomString(12)
@@ -130,9 +130,10 @@ func chatCompletionsHandler(w http.ResponseWriter, r *http.Request) {
 				upResp.Close()
 			}
 			callRec.ErrMsg = upstreamErrMsg(status, err, errBody)
+			callRec.DurationMS = time.Since(startTime).Milliseconds()
 			attachUpstreamError(&callRec, status, errBody, hdr, proxyAddr)
 			if autoDec == nil {
-				recordModelFeedback(req.Model, proxyAddr, false, time.Since(startTime).Milliseconds())
+				recordModelFeedback(req.Model, proxyAddr, false, callRec.DurationMS)
 			}
 			recordCall(callRec)
 			w.Header().Set("Content-Type", "application/json")

@@ -212,6 +212,11 @@ var badStatusCodes = map[int]string{
 // badThreshold 连续坏状态码次数阈值，达到后节点进入"坏池"（禁用）
 const badThreshold = 3
 
+// transportBadThreshold 连续传输层失败（status=0，典型是 SOCKS 连接失败 0x01）次数阈值。
+// 达到后升级为可恢复的 link 坏池：否则坏链路节点只做 20s/2min 冷却，会在兜底位被
+// 反复选中（线上 42105 累计 2374 次失败），既拖慢请求也掩盖真实错误。
+const transportBadThreshold = 3
+
 // badPoolResetSec 链路类坏池自动恢复间隔（秒，默认 300；S3）。
 // 链路类坏池（如 503 服务不可用）到期后放行 1 次探测，成功清状态 / 失败重新坏池；
 // 账号类（401）不自动恢复（badUntil 零值永久禁用）；额度类（402/429）走 quotaBadPoolResetSec。
@@ -664,9 +669,26 @@ func markSocks5ResultWithRetry(addr string, status int, requestErr error, retryA
 				cooldown = 2 * time.Minute
 			}
 			state.until = time.Now().Add(cooldown)
+			// 传输层失败（status=0，典型是 SOCKS 连接失败 0x01）说明链路本身不可用，
+			// 连续达到阈值后升级为可恢复的 link 坏池，按 bad_pool_reset_sec 放行探针；
+			// 否则它只会以 20s/2min 冷却长期占据兜底位，反复空转。
+			enteredBad := false
+			if requestErr != nil && state.badReason == "" && state.failures >= transportBadThreshold {
+				now := time.Now()
+				state.badReason = "链路：连接失败"
+				state.badClass = "link"
+				state.badSince = now
+				state.badExtendCount = 0
+				applyBadUntil(&state, 0, now)
+				state.badProbeUsed = false
+				state.badProbeAt = time.Time{}
+				enteredBad = true
+				slog.Warn("proxy entered bad pool", "addr", addr, "reason", state.badReason, "count", state.failures, "class", state.badClass)
+			}
 			// 链路类/额度类坏池节点的探测失败 → 重新坏池（重置计时），避免探针配额耗尽后饿死；
 			// 续期同样受 badPoolMaxExtensions 限制，达到上限后不再后移 badUntil。
-			if state.badReason != "" && !state.badUntil.IsZero() {
+			// 刚进入坏池的这次失败不重复续期（同一次失败只计一次）。
+			if !enteredBad && state.badReason != "" && !state.badUntil.IsZero() {
 				if state.badExtendCount < badPoolMaxExtensions {
 					state.badExtendCount++
 					applyBadUntil(&state, status, time.Now())

@@ -275,6 +275,8 @@ func (v *Vendor) call(ctx context.Context, msg *contract.Message, streaming bool
 	var lastErr error
 	var retryCount, retry401Count, retry429Count int
 	var decision contract.Decision
+	// strippedParams 记录因上游明确报“不支持该参数”而剥离的字段，避免同一参数反复重试。
+	strippedParams := map[string]bool{}
 	attemptsLog := &attemptLog{}
 
 	for retryCount <= maxRetries {
@@ -328,7 +330,8 @@ func (v *Vendor) call(ctx context.Context, msg *contract.Message, streaming bool
 			// G32：客户端断开（ctx.Canceled）不是节点链路失败——all-fail 竞速返回的
 			// Canceled 连带真实 addr 在此会被误标冷却/熔断，统一排除；真实网络错误仍标记。
 			// 但取消前若已消费恢复探针（坏池到期/熔断半开），必须归还配额，否则节点永久假死。
-			if errors.Is(err, context.Canceled) {
+			canceled := errors.Is(err, context.Canceled)
+			if canceled {
 				release(proxyAddr)
 			} else if !errors.Is(err, contract.ErrNoHealthyNode) {
 				mark(proxyAddr, 0, err, 0)
@@ -338,12 +341,28 @@ func (v *Vendor) call(ctx context.Context, msg *contract.Message, streaming bool
 				ErrorCode: contract.TruncateRunes(err.Error(), 120), DurationMS: elapsedMS,
 			})
 			lastErr = err
+			// 传输失败也必须保留节点：否则调用日志把空节点写成「直连」，
+			// 真实的 SOCKS 连接失败会被误判成异常直连（2026-10-23 线上）。
+			lastProxyAddr = proxyAddr
 			// 池空：不重试、不 Mark（addr 为空），映射为 503 no_healthy_node。
 			if errors.Is(err, contract.ErrNoHealthyNode) {
 				lastStatus = http.StatusServiceUnavailable
 				lastBody = []byte(`{"error":{"message":"no healthy proxy node","type":"no_healthy_node"}}`)
 				lastProxyAddr = ""
 				decision.Reason = "none"
+				break
+			}
+			// 客户端已断开：不再重试（继续只会空跑），保持既有「返回取消错误」契约。
+			if canceled {
+				break
+			}
+			// 全池已无可用节点（只剩冷却/坏池兜底）时不再重试：同一请求内换节点也只会
+			// 重复连接失败，线上实测白等 4 轮、每请求多耗约 3 秒。保留本次真实尝试给
+			// 请求级恢复探针，下一次请求再试。
+			if proxyAddr != "" && decision.AvailableCount == 0 {
+				lastStatus = http.StatusServiceUnavailable
+				lastBody = transportNoNodeBody(lastErr)
+				decision.Reason = "pool_exhausted"
 				break
 			}
 			retryCount++
@@ -393,11 +412,35 @@ func (v *Vendor) call(ctx context.Context, msg *contract.Message, streaming bool
 		// 本候选（单发 / 竞速全败返回的首个失败）由 call 统一上报与记录；
 		// 竞速其余落选候选已在 raceDo 内部逐个上报（G6），不在这里重复。
 		class, code, _ := contract.ClassifyUpstreamError(resp.StatusCode, errBody)
+		// 400 unsupported_parameter：部分免费模型不支持 thinking/reasoning_effort。
+		// 客户端显式带了这些字段时，上游会直接 400；这里按 param 剥离后重试一次，
+		// 而不是把「模型不支持」变成整次请求失败（线上 beam-free 16 次）。
+		if resp.StatusCode == http.StatusBadRequest {
+			if param := unsupportedOptionalParam(errBody); param != "" && !strippedParams[param] {
+				if _, exists := bodyMap[param]; exists {
+					delete(bodyMap, param)
+					strippedParams[param] = true
+					attemptsLog.add(contract.Attempt{
+						Node: proxyAddr, Status: resp.StatusCode, ErrorClass: class, ErrorCode: code,
+						DurationMS: elapsedMS, RetryAfterMS: retryAfter, Reason: "retry_without_" + param,
+					})
+					slog.Warn("upstream rejected optional parameter, retrying without it",
+						"model", modelID, "param", param, "node", proxyAddr)
+					continue
+				}
+			}
+		}
 		attemptsLog.add(contract.Attempt{
 			Node: proxyAddr, Status: resp.StatusCode, ErrorClass: class, ErrorCode: code,
 			DurationMS: elapsedMS, RetryAfterMS: retryAfter, Reason: "upstream_error",
 		})
-		slog.Error("opencode upstream error", "model", modelID, "status", resp.StatusCode, "body", string(errBody))
+		// 429/400 是预期内的客户端/限流错误，按 WARN 记录，避免把日志刷成 ERROR 海；
+		// 5xx/401/403 仍按 ERROR 保留，便于快速定位真实服务或鉴权故障。
+		if resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode == http.StatusBadRequest {
+			slog.Warn("opencode upstream error", "model", modelID, "status", resp.StatusCode, "body", string(errBody))
+		} else {
+			slog.Error("opencode upstream error", "model", modelID, "status", resp.StatusCode, "body", string(errBody))
+		}
 		lastBody = errBody
 		lastStatus = resp.StatusCode
 		lastHeader = resp.Header
@@ -443,13 +486,79 @@ func (v *Vendor) call(ctx context.Context, msg *contract.Message, streaming bool
 	if lastStatus == http.StatusTooManyRequests {
 		lastBody = rateLimitErrorBody()
 	}
+	// 传输层全败且没有合成状态（非池空、非取消）：合成 502，避免把「状态 0 +
+	// all models failed」这种不可诊断的错误面透给客户端。真实节点与尝试链已保留。
+	if lastStatus == 0 && !errors.Is(lastErr, context.Canceled) {
+		lastStatus = http.StatusBadGateway
+		lastBody = transportFailureBody(lastErr)
+	}
 	if streaming {
-		if lastStatus != 0 {
-			return &callResult{stream: io.NopCloser(bytes.NewReader(lastBody)), status: lastStatus, nodeAddr: lastProxyAddr, decision: decision, attempts: attemptsLog.snapshot()}, nil
+		// 客户端已断开：保持既有契约（返回错误而不是可读流），调用方也不再写响应。
+		if errors.Is(lastErr, context.Canceled) {
+			return nil, lastErr
 		}
-		return nil, fmt.Errorf("all models failed")
+		return &callResult{stream: io.NopCloser(bytes.NewReader(lastBody)), status: lastStatus, nodeAddr: lastProxyAddr, decision: decision, attempts: attemptsLog.snapshot()}, nil
 	}
 	return &callResult{body: lastBody, status: lastStatus, headers: lastHeader, nodeAddr: lastProxyAddr, decision: decision, attempts: attemptsLog.snapshot()}, lastErr
+}
+
+// transportNoNodeBody 合成「代理池无可用节点」的 503 错误体：保留最后一次真实错误，
+// 便于客户端/调用日志直接看到 socks5 连接失败原因，而不是笼统的 all models failed。
+func transportNoNodeBody(lastErr error) []byte {
+	msg := "no available proxy node"
+	if lastErr != nil {
+		msg += ": " + lastErr.Error()
+	}
+	b, err := json.Marshal(map[string]any{
+		"error": map[string]any{"message": msg, "type": "no_healthy_node"},
+	})
+	if err != nil {
+		return []byte(`{"error":{"message":"no available proxy node","type":"no_healthy_node"}}`)
+	}
+	return b
+}
+
+// transportFailureBody 合成传输层全败的 502 错误体（错误分类为 transport）。
+func transportFailureBody(lastErr error) []byte {
+	msg := "all upstream candidates failed at transport layer"
+	if lastErr != nil {
+		msg = "upstream transport failed: " + lastErr.Error()
+	}
+	b, err := json.Marshal(map[string]any{
+		"error": map[string]any{"message": msg, "type": "upstream_transport_error"},
+	})
+	if err != nil {
+		return []byte(`{"error":{"message":"upstream transport failed","type":"upstream_transport_error"}}`)
+	}
+	return b
+}
+
+// unsupportedOptionalParam 从 400 错误体里提取「上游明确不支持的可选参数」。
+// 只返回可安全剥离的 thinking / reasoning_effort；其他参数（messages/tools 等）
+// 即使上游报错也不能删，否则会破坏请求语义。
+func unsupportedOptionalParam(body []byte) string {
+	var root struct {
+		Error struct {
+			Param   string `json:"param"`
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	if json.Unmarshal(body, &root) != nil {
+		return ""
+	}
+	param := strings.TrimSpace(root.Error.Param)
+	if param == "" {
+		const marker = "Unrecognized request argument supplied: "
+		if i := strings.Index(root.Error.Message, marker); i >= 0 {
+			param = strings.Trim(strings.TrimSpace(root.Error.Message[i+len(marker):]), ".")
+		}
+	}
+	switch param {
+	case "thinking", "reasoning_effort":
+		return param
+	default:
+		return ""
+	}
 }
 
 // raceCopies 返回竞速并行数（配置上限 >0 生效，否则 1 = 关闭竞速）。

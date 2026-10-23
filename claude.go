@@ -4,7 +4,9 @@ package main
 
 import (
 	"bufio"
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -46,16 +48,16 @@ func claudeMessagesHandler(w http.ResponseWriter, r *http.Request) {
 	// 全流程调用日志：记录每个请求的决策链（网关模式下；对齐 chat_handler 三态）
 	startTime := time.Now()
 	callRec := CallRecord{
-		ReqID:     getReqID(r.Context()),
-		TS:        time.Now().Format(time.RFC3339),
-		Path:      r.URL.Path,
-		Model:     claudeReq.Model,
-		Stream:    claudeReq.Stream,
-		RouteMode:  routeMode.Load().(string),
-		Tier:       tierOfAuth(auth),
+		ReqID:       getReqID(r.Context()),
+		TS:          time.Now().Format(time.RFC3339),
+		Path:        r.URL.Path,
+		Model:       claudeReq.Model,
+		Stream:      claudeReq.Stream,
+		RouteMode:   routeMode.Load().(string),
+		Tier:        tierOfAuth(auth),
 		ServingPort: port,
 		TraceID:     getTraceID(r.Context()),
-		Status:     "ok",
+		Status:      "ok",
 	}
 	if callRec.ReqID == "" {
 		callRec.ReqID = "req_" + randomString(12)
@@ -297,7 +299,11 @@ func claudeStreamHandler(w http.ResponseWriter, respBody io.ReadCloser, model st
 			if err == io.EOF {
 				break
 			}
-			slog.Error("stream read error", "error", err)
+			if errors.Is(err, io.ErrUnexpectedEOF) || errors.Is(err, context.Canceled) {
+				slog.Warn("stream read error", "error", err)
+			} else {
+				slog.Error("stream read error", "error", err)
+			}
 			break
 		}
 		if strings.HasPrefix(line, "data: ") {

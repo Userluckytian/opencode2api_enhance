@@ -177,6 +177,11 @@ func ClassifyUpstreamError(status int, body []byte) (class, code, message string
 	if code == "" && status != 0 {
 		code = fmt.Sprintf("http_%d", status)
 	}
+	// 网关本地合成的传输层失败（502 + type=upstream_transport_error）归为 transport，
+	// 避免和真实上游 5xx 混在一起统计。
+	if code == "upstream_transport_error" {
+		class = "transport"
+	}
 	return class, code, truncateRunes(message, 300)
 }
 

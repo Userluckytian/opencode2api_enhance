@@ -52,6 +52,8 @@ type CallLogRecord struct {
 	Source string `json:"source,omitempty"`
 	// Tier request layer: free/paid (same as main package CallRecord).
 	Tier string `json:"tier,omitempty"`
+	// Vendor 实际服务厂商 ID（写入侧 CallRecord.Vendor 镜像；旧记录为空）。
+	Vendor string `json:"vendor,omitempty"`
 	// ServingPort actual ingress port.
 	ServingPort string `json:"serving_port,omitempty"`
 	// RouteVerdict 路由结论：proxied / direct_by_design / direct_config_missing / direct_unexpected；空 = 旧记录或无法判定。
