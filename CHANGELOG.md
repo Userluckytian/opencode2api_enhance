@@ -1,5 +1,14 @@
 # Changelog
 
+## v1.7.10-beta.2（2026-10-23，Beta）
+
+### 更新弹窗修复
+
+- **Release Notes 正确渲染**：弹窗内不再直接显示 `###`、`>`、`**` 等原始 Markdown；新增轻量渲染，支持标题、引用、列表、粗体、行内代码和链接。
+- **「打开发布页」可用**：core 的 `/api/admin/open-url` 白名单增加本仓库 GitHub Release 页。此前只允许回环地址，GitHub 链接被拒绝后 `window.open` 又被 Tauri WebView 拦截，点击没有任何反应。
+- **发布页 URL 兜底**：native updater 只返回版本号时，按 `v<version>` 拼出 Release 页；即使 GitHub 检查失败，按钮也不会变成死按钮。
+- **打开失败可见**：桌面壳打开浏览器失败时弹出 toast（含 URL），不再静默失败。
+
 ## v1.7.10-beta.1（2026-10-23，Beta）
 
 ### 与 v1.7.9-beta.1 代码一致，仅提升版本号以覆盖 1.7.9 用户
