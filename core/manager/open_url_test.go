@@ -42,6 +42,22 @@ func postOpenURL(t *testing.T, body string) map[string]any {
 
 const panelURL = "http://127.0.0.1:58054/?gateway=http%3A%2F%2F127.0.0.1%3A40000%2Fv1&plugin=qw2api&models=a%2Cb"
 
+// 应用内更新的「打开发布页」需要放行本仓库 Release（Tauri WebView 无法 window.open）。
+const releaseURL = "https://github.com/Userluckytian/opencode2api_enhance/releases/tag/v1.7.10-beta.2"
+
+func TestOpenURLHandlerAllowsReleasePage(t *testing.T) {
+	got := stubOpener(t, nil)
+	body, _ := json.Marshal(map[string]string{"url": releaseURL})
+
+	res := postOpenURL(t, string(body))
+	if res["ok"] != true {
+		t.Fatalf("ok = %v，期望 true（error=%v）", res["ok"], res["error"])
+	}
+	if *got != releaseURL {
+		t.Fatalf("交给系统的 URL = %q，期望 %q", *got, releaseURL)
+	}
+}
+
 func TestOpenURLHandlerPassesFullURLThrough(t *testing.T) {
 	got := stubOpener(t, nil)
 	body, _ := json.Marshal(map[string]string{"url": panelURL})
@@ -81,6 +97,8 @@ func TestOpenURLHandlerRejectsBadTargets(t *testing.T) {
 	}{
 		{"非 http 协议", "file:///C:/Windows/System32/calc.exe"},
 		{"非回环主机", "http://example.com/"},
+		{"非本仓库 GitHub 页面", "https://github.com/other/repo/releases"},
+		{"本仓库页面必须是 https", "http://github.com/Userluckytian/opencode2api_enhance/releases"},
 		{"换行注入", "http://127.0.0.1/\r\nX-Injected: 1"},
 		{"伪装 localhost 前缀", "http://localhost.evil.com/"},
 		{"query 里的裸引号（query 不做编码，必须拦住）", `http://127.0.0.1/?q="><x`},

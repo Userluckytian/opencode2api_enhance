@@ -4,6 +4,7 @@ import { Server, Layers, Radar, Settings, BarChart3, ScrollText, Plug, Sparkles 
 import { api } from './lib/api'
 import { useUpdateCheck } from './lib/updates'
 import { nativeUpdateSupported } from './lib/nativeUpdate'
+import { isDesktop } from './lib/env'
 import { TitleBar } from './components/TitleBar'
 import TaskPanel from './components/TaskPanel'
 import UpdateModal from './components/UpdateModal'
@@ -59,16 +60,6 @@ export default function App() {
   const [updateModalOpen, setUpdateModalOpen] = useState(false)
   const canNativeUpdate = nativeUpdateSupported()
 
-  const openExternal = useCallback(async (url: string) => {
-    try {
-      const r = await api.openUrl(url)
-      if (r.ok) return
-    } catch {
-      /* 浏览器模式兜底 */
-    }
-    window.open(url, '_blank', 'noopener')
-  }, [])
-
   // 任务镜像 ref：供超时兜底 interval 离线判断（避免在 setTasks 更新器里做副作用）
   const tasksRef = useRef<TaskItem[]>([])
   useEffect(() => {
@@ -83,6 +74,28 @@ export default function App() {
     if (toastTimerRef.current) clearTimeout(toastTimerRef.current)
     toastTimerRef.current = setTimeout(() => setToast(null), 3600)
   }, [])
+
+  // 外部链接：桌面壳走 core 的系统浏览器；失败时给出可复制的 URL，不再静默失败。
+  const openExternal = useCallback(
+    async (url: string) => {
+      try {
+        const r = await api.openUrl(url)
+        if (r.ok) return
+        if (!isDesktop) {
+          window.open(url, '_blank', 'noopener')
+          return
+        }
+        showToast(`打开浏览器失败：${r.error || '未知错误'}`, false)
+      } catch {
+        if (!isDesktop) {
+          window.open(url, '_blank', 'noopener')
+          return
+        }
+        showToast(`打开浏览器失败，请手动访问：${url}`, false)
+      }
+    },
+    [showToast],
+  )
 
   // V2/G10/L10: 任务操作——upsertTask 按 id 新增/更新（同 id 覆盖，异 id 并存堆叠）；removeTask 收尾移除。
   // ✕ 关闭（后台继续）：dismissedRef 记忆「id → 轮次令牌」，仅同轮 busy 上报被过滤（防 poll 秒速加回）；

@@ -6,7 +6,8 @@ import { useEffect, useState } from 'react'
 import clsx from 'clsx'
 import { AlertTriangle, CheckCircle2, Download, Loader2, RefreshCw, Sparkles, X } from 'lucide-react'
 import { api } from '../lib/api'
-import type { UpdateInfo } from '../lib/updates'
+import { UPDATE_REPO, type UpdateInfo } from '../lib/updates'
+import MarkdownLite from './MarkdownLite'
 import {
   checkNativeUpdate,
   downloadNativeUpdate,
@@ -150,6 +151,13 @@ export default function UpdateModal({
 
   const percent = progress.percent
   const version = info?.version || update?.latest || ''
+  // native updater 只给版本号，不给 release URL；按版本号拼出发布页，
+  // 避免 GitHub 检查失败（update=null）时「打开发布页」变成死按钮。
+  const releaseUrl =
+    update?.url ||
+    (version
+      ? `https://github.com/${UPDATE_REPO}/releases/tag/v${version.replace(/^v/i, '')}`
+      : '')
 
   return (
     <div className="fixed inset-0 z-[60] flex items-center justify-center bg-zinc-900/40 backdrop-blur-sm p-4">
@@ -198,8 +206,8 @@ export default function UpdateModal({
                 Windows 会显示安装进度窗口（管理员安装需要 UAC 授权），安装完成后自动重新打开。
               </p>
               {info?.body ? (
-                <div className="max-h-32 overflow-y-auto rounded-lg bg-zinc-50 border border-zinc-100 p-3 text-[12px] leading-relaxed text-zinc-600 whitespace-pre-wrap">
-                  {info.body.length > 800 ? `${info.body.slice(0, 800)}\n…` : info.body}
+                <div className="max-h-48 overflow-y-auto rounded-lg bg-zinc-50 border border-zinc-100 p-3 text-[12px] leading-relaxed text-zinc-600">
+                  <MarkdownLite text={info.body} onOpenUrl={onOpenRelease} />
                 </div>
               ) : null}
             </div>
@@ -266,8 +274,10 @@ export default function UpdateModal({
         <div className="flex items-center justify-end gap-2 px-5 py-3.5 bg-zinc-50/70 border-t border-zinc-100">
           <button
             type="button"
-            onClick={() => update && onOpenRelease(update.url)}
-            className="mr-auto text-[12px] text-zinc-500 hover:text-zinc-800 hover:underline"
+            onClick={() => releaseUrl && onOpenRelease(releaseUrl)}
+            disabled={!releaseUrl}
+            title={releaseUrl || '暂无发布页'}
+            className="mr-auto text-[12px] text-zinc-500 hover:text-zinc-800 hover:underline disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:no-underline"
           >
             打开发布页
           </button>

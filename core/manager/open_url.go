@@ -7,8 +7,9 @@ package manager
 // 浏览器直接访问管理页时该端点同样适用（同源 fetch，无跨域问题）。
 //
 // 安全边界：端点位于 requireAuth 之后的 /api/admin/* 域；仅接受 http/https 且
-// 主机为 127.0.0.1/localhost/[::1] 的 URL（插件面板全部绑定回环），并拒绝含
-// 引号/尖括号/换行的串（防 cmd 参数逃逸）。端点不返回目标内容，只负责"打开"。
+// 主机为 127.0.0.1/localhost/[::1]（插件面板）或项目 GitHub Release 页
+// （应用内更新的「打开发布页」），并拒绝含引号/尖括号/换行的串（防 cmd 参数逃逸）。
+// 端点不返回目标内容，只负责"打开"。
 
 import (
 	"encoding/json"
@@ -39,8 +40,12 @@ func (m *Manager) OpenURLHandler() http.HandlerFunc {
 			return
 		}
 		host := u.Hostname()
-		if host != "127.0.0.1" && host != "localhost" && host != "::1" {
-			writeJSON(w, map[string]any{"ok": false, "error": "仅允许打开本机回环地址（插件面板均在 127.0.0.1）"})
+		loopback := host == "127.0.0.1" || host == "localhost" || host == "::1"
+		// 应用内更新的「打开发布页」需要打开项目 Release；只放行本仓库的 https 页面。
+		releasePage := u.Scheme == "https" && host == "github.com" &&
+			strings.HasPrefix(u.Path, "/Userluckytian/opencode2api_enhance/")
+		if !loopback && !releasePage {
+			writeJSON(w, map[string]any{"ok": false, "error": "仅允许打开本机回环地址或项目发布页"})
 			return
 		}
 		target := u.String()
