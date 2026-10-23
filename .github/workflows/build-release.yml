@@ -359,4 +359,11 @@ jobs:
             cp "$mac" "$out"
             gh release upload updater-latest "$out" --clobber
           fi
+          # 滚动 release 只保留当前版本的 macOS updater 包，避免历史版本无限累积。
+          gh release view updater-latest --json assets --jq '.assets[].name' \
+            | grep -E '^opencode2api_.*_aarch64\.app\.tar\.gz$' \
+            | grep -vF "opencode2api_${version}_aarch64.app.tar.gz" \
+            | while read -r old; do
+                gh release delete-asset updater-latest "$old" -y
+              done || true
           gh release upload updater-latest release/latest.json --clobber
