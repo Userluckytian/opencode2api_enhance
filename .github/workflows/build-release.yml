@@ -296,7 +296,13 @@ jobs:
               artifact = meta_path.parent / meta["artifact"]
               if not artifact.exists():
                   raise SystemExit(f"updater 安装包缺失：{artifact}")
-              url = f"https://github.com/{repo}/releases/download/{tag}/{urllib.parse.quote(artifact.name)}"
+              if key == "darwin-aarch64":
+                  # macOS 的 updater 包是 .app.tar.gz，不是用户要的安装包；
+                  # 放到内部滚动 release，版本 Release 只保留 .dmg。
+                  rolling_name = f"opencode2api_{version}_aarch64.app.tar.gz"
+                  url = f"https://github.com/{repo}/releases/download/updater-latest/{urllib.parse.quote(rolling_name)}"
+              else:
+                  url = f"https://github.com/{repo}/releases/download/{tag}/{urllib.parse.quote(artifact.name)}"
               platforms[key] = {
                   "signature": meta["signature"],
                   "url": url,
@@ -317,24 +323,16 @@ jobs:
       - name: Publish GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          # 只发布安装包与签名；updater-meta-*.json / latest.json 是构建内部产物，
-          # 仅用于生成滚动更新清单，不能出现在 Release 附件里（会污染用户界面）。
+          # 版本 Release 只放最终安装包（与旧版页面一致）。
+          # .sig / .app.tar.gz / latest.json / updater-meta-*.json 都是 updater 内部产物，
+          # 统一走内部滚动 release updater-latest，不上版本 Release。
           files: |
             release/**/*.exe
-            release/**/*.exe.sig
             release/**/*.msi
-            release/**/*.msi.sig
             release/**/*.AppImage
-            release/**/*.AppImage.sig
-            release/**/*.AppImage.tar.gz
-            release/**/*.AppImage.tar.gz.sig
             release/**/*.deb
-            release/**/*.deb.sig
             release/**/*.rpm
-            release/**/*.rpm.sig
             release/**/*.dmg
-            release/**/*.app.tar.gz
-            release/**/*.app.tar.gz.sig
           body_path: RELEASE_BODY.md
           name: opencode2api ${{ github.ref_name }}
           fail_on_unmatched_files: false
@@ -347,8 +345,18 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          tag="${GITHUB_REF_NAME}"
+          version="${tag#v}"
           gh release view updater-latest >/dev/null 2>&1 || \
             gh release create updater-latest --prerelease \
               --title "Updater manifest" \
               --notes "由 CI 自动维护的应用内更新清单，请勿手动修改。"
+          # macOS 的 .app.tar.gz 是 updater 包：先传滚动 release，再传 latest.json，
+          # 保证客户端拿到清单时对应资产已经存在。
+          mac="$(find release -name 'opencode2api.app.tar.gz' -print -quit)"
+          if [ -n "$mac" ]; then
+            out="/tmp/opencode2api_${version}_aarch64.app.tar.gz"
+            cp "$mac" "$out"
+            gh release upload updater-latest "$out" --clobber
+          fi
           gh release upload updater-latest release/latest.json --clobber
