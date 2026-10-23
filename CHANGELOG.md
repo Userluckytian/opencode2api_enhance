@@ -1,5 +1,25 @@
 # Changelog
 
+## v1.7.10-beta.1（2026-10-23，Beta）
+
+### 与 v1.7.9-beta.1 代码一致，仅提升版本号以覆盖 1.7.9 用户
+
+> `v1.7.9-beta.1` 低于已发布的正式版 `1.7.9`，按语义化版本规则不会提示 1.7.9 用户更新。
+> 本版本号 `1.7.10-beta.1 > 1.7.9`，所有用户（含 1.7.9）都能收到应用内更新；
+> 前端 banner 与 native updater 也会一致指向本版本。
+
+包含的修复（同 v1.7.9-beta.1）：
+
+- **传输失败不再丢节点**：`client.Do` 失败时保留真实 `proxyAddr`，调用日志不再把 SOCKS 连接失败写成「直连 / 异常直连」；流式终态保留 attempts/decision。
+- **池空快速失败**：免费层已无可用节点、只剩冷却/坏池兜底时，单次尝试后直接返回 503 `no_healthy_node`，错误体带真实原因（如 `socks5: connect failed, status 0x01`），不再 4 轮空转约 4 秒。
+- **流式错误面**：非取消场景的传输全败合成 502 `upstream_transport_error`，不再返回状态 0 + `all models failed`；客户端取消不再继续重试。
+- **链路坏池**：连续 3 次传输层失败升级为可恢复的 `link` 坏池（300s 后放行探测），避免坏链路节点长期占据兜底位。
+- **路由判定口径**：非 opencode 厂商（custom 默认 `via_proxy=false`、插件厂商直连）空节点标 `direct_by_design`，消除「异常直连」误报；调用日志读取侧补 `vendor` 字段。
+- **参数兼容**：上游 400 明确报 `thinking` / `reasoning_effort` 不支持时，剥离该字段重试一次。
+- **日志降噪**：SSE `:` 心跳不再误报「非 SSE」；429/400 上游错误降为 WARN；`unexpected EOF` / `context canceled` 的 stream read error 降为 WARN；`pool_quality.json` 在 Windows 上改名失败增加短重试。
+- **其他**：流式失败补 `DurationMS`；`upstreamErrMsg` 不再输出 `: <nil>`。
+- **Release 资产**：CI 只发布安装包与签名，不再上传 `latest.json` / `updater-meta-*.json`。
+
 ## v1.7.9-beta.1（2026-10-23，Beta）
 
 ### 池空错误面 + 链路坏池 + 日志降噪
