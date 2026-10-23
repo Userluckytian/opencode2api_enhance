@@ -18,7 +18,7 @@
 - **参数兼容**：上游 400 明确报 `thinking` / `reasoning_effort` 不支持时，剥离该字段重试一次。
 - **日志降噪**：SSE `:` 心跳不再误报「非 SSE」；429/400 上游错误降为 WARN；`unexpected EOF` / `context canceled` 的 stream read error 降为 WARN；`pool_quality.json` 在 Windows 上改名失败增加短重试。
 - **其他**：流式失败补 `DurationMS`；`upstreamErrMsg` 不再输出 `: <nil>`。
-- **Release 资产**：CI 只发布安装包与签名，不再上传 `latest.json` / `updater-meta-*.json`。
+- **Release 资产**：版本 Release 只发布安装包（exe/dmg/AppImage/deb）；签名、macOS updater 包 `app.tar.gz` 与 `latest.json` 统一放在内部滚动 release `updater-latest`，不再污染版本页。
 
 ## v1.7.9-beta.1（2026-10-23，Beta）
 
