@@ -317,7 +317,24 @@ jobs:
       - name: Publish GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          files: release/**/*
+          # 只发布安装包与签名；updater-meta-*.json / latest.json 是构建内部产物，
+          # 仅用于生成滚动更新清单，不能出现在 Release 附件里（会污染用户界面）。
+          files: |
+            release/**/*.exe
+            release/**/*.exe.sig
+            release/**/*.msi
+            release/**/*.msi.sig
+            release/**/*.AppImage
+            release/**/*.AppImage.sig
+            release/**/*.AppImage.tar.gz
+            release/**/*.AppImage.tar.gz.sig
+            release/**/*.deb
+            release/**/*.deb.sig
+            release/**/*.rpm
+            release/**/*.rpm.sig
+            release/**/*.dmg
+            release/**/*.app.tar.gz
+            release/**/*.app.tar.gz.sig
           body_path: RELEASE_BODY.md
           name: opencode2api ${{ github.ref_name }}
           fail_on_unmatched_files: false
