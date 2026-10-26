@@ -97,6 +97,13 @@ type Config struct {
 	// GatewayKey 统一网关鉴权密钥（空 = 回退默认 sk-unified-local；main 功能 M6）。
 	GatewayKey string `json:"gateway_key,omitempty"`
 
+	// FreeSidecarPort 免费层 Bun sidecar 端口（0 = 默认 40200）。
+	// sidecar 只负责用 Bun 的 TLS 指纹发免费层请求；节点/网关仍由 Go 负责。
+	FreeSidecarPort int `json:"free_sidecar_port,omitempty"`
+	// FreeSidecarEnabled 免费层 sidecar 开关（nil = 默认开启）。
+	// 关闭或 sidecar 缺失时回退现有直连/代理池行为。
+	FreeSidecarEnabled *bool `json:"free_sidecar_enabled,omitempty"`
+
 	// 端口配置（0 = 未设置，按 env > config > 编译默认 三源读取）：
 	// 供 headless/Web 直跑与自定义部署使用；桌面壳经环境变量按槽位表注入（优先于 config）。
 	GatewayPort      uint16 `json:"gateway_port,omitempty"`
@@ -419,6 +426,10 @@ func (m *Manager) ConfigGet(key string) (string, error) {
 		return strconv.FormatUint(uint64(cfg.ProbeAPIPort), 10), nil
 	case "probe_socks_port":
 		return strconv.FormatUint(uint64(cfg.ProbeSocksPort), 10), nil
+	case "free_sidecar_port":
+		return strconv.Itoa(m.freeSidecarPort()), nil
+	case "free_sidecar_enabled":
+		return strconv.FormatBool(freeSidecarEnabled(cfg)), nil
 	default:
 		return "", fmt.Errorf("Unknown config key: %s", key)
 	}
@@ -774,6 +785,21 @@ func (m *Manager) ConfigSet(key, value string) error {
 			return err
 		}
 		cfg.ProbeSocksPort = port
+	case "free_sidecar_port":
+		v, err := parseInt()
+		if err != nil {
+			return err
+		}
+		if v != 0 && (v < 1024 || v > 65535) {
+			return errors.New("free_sidecar_port 需在 1024~65535（0 = 默认 40200）")
+		}
+		cfg.FreeSidecarPort = int(v)
+	case "free_sidecar_enabled":
+		b, err := strconv.ParseBool(value)
+		if err != nil {
+			return fmt.Errorf("invalid boolean for free_sidecar_enabled: %s", value)
+		}
+		cfg.FreeSidecarEnabled = &b
 	default:
 		return errors.New("Unknown config key: " + key)
 	}
@@ -859,6 +885,9 @@ type ConfigView struct {
 	PoolProbeConcurrency    int     `json:"pool_probe_concurrency"`
 	HasGatewayKey           bool    `json:"has_gateway_key"`
 	GatewayKey              string  `json:"gateway_key"`
+	// 免费层 Bun sidecar
+	FreeSidecarPort    int  `json:"free_sidecar_port"`
+	FreeSidecarEnabled bool `json:"free_sidecar_enabled"`
 	// 统一网关监听端口（0 = 未设置，用环境槽位/默认 40080）
 	GatewayPort uint16 `json:"gateway_port"`
 }
@@ -921,8 +950,26 @@ func (m *Manager) ConfigViewOf() ConfigView {
 		PoolProbeConcurrency:    poolProbeConcurrencyOf(cfg),
 		HasGatewayKey:           cfg.GatewayKey != "",
 		GatewayKey:              maskSecret(cfg.GatewayKey),
+		FreeSidecarPort:         m.freeSidecarPort(),
+		FreeSidecarEnabled:      freeSidecarEnabled(cfg),
 		GatewayPort:             cfg.GatewayPort,
 	}
+}
+
+// defaultFreeSidecarPort 免费层 Bun sidecar 默认端口。
+const defaultFreeSidecarPort = 40200
+
+// freeSidecarPortOf 生效的 sidecar 端口（0 = 默认 40200）。
+func freeSidecarPortOf(cfg Config) int {
+	if cfg.FreeSidecarPort > 0 {
+		return cfg.FreeSidecarPort
+	}
+	return defaultFreeSidecarPort
+}
+
+// freeSidecarEnabled 生效的 sidecar 开关（nil = 默认开启）。
+func freeSidecarEnabled(cfg Config) bool {
+	return cfg.FreeSidecarEnabled == nil || *cfg.FreeSidecarEnabled
 }
 
 // defaultUiPollIntervalSec 界面轮询间隔默认值（秒，U3）。

@@ -14,6 +14,14 @@ pub const OPENCODE2API: &[u8] = include_bytes!("../../bin/opencode2api.exe");
 #[cfg(not(embed_unix_bin))]
 pub const SINGBOX: &[u8] = include_bytes!("../../bin/sing-box.exe");
 
+// 免费层 Bun sidecar：存在才内嵌（scripts/build-free-sidecar.* 产物）。
+#[cfg(all(embed_free_sidecar, embed_unix_bin))]
+pub const FREE_SIDECAR: Option<&[u8]> = Some(include_bytes!("../../bin/free-sidecar"));
+#[cfg(all(embed_free_sidecar, not(embed_unix_bin)))]
+pub const FREE_SIDECAR: Option<&[u8]> = Some(include_bytes!("../../bin/free-sidecar.exe"));
+#[cfg(not(embed_free_sidecar))]
+pub const FREE_SIDECAR: Option<&[u8]> = None;
+
 /// 当前平台下子程序的文件名（Windows 带 .exe，其余平台不带）
 fn platform_name(name: &str) -> String {
     if cfg!(windows) {
@@ -23,13 +31,17 @@ fn platform_name(name: &str) -> String {
     }
 }
 
-/// 确保 bin 目录下的两个子程序存在且与内嵌版本一致。
+/// 确保 bin 目录下的子程序存在且与内嵌版本一致。
 /// 返回是否发生了写入（True 表示首次释放或更新）。
 pub fn ensure_binaries(bin_dir: &Path) -> Result<bool> {
     fs::create_dir_all(bin_dir).with_context(|| format!("创建目录失败: {}", bin_dir.display()))?;
     let wrote_oc = ensure_file(bin_dir, &platform_name("opencode2api"), OPENCODE2API)?;
     let wrote_sb = ensure_file(bin_dir, &platform_name("sing-box"), SINGBOX)?;
-    Ok(wrote_oc || wrote_sb)
+    let wrote_fs = match FREE_SIDECAR {
+        Some(data) => ensure_file(bin_dir, &platform_name("free-sidecar"), data)?,
+        None => false,
+    };
+    Ok(wrote_oc || wrote_sb || wrote_fs)
 }
 
 fn ensure_file(dir: &Path, name: &str, data: &[u8]) -> Result<bool> {

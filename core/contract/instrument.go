@@ -43,6 +43,13 @@ type MarkRetry interface {
 	MarkWithRetry(addr string, status int, reqErr error, retryAfterMS int64)
 }
 
+// FingerprintMarker 是可选传输接口：上游免费层客户端指纹拒绝
+// （429 FreeUsageLimitError）专用回填。它不是节点故障，不应进入 bad_quota；
+// 实现方应只做短冷却，让节点在指纹问题消失后立即恢复。
+type FingerprintMarker interface {
+	MarkFingerprint(addr string, retryAfterMS int64)
+}
+
 // PoolCounter 是可选传输接口：返回当前池健康计数，供竞速等
 // 不经 Pick 的选路路径回填决策快照（available/cooling/bad*/breakerOpen）。
 type PoolCounter interface {

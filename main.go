@@ -194,6 +194,27 @@ func main() {
 		ListNodes:    managerInst.ListNodesWithGroup,
 	})
 
+	// 免费层 sidecar：OpenCode 免费层校验客户端 TLS 指纹，Go 标准 TLS 会被 429；
+	// 启动失败只告警，不阻断应用（回退旧直连/代理池行为）。
+	// URL 变化（启动/设置页重启/停止）统一写回根配置并热应用，覆盖根进程自身 /v1。
+	managerInst.SetFreeSidecarURLChanged(func(url string) {
+		cfg := loadConfig(configPath)
+		if cfg.FreeSidecarURL == url {
+			return
+		}
+		cfg.FreeSidecarURL = url
+		applyConfig(cfg)
+		if err := saveConfig(configPath, cfg); err != nil {
+			slog.Warn("sync free_sidecar_url failed", "error", err)
+		}
+	})
+	sidecarRunner := manager.NewRealRunner()
+	if err := managerInst.StartFreeSidecar(sidecarRunner); err != nil {
+		slog.Warn("free sidecar unavailable; OpenCode free tier falls back to legacy path", "error", err)
+	}
+	managerInst.SyncFreeSidecarURL()
+	defer managerInst.StopFreeSidecar(sidecarRunner)
+
 	mux := http.NewServeMux()
 	// R1 插件式供应商：providers/ 目录扫描 + 子进程生命周期 + 管理 API。
 	// 主进程正常退出时经 Close 统一 kill 全部插件子进程（设计文档 §4.3）；
@@ -336,6 +357,10 @@ func registerHTTPRoutes(mux *http.ServeMux, managerInst *manager.Manager, plugin
 		mux.HandleFunc("/api/admin/plugins/{id}/refresh-models", loggingMiddleware(requireAuth(pluginMgr.RefreshModelsHandler())))
 		mux.HandleFunc("/api/admin/plugins/{id}", loggingMiddleware(requireAuth(pluginMgr.DeleteHandler())))
 	}
+	// 免费层 sidecar：状态 / 环境检查 / 重启（设置页）。
+	mux.HandleFunc("/api/admin/free-sidecar/status", loggingMiddleware(requireAuth(managerInst.FreeSidecarStatusHandler())))
+	mux.HandleFunc("/api/admin/free-sidecar/check", loggingMiddleware(requireAuth(managerInst.FreeSidecarCheckHandler())))
+	mux.HandleFunc("/api/admin/free-sidecar/restart", loggingMiddleware(requireAuth(managerInst.FreeSidecarRestartHandler())))
 	// T3: 订阅源列表管理（新增/删除/立即拉取）+ 列表查看。
 	mux.HandleFunc("/api/admin/subscriptions", loggingMiddleware(requireAuth(managerInst.SubscriptionsListHandler())))
 	mux.HandleFunc("/api/admin/subscriptions/count", loggingMiddleware(requireAuth(managerInst.SubscriptionsCountHandler())))

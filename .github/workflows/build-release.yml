@@ -129,6 +129,18 @@ jobs:
         shell: bash
         run: npm install
 
+      - name: Build free-tier Bun sidecar
+        shell: bash
+        run: |
+          if [ "${{ runner.os }}" = "Windows" ]; then
+            powershell -ExecutionPolicy Bypass -File scripts/build-free-sidecar.ps1
+          else
+            curl -fsSL https://bun.sh/install | bash
+            export PATH="$HOME/.bun/bin:$PATH"
+            ./scripts/build-free-sidecar.sh
+          fi
+          ls -lh bin/
+
       - name: Tauri build (bundles ${{ matrix.bundles }})
         shell: bash
         env:

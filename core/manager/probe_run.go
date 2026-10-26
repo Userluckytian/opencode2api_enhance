@@ -100,6 +100,9 @@ func (c *ScanController) allocatePorts(opts ScanOptions, need int) ([]portPair, 
 	}
 	instLo, instHi := instBase+100, instBase+2100 // 实例 API 段 [instLo, instHi)
 	sbLo, sbHi := instBase+2100, instBase+4100    // 实例 sing-box 段 [sbLo, sbHi)（singbox = api+2000）
+	// 免费层 sidecar 用 sing-box HTTP inbound（SOCKS+2000）；探针端口不得落进
+	// 实例 HTTP inbound 段，否则扫描会占掉实例的 sidecar 出口端口。
+	httpLo, httpHi := int(instBase)+4100, int(instBase)+6100
 	var pairs []portPair
 	used := map[uint16]bool{}
 	for offset := 0; offset < 4096 && len(pairs) < need; offset++ {
@@ -112,10 +115,17 @@ func (c *ScanController) allocatePorts(opts ScanOptions, need int) ([]portPair, 
 		if (instBase > 0) && ((api >= instLo && api < instHi) || (socks >= sbLo && socks < sbHi)) {
 			continue
 		}
-		if !isPortFree(api) || !isPortFree(socks) {
+		httpPort := SingboxHTTPPort(socks)
+		if httpPort == 0 || used[httpPort] {
 			continue
 		}
-		used[api], used[socks] = true, true
+		if instBase > 0 && int(httpPort) >= httpLo && int(httpPort) < httpHi {
+			continue
+		}
+		if !isPortFree(api) || !isPortFree(socks) || !isPortFree(httpPort) {
+			continue
+		}
+		used[api], used[socks], used[httpPort] = true, true, true
 		pairs = append(pairs, portPair{api: api, socks: socks})
 	}
 	if len(pairs) < need {

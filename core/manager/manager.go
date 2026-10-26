@@ -89,6 +89,15 @@ type Manager struct {
 	gw     *Gateway
 	scan   *ScanController
 
+	// 免费层 Bun sidecar（StartFreeSidecar/StopFreeSidecar 维护）。
+	// 只替换免费层上游 HTTP 客户端；节点/网关仍由 Go 负责。
+	sidecarMu   sync.Mutex
+	sidecarPID  int
+	sidecarPort uint16
+	sidecarURL  string
+	// onURLChanged 由 main 注入：sidecar URL 变化后写回根配置并热应用。
+	onURLChanged func(string)
+
 	// poolProbeMu 串行化链路探活轮（后台循环与手动触发互斥执行），防止并发
 	// load+save pool_quality.json；配合 savePoolQuality 临时文件+Rename 原子落盘。
 	poolProbeMu sync.Mutex

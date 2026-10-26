@@ -94,6 +94,10 @@ func (m *Manager) buildOpenCodeCfg(singboxPort uint16, probe bool) ([]byte, erro
 		"active_socks5":    proxyAddr,
 		"show_node_prefix": appCfg.ShowNodePrefix,
 	}
+	// 免费层 sidecar：只影响 TierFree；未启动/未配置时不写，回退旧行为。
+	if u := m.FreeSidecarURL(); u != "" {
+		cfg["free_sidecar_url"] = u
+	}
 	if !probe {
 		// 透传厂商注册表 + 路由：实例子进程与核心一致，能注册多厂商（如 custom）
 		cfg = injectVendorConfig(cfg, appCfg)
@@ -136,6 +140,10 @@ func (m *Manager) buildRouterCfg(singboxPorts []uint16, portNames map[uint16]str
 		"active_socks5":          "__round_robin__",
 		"route_mode":             routeMode,
 		"show_node_prefix":       appCfg.ShowNodePrefix,
+	}
+	// 免费层 sidecar：只影响 TierFree；未启动/未配置时不写，回退旧行为。
+	if u := m.FreeSidecarURL(); u != "" {
+		cfg["free_sidecar_url"] = u
 	}
 	// 超时/日志区间（0 = 用 core 默认）
 	applyIf := func(key string, v int64) {

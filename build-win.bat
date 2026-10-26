@@ -35,6 +35,12 @@ if errorlevel 1 (
   endlocal & exit /b 1
 )
 
+if not exist "%ROOT%\bin\free-sidecar.exe" (
+  echo Building free-tier Bun sidecar...
+  powershell -NoProfile -ExecutionPolicy Bypass -File "%ROOT%\scripts\build-free-sidecar.ps1"
+  if errorlevel 1 echo WARNING: free sidecar build failed; app will fall back to legacy free-tier path
+)
+
 echo Building Windows release executable...
 cargo build --release --target "%TARGET_TRIPLE%" --target-dir "%TARGET_DIR%"
 set "BUILD_RC=%ERRORLEVEL%"

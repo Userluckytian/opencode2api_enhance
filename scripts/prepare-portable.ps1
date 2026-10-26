@@ -247,6 +247,14 @@ if (-not $SkipCoreBuild) {
 if (-not (Test-Path bin\opencode2api.exe)) { throw "bin\opencode2api.exe missing" }
 if (-not (Test-Path bin\sing-box.exe))     { throw "bin\sing-box.exe missing (place sing-box prebuilt)" }
 
+# ---- 1b. Build free-tier Bun sidecar (embedded by Rust shell) ----
+# OpenCode 免费层校验客户端 TLS 指纹；没有 sidecar 时免费层会回退旧路径并 429。
+Write-Host "[1b/4] building free-tier Bun sidecar ..."
+& (Join-Path $Root "scripts\build-free-sidecar.ps1")
+if (-not (Test-Path (Join-Path $Root "bin\free-sidecar.exe"))) {
+    throw "bin\free-sidecar.exe missing (free-tier sidecar build failed)"
+}
+
 # ---- 2. Build Rust shell (release; embeds latest core + sing-box) ----
 if (-not $SkipRustBuild) {
     Write-Host "[2/4] building Rust shell (cargo release) ..."

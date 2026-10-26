@@ -130,7 +130,7 @@ func (c *ScanController) probeNode(worker int, opts ScanOptions, node ClashNode,
 	}
 	if httpErr != nil {
 		msg := httpErr.Error()
-		if strings.Contains(msg, "timed out") || strings.Contains(msg, "超时") {
+		if strings.Contains(msg, "timed out") || strings.Contains(msg, "i/o timeout") || strings.Contains(msg, "超时") {
 			base.Category = "timeout"
 		} else {
 			base.Category = "other"
@@ -141,6 +141,9 @@ func (c *ScanController) probeNode(worker int, opts ScanOptions, node ClashNode,
 	switch {
 	case status >= 200 && status < 300:
 		base.Category = "invalid_response"
+	case status == 429:
+		// 429 是上游限流/指纹拒绝，不是链路超时；单独归类，避免误报 i/o timeout。
+		base.Category = "rate_limit"
 	case status == 502 || status == 503 || status == 504:
 		base.Category = "upstream"
 	default:

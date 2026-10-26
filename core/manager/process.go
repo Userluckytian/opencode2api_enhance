@@ -69,6 +69,8 @@ func (r *realRunner) Start(spec ExecSpec) (int, error) {
 	if err := cmd.Start(); err != nil {
 		return 0, err
 	}
+	// 回收子进程：否则 Unix 下 Kill 后残留僵尸；Wait 在后台阻塞到退出。
+	go func() { _ = cmd.Wait() }()
 	return cmd.Process.Pid, nil
 }
 

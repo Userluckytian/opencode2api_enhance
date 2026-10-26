@@ -1464,6 +1464,7 @@ function badgeNode(r?: ProbeResult) {
   const map: Record<string, [string, string]> = {
     ok: ['bg-green-50 text-green-700', 'ok'],
     upstream: ['bg-amber-50 text-amber-700', 'upstream'],
+    rate_limit: ['bg-amber-50 text-amber-700', 'rate_limit'],
     config: ['bg-red-50 text-red-600', 'config'],
     socks: ['bg-red-50 text-red-600', 'socks'],
     tls: ['bg-red-50 text-red-600', 'tls'],

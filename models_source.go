@@ -31,7 +31,11 @@ var chatRouterVar *chatRouter.Router
 // rootTransport 把 core/contract.Transport 桥接到本包既有的代理池/健康实现：
 // 厂商（opencode）复用现有 SOCKS5 池、冷却与坏池逻辑；
 // 单元测试替换 httpClient 时，经此桥自动生效。
-type rootTransport struct{}
+type rootTransport struct {
+	// useSidecar 仅对 opencode 免费层启用：custom via_proxy / remote 也用 TierFree，
+	// 但它们的 Authorization 与 body 不能被 Bun sidecar 改写（否则真实 API key 被替换）。
+	useSidecar bool
+}
 
 // noCandidateTotal / lastNoCandidateTS 记录免费层已配置代理但无可用节点的次数与时间。
 var (
@@ -46,7 +50,7 @@ func activeSocks5Configured() bool {
 	return strings.TrimSpace(activeSocks5) != ""
 }
 
-func (rootTransport) Client(tier contract.Tier, streaming bool) (*http.Client, string) {
+func (t rootTransport) Client(tier contract.Tier, streaming bool) (*http.Client, string) {
 	tt := TierFree
 	if tier == contract.TierPaid {
 		tt = TierPaid
@@ -64,6 +68,13 @@ func (rootTransport) Client(tier contract.Tier, streaming bool) (*http.Client, s
 		noCandidateLastTS.Store(time.Now().UnixNano())
 		return contract.NoCandidateClient(), ""
 	}
+	// 免费层 sidecar：OpenCode 免费层校验客户端 TLS 指纹，Go 标准 TLS 会被 429；
+	// 配置了 sidecar 时把 HTTP 客户端换成 Bun 转发（节点选择/健康仍由本包负责）。
+	if tt == TierFree && t.useSidecar {
+		if url := currentFreeSidecarURL(); url != "" {
+			return newSidecarClient(url, addr, streaming), addr
+		}
+	}
 	return client, addr
 }
 
@@ -74,6 +85,13 @@ func (rootTransport) Mark(proxyAddr string, status int, reqErr error) {
 // MarkWithRetry 实现 contract.MarkRetry：透传上游 Retry-After 到节点冷却。
 func (rootTransport) MarkWithRetry(proxyAddr string, status int, reqErr error, retryAfterMS int64) {
 	markSocks5ResultWithRetry(proxyAddr, status, reqErr, retryAfterMS)
+}
+
+// MarkFingerprint 实现 contract.FingerprintMarker：上游免费层指纹拒绝
+// （429 FreeUsageLimitError）只做短冷却，不进入 bad_quota——否则单节点池会被
+// 一个非节点故障永久隔离，后续请求全部 503 no_healthy_node。
+func (rootTransport) MarkFingerprint(proxyAddr string, retryAfterMS int64) {
+	markFingerprintResult(proxyAddr, retryAfterMS)
 }
 
 // ReleaseProbe 实现 contract.ProbeReleaser：客户端取消导致请求没有结果时，
@@ -137,13 +155,18 @@ func (rootTransport) RaceFinished(addrs []string) {
 
 // CandidateClients 实现 contract.Racer：质量优先返回至多 n 个竞速候选。
 // 付费层直连无候选；竞速候选空时厂商回退普通 Client。
-func (rootTransport) CandidateClients(tier contract.Tier, streaming bool, n int) ([]*http.Client, []string) {
+func (t rootTransport) CandidateClients(tier contract.Tier, streaming bool, n int) ([]*http.Client, []string) {
 	tt := TierFree
 	if tier == contract.TierPaid {
 		tt = TierPaid
 	}
 	if tt == TierPaid {
 		return nil, nil // 付费层直连，不参与代理竞速
+	}
+	// 免费层 sidecar：TLS 指纹由 Bun 负责，竞速收益低且落选候选的 429
+	// 读不到 body（容易误标坏池）；sidecar 模式下强制单发。
+	if t.useSidecar && currentFreeSidecarURL() != "" {
+		return nil, nil
 	}
 	// 竞速只在 smart 模式启用：round_robin/failover 有明确的选路语义，
 	// 竞速会绕过游标/粘滞规则，使两种模式形同虚设。
@@ -235,7 +258,7 @@ func vendorParams(t string) map[string]any {
 	switch t {
 	case "opencode":
 		return map[string]any{
-			opencode.ParamTransport:              rootTransport{},
+			opencode.ParamTransport:              rootTransport{useSidecar: true},
 			opencode.ParamAdminPassword:          adminPassword,
 			opencode.ParamRaceCopies:             int(poolRaceCopies.Load()),
 			opencode.ParamRaceBudgetMS:           int(raceBudgetMS.Load()),

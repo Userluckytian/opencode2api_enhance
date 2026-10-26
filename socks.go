@@ -579,6 +579,40 @@ func markSocks5Result(addr string, status int, requestErr error) {
 	markSocks5ResultWithRetry(addr, status, requestErr, 0)
 }
 
+// markFingerprintResult 记录「上游免费层客户端指纹拒绝」（429 FreeUsageLimitError）。
+// 这不是节点故障：不增加 badCount、不设置 badReason/badClass，只做短冷却。
+// 否则单节点池会被一个与节点无关的客户端指纹问题永久隔离，后续请求全部 503。
+func markFingerprintResult(addr string, retryAfterMS int64) {
+	if addr == "" {
+		return
+	}
+	socks5HealthMu.Lock()
+	state := socks5Health[addr]
+	state.failures++
+	cooldown := 15 * time.Second
+	if s := rateLimitNodeCooldownSec.Load(); s > 0 {
+		cooldown = time.Duration(s) * time.Second
+	}
+	if retryAfterMS > 0 {
+		ra := time.Duration(retryAfterMS) * time.Millisecond
+		if ra > 60*time.Second {
+			ra = 60 * time.Second
+		}
+		if ra > cooldown {
+			cooldown = ra
+		}
+	}
+	state.until = time.Now().Add(cooldown)
+	// 指纹拒绝不是节点故障：归还恢复探针配额，让短冷却后能立即重试/恢复，
+	// 避免节点已过期仍卡在「探针已用」的假死状态。
+	state.badProbeUsed = false
+	state.badProbeAt = time.Time{}
+	socks5Health[addr] = state
+	socks5HealthMu.Unlock()
+	slog.Warn("upstream fingerprint rejected; node short cooldown only",
+		"addr", addr, "cooldown", cooldown.String(), "retry_after_ms", retryAfterMS)
+}
+
 // markSocks5ResultWithRetry 与 markSocks5Result 同，但 429 时尊重上游 Retry-After：
 // retryAfterMS>0 时节点冷却取 max(默认 15s, Retry-After)，封顶 600s，避免被上游
 // 长时间锁死的同时优先按上游指示退避（比盲目 15s 后再踩雷更省额度）。

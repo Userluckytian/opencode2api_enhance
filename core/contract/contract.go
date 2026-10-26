@@ -172,6 +172,10 @@ func (DirectTransport) Pick(_ Tier, _ bool) (*http.Client, Decision) {
 // ErrNoHealthyNode 免费层已配置代理但没有可用节点时的哨兵错误。
 var ErrNoHealthyNode = errors.New("no healthy proxy node")
 
+// ErrFreeSidecarUnavailable 本地 Bun sidecar 不可用（连接失败/未启动）。
+// 这是本机组件故障，不是节点链路故障；厂商侧不应因此惩罚/隔离节点。
+var ErrFreeSidecarUnavailable = errors.New("free sidecar unavailable")
+
 // NoCandidateClient 返回一个 HTTP 客户端，其 RoundTripper 恒返回 ErrNoHealthyNode。
 // 用于池空场景，避免构造空代理地址或落到本机直连。
 func NoCandidateClient() *http.Client {

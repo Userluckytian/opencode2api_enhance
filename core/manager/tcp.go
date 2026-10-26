@@ -35,6 +35,11 @@ func httpStatusLine(line string) (int, error) {
 // httpRequest 裸 TCP 发一次 HTTP 请求（GET/POST/DELETE），返回状态码与响应体。
 // 语义与 Rust instance::http_*_json 一致：connect 127.0.0.1:port，读超时 readTimeout。
 func httpRequest(method, path string, port uint16, readTimeout time.Duration, authToken string, body []byte, writeTimeout time.Duration) (int, []byte, error) {
+	return httpRequestWithHeaders(method, path, port, readTimeout, authToken, body, writeTimeout, nil)
+}
+
+// httpRequestWithHeaders 同 httpRequest，额外附加请求头（扫描探针用）。
+func httpRequestWithHeaders(method, path string, port uint16, readTimeout time.Duration, authToken string, body []byte, writeTimeout time.Duration, headers map[string]string) (int, []byte, error) {
 	addr := net.JoinHostPort("127.0.0.1", strconv.Itoa(int(port)))
 	if writeTimeout <= 0 {
 		writeTimeout = 5 * time.Second
@@ -54,6 +59,9 @@ func httpRequest(method, path string, port uint16, readTimeout time.Duration, au
 	fmt.Fprintf(&sb, "Connection: close\r\n")
 	fmt.Fprintf(&sb, "Accept: application/json\r\n")
 	fmt.Fprintf(&sb, "User-Agent: opencode2api-manager/0.1\r\n")
+	for k, v := range headers {
+		fmt.Fprintf(&sb, "%s: %s\r\n", k, v)
+	}
 	if authToken != "" {
 		fmt.Fprintf(&sb, "Authorization: Bearer %s\r\n", authToken)
 	}
@@ -169,6 +177,16 @@ func httpDeleteJSON(port uint16, path string, timeout time.Duration, authToken s
 // httpPostJSON POST 请求。
 func httpPostJSON(port uint16, path string, timeout time.Duration, authToken string, body []byte) (int, []byte, error) {
 	return httpRequest("POST", path, port, timeout, authToken, body, 0)
+}
+
+// httpGetJSONProbe / httpPostJSONProbe 是扫描探针专用请求：带 X-Oc2a-Probe: 1，
+// 核心据此跳过 429 重试/退避，让扫描快速拿到真实 429 而不是客户端 i/o timeout。
+func httpGetJSONProbe(port uint16, path string, timeout time.Duration, authToken string) (int, []byte, error) {
+	return httpRequestWithHeaders("GET", path, port, timeout, authToken, nil, 0, map[string]string{"X-Oc2a-Probe": "1"})
+}
+
+func httpPostJSONProbe(port uint16, path string, timeout time.Duration, authToken string, body []byte) (int, []byte, error) {
+	return httpRequestWithHeaders("POST", path, port, timeout, authToken, body, 0, map[string]string{"X-Oc2a-Probe": "1"})
 }
 
 // waitForPort 轮询探测端口可连接（每 200ms 一次，直到超时）。

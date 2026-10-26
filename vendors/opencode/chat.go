@@ -23,6 +23,24 @@ import (
 // Options 键（补充）：最大上游重试次数。
 const KeyMaxRetries = "_oc_max_retries"
 
+// KeyProbe 标记节点扫描探针请求：不重试、不 429 退避，快速返回真实状态码。
+const KeyProbe = "_oc_probe"
+
+// isFingerprintReject 判断 429 是否为上游免费层客户端指纹拒绝。
+// 上游错误体：{"type":"error","error":{"type":"FreeUsageLimitError",...}}。
+func isFingerprintReject(body []byte) bool {
+	return bytes.Contains(body, []byte("FreeUsageLimitError"))
+}
+
+// markFingerprint 结果回填：优先走 FingerprintMarker（短冷却，不进坏池）。
+func markFingerprint(tr contract.Transport, addr string, retryAfterMS int64) {
+	if fm, ok := tr.(contract.FingerprintMarker); ok {
+		fm.MarkFingerprint(addr, retryAfterMS)
+		return
+	}
+	contract.MarkResult(tr, addr, http.StatusTooManyRequests, nil, retryAfterMS)
+}
+
 const (
 	maxUpstreamRetries = 3
 	max401Retries      = 3
@@ -78,10 +96,22 @@ func parseAuth(msg *contract.Message) authT {
 }
 
 func maxRetriesOf(msg *contract.Message) int {
+	if probeOf(msg) {
+		return 0
+	}
 	if n, ok := msg.Extra[KeyMaxRetries].(int); ok && n > 0 {
 		return n
 	}
 	return maxUpstreamRetries
+}
+
+// probeOf 判断是否为节点扫描探针请求。
+func probeOf(msg *contract.Message) bool {
+	if msg == nil {
+		return false
+	}
+	b, _ := msg.Extra[KeyProbe].(bool)
+	return b
 }
 
 // ---------------------------------------------------------------- 模型集合
@@ -251,6 +281,7 @@ func (v *Vendor) call(ctx context.Context, msg *contract.Message, streaming bool
 	a := parseAuth(msg)
 	modelID := msg.Model
 	maxRetries := maxRetriesOf(msg)
+	probe := probeOf(msg)
 
 	// 出站协议判定（阶段 W）：muse 恒 Responses；cfg.PreferResponses=="responses" 时
 	// 全模型优先 Responses（图片请求回落 chat，见 preferResponsesFor）。
@@ -331,7 +362,8 @@ func (v *Vendor) call(ctx context.Context, msg *contract.Message, streaming bool
 			// Canceled 连带真实 addr 在此会被误标冷却/熔断，统一排除；真实网络错误仍标记。
 			// 但取消前若已消费恢复探针（坏池到期/熔断半开），必须归还配额，否则节点永久假死。
 			canceled := errors.Is(err, context.Canceled)
-			if canceled {
+			sidecarDown := errors.Is(err, contract.ErrFreeSidecarUnavailable)
+			if canceled || sidecarDown {
 				release(proxyAddr)
 			} else if !errors.Is(err, contract.ErrNoHealthyNode) {
 				mark(proxyAddr, 0, err, 0)
@@ -344,6 +376,14 @@ func (v *Vendor) call(ctx context.Context, msg *contract.Message, streaming bool
 			// 传输失败也必须保留节点：否则调用日志把空节点写成「直连」，
 			// 真实的 SOCKS 连接失败会被误判成异常直连（2026-10-23 线上）。
 			lastProxyAddr = proxyAddr
+			// 本地 sidecar 不可用不是节点故障：不 Mark 节点，返回 503 sidecar_unavailable。
+			if sidecarDown {
+				lastStatus = http.StatusServiceUnavailable
+				lastBody = []byte(`{"error":{"message":"free sidecar unavailable","type":"sidecar_unavailable"}}`)
+				lastProxyAddr = ""
+				decision.Reason = "sidecar_down"
+				break
+			}
 			// 池空：不重试、不 Mark（addr 为空），映射为 503 no_healthy_node。
 			if errors.Is(err, contract.ErrNoHealthyNode) {
 				lastStatus = http.StatusServiceUnavailable
@@ -408,7 +448,13 @@ func (v *Vendor) call(ctx context.Context, msg *contract.Message, streaming bool
 		errBody, _ := io.ReadAll(resp.Body)
 		resp.Body.Close()
 		retryAfter := contract.RetryAfterMS(resp.Header)
-		mark(proxyAddr, resp.StatusCode, nil, retryAfter)
+		// 免费层 429 FreeUsageLimitError 是上游客户端指纹拒绝，不是节点额度故障：
+		// 走短冷却，绝不把节点打进 bad_quota（否则单节点池会被永久隔离成 503）。
+		if resp.StatusCode == http.StatusTooManyRequests && isFingerprintReject(errBody) {
+			markFingerprint(tr, proxyAddr, retryAfter)
+		} else {
+			mark(proxyAddr, resp.StatusCode, nil, retryAfter)
+		}
 		// 本候选（单发 / 竞速全败返回的首个失败）由 call 统一上报与记录；
 		// 竞速其余落选候选已在 raceDo 内部逐个上报（G6），不在这里重复。
 		class, code, _ := contract.ClassifyUpstreamError(resp.StatusCode, errBody)
@@ -454,11 +500,14 @@ func (v *Vendor) call(ctx context.Context, msg *contract.Message, streaming bool
 				// S2 429 感知：记录最近 429 时间戳（下个请求冷却内跳过竞速），
 				// 重试前指数退避 sleep(min(base*2^n, cap))，不放大限流。
 				// L3：退避感知 ctx——客户端断开立即返回取消错误，不硬睡最长 30s。
+				// 扫描探针不睡：它只需要真实状态码，退避会把 12s 扫描预算耗成 i/o timeout。
 				v.last429.Store(time.Now().UnixNano())
-				select {
-				case <-ctx.Done():
-					return nil, ctx.Err()
-				case <-time.After(v.rateLimitBackoff(retry429Count)):
+				if !probe {
+					select {
+					case <-ctx.Done():
+						return nil, ctx.Err()
+					case <-time.After(v.rateLimitBackoff(retry429Count)):
+					}
 				}
 				retry429Count++
 			}

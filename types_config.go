@@ -16,6 +16,10 @@ type AppConfig struct {
 	UpstreamProxy string `json:"upstream_proxy,omitempty"`
 	// RouteMode 网关/代理池路由模式：failover（默认，成功不动游标，失败才切换）| round_robin
 	RouteMode string `json:"route_mode,omitempty"`
+	// FreeSidecarURL 免费层 Bun sidecar 地址（如 http://127.0.0.1:40200）。
+	// 非空时 TierFree 请求经 sidecar 发出（OpenCode 免费层校验客户端 TLS 指纹，
+	// 官方 Bun 客户端可过；Go/curl/Node 会被 429）。空 = 回退现有直连/代理池行为。
+	FreeSidecarURL string `json:"free_sidecar_url,omitempty"`
 
 	// 流内超时切换配置（毫秒；区间随机，防上游识别为定时扫描）
 	TTFTMinMS    int `json:"timeout_ttft_min_ms,omitempty"`

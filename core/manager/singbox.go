@@ -10,15 +10,37 @@ import (
 	"strings"
 )
 
+// singboxHTTPPortOffset 是 HTTP inbound 相对 SOCKS inbound 的端口偏移。
+// 选 2000 与「实例 API → sing-box」的既有偏移一致：sing-box 段 [42100,44100)，
+// HTTP inbound 段 [44100,46100)，与实例/探针端口不重叠。
+const singboxHTTPPortOffset = 2000
+
+// SingboxHTTPPort 返回某 sing-box SOCKS 端口对应的 HTTP inbound 端口。
+// 返回 0 表示该端口无法分配（0 或溢出），调用方应回退为无 HTTP 代理。
+func SingboxHTTPPort(socksPort uint16) uint16 {
+	if socksPort == 0 || int(socksPort)+singboxHTTPPortOffset > 65535 {
+		return 0
+	}
+	return socksPort + singboxHTTPPortOffset
+}
+
 // buildSingboxConfig 生成 sing-box 配置 JSON。
 func buildSingboxConfig(node ClashNode, listenPort uint16) ([]byte, error) {
 	outbound, err := singboxOutbound(node)
 	if err != nil {
 		return nil, err
 	}
+	inbounds := []any{
+		map[string]any{"type": "socks", "listen": "127.0.0.1", "listen_port": listenPort},
+	}
+	// 免费层 Bun sidecar 不支持 SOCKS 代理，需要同一 sing-box 进程再开一个
+	// HTTP inbound（同进程，不新增进程/内存）。
+	if httpPort := SingboxHTTPPort(listenPort); httpPort != 0 {
+		inbounds = append(inbounds, map[string]any{"type": "http", "listen": "127.0.0.1", "listen_port": httpPort})
+	}
 	cfg := map[string]any{
 		"log":      map[string]any{"level": "warn", "timestamp": true},
-		"inbounds": []any{map[string]any{"type": "socks", "listen": "127.0.0.1", "listen_port": listenPort}},
+		"inbounds": inbounds,
 		"outbounds": []any{
 			outbound,
 			map[string]any{"type": "direct", "tag": "direct"},

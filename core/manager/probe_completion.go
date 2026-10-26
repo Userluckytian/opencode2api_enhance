@@ -60,7 +60,7 @@ func pickFreeModel(data []map[string]any) string {
 // 免费模型 chat 测试只是额外验证，不影响节点可用性判定。
 func freeCompletion(port uint16, password string, budget time.Duration) (int, []byte, int, bool, error) {
 	deadline := time.Now().Add(budget)
-	modelStatus, body, err := httpGetJSON(port, "/v1/models", time.Until(deadline), password)
+	modelStatus, body, err := httpGetJSONProbe(port, "/v1/models", time.Until(deadline), password)
 	if err != nil || modelStatus < 200 || modelStatus >= 300 {
 		if modelStatus != 0 {
 			return modelStatus, body, -1, false, nil
@@ -90,7 +90,7 @@ func freeCompletion(port uint16, password string, budget time.Duration) (int, []
 		"max_tokens": 1,
 		"stream":     false,
 	})
-	status, chatResp, err := httpPostJSON(port, "/v1/chat/completions", time.Until(deadline), password, chatBody)
+	status, chatResp, err := httpPostJSONProbe(port, "/v1/chat/completions", time.Until(deadline), password, chatBody)
 	return status, chatResp, modelCount, true, err
 }
 

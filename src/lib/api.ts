@@ -302,6 +302,9 @@ export type ConfigView = {
   gateway_key: string
   /** 统一网关监听端口（0 = 未设置，用环境槽位/默认 40080） */
   gateway_port: number
+  /** 免费层 Bun sidecar 端口 / 开关 */
+  free_sidecar_port: number
+  free_sidecar_enabled: boolean
   /** 实例池链路探活（P1） */
   pool_probe_interval_sec: number
   pool_probe_timeout_sec: number
@@ -327,6 +330,25 @@ export type BinariesInfo = {
   bin_dir: string
   oc_exists: boolean
   sb_exists: boolean
+}
+
+/** 免费层 Bun sidecar 状态（设置页） */
+export type FreeSidecarStatus = {
+  enabled: boolean
+  port: number
+  url: string
+  running: boolean
+  healthy: boolean
+  pid: number
+  bin?: string
+  script?: string
+  error?: string
+}
+
+export type FreeSidecarCheck = {
+  name: string
+  ok: boolean
+  detail: string
 }
 
 // ─── 全流程调用日志 ─────────────────────────────────────────────
@@ -809,6 +831,10 @@ export const api = {
   // 配置
   configGet: () => req<ConfigView>('GET', '/config'),
   configSet: (key: string, value: string) => req<void>('POST', '/config/set', { key, value }),
+  // 免费层 Bun sidecar：状态 / 环境检查 / 重启
+  freeSidecarStatus: () => req<FreeSidecarStatus>('GET', '/free-sidecar/status'),
+  freeSidecarCheck: () => req<FreeSidecarCheck[]>('GET', '/free-sidecar/check'),
+  freeSidecarRestart: () => req<FreeSidecarStatus>('POST', '/free-sidecar/restart'),
   // auto 虚拟模型：GET 当前配置 / POST 保存即传播子进程（热生效，无需重启）
   autoModelGet: () => req<AutoModelConfig>('GET', '/auto-model'),
   autoModelSave: (cfg: AutoModelConfig) => req<{ status: string; config: AutoModelConfig }>('POST', '/auto-model', cfg),

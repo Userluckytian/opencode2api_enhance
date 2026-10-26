@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"strings"
 	"sync"
@@ -28,6 +29,33 @@ const (
 	maxUpstreamRetries = 3
 	max401Retries      = 3
 )
+
+// probeCtxKey 标记节点扫描探针请求：厂商侧跳过 429 重试/退避，
+// 让扫描快速拿到真实 429，而不是被 12s 客户端预算截成 i/o timeout。
+type probeCtxKey struct{}
+
+func withProbeContext(ctx context.Context) context.Context {
+	return context.WithValue(ctx, probeCtxKey{}, true)
+}
+
+func isProbeContext(ctx context.Context) bool {
+	v, _ := ctx.Value(probeCtxKey{}).(bool)
+	return v
+}
+
+// isLoopbackRequest 判断请求是否来自本机回环。
+// 扫描探针头只允许本机使用，避免外部客户端伪造 X-Oc2a-Probe 绕过 429 重试/退避。
+func isLoopbackRequest(r *http.Request) bool {
+	if r == nil {
+		return false
+	}
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		return false
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
+}
 
 var (
 	ocAdapterOnce   sync.Once
@@ -73,7 +101,7 @@ func mainCodeVendor() *opencode.Vendor {
 		ocAdapterTarget = opencode.New(opencode.Config{
 			ID:                     "opencode",
 			Name:                   "OpenCode",
-			Transport:              rootTransport{},
+			Transport:              rootTransport{useSidecar: true},
 			AdminPassword:          adminPassword,
 			RaceCopies:             int(poolRaceCopies.Load()),
 			RaceBudgetMS:           int(raceBudgetMS.Load()),
@@ -193,6 +221,7 @@ func chatViaVendor(ctx context.Context, v contract.Vendor, upstreamBody []byte, 
 			opencode.KeyAuthMode:   modeName(auth.Mode),
 			opencode.KeyAuthToken:  auth.Token,
 			opencode.KeyMaxRetries: maxRouteRetries(),
+			opencode.KeyProbe:      isProbeContext(ctx),
 		},
 	}
 	return v.Chat(ctx, msg)
@@ -219,6 +248,7 @@ func chatViaVendorStream(ctx context.Context, v contract.Vendor, upstreamBody []
 			opencode.KeyAuthMode:   modeName(auth.Mode),
 			opencode.KeyAuthToken:  auth.Token,
 			opencode.KeyMaxRetries: maxRouteRetries(),
+			opencode.KeyProbe:      isProbeContext(ctx),
 		},
 	}
 	if auth.PreferredKeyIdx != nil {

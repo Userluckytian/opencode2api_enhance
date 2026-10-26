@@ -9,11 +9,26 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync/atomic"
 	"time"
 
 	"github.com/6Kmfi6HP/opencode2api/core/manager"
 )
+
+// freeSidecarURL 免费层 Bun sidecar 地址（applyConfig 原子写；空 = 回退旧行为）。
+// sidecar 只替换 TierFree 的 HTTP 客户端，节点选择/健康/重试仍由本包负责。
+var freeSidecarURL atomic.Value // string
+
+func init() {
+	freeSidecarURL.Store("")
+}
+
+// currentFreeSidecarURL 返回当前 sidecar 地址（空 = 未启用）。
+func currentFreeSidecarURL() string {
+	v, _ := freeSidecarURL.Load().(string)
+	return v
+}
 
 func loadConfig(path string) AppConfig {
 	var cfg AppConfig
@@ -125,6 +140,12 @@ func applyConfig(cfg AppConfig) {
 
 	if cfg.RouteMode == "round_robin" || cfg.RouteMode == "failover" || cfg.RouteMode == "smart" {
 		routeMode.Store(cfg.RouteMode)
+	}
+	// 免费层 sidecar：空串 = 回退旧行为；非空时 TierFree 请求改走 Bun。
+	if v := strings.TrimSpace(cfg.FreeSidecarURL); v != "" {
+		freeSidecarURL.Store(strings.TrimRight(v, "/"))
+	} else {
+		freeSidecarURL.Store("")
 	}
 	setTimeoutConfigFromApp(cfg)
 	applyBadStatusConfig(cfg)

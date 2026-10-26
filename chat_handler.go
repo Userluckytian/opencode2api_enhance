@@ -103,6 +103,9 @@ func chatCompletionsHandler(w http.ResponseWriter, r *http.Request) {
 	// 调用返回后读出写入 callRec（recordCall 前），供日志视图与离线策略挖掘。
 	instSink := contract.NewInstrumentSink()
 	callCtx = contract.WithInstrumentSink(callCtx, instSink)
+	if r.Header.Get("X-Oc2a-Probe") == "1" && isLoopbackRequest(r) {
+		callCtx = withProbeContext(callCtx)
+	}
 
 	if req.Stream {
 		// L6：进程级流并发上限——超限直接 503（defer 覆盖所有返回路径释放名额）。
