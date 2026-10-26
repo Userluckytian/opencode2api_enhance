@@ -79,9 +79,8 @@ export default function NodesPage({
 
   // 链式代理（前置节点）
   const [chainEnabled, setChainEnabled] = useState(false)
-  const [chainGroups, setChainGroups] = useState('')
   const [chainNodes, setChainNodes] = useState('')
-  const [frontGroup, setFrontGroup] = useState('')
+  const [frontCandidates, setFrontCandidates] = useState('')
   const [frontNode, setFrontNode] = useState('')
   const [chainAutoDetect, setChainAutoDetect] = useState(true)
   const [chainBusy, setChainBusy] = useState(false)
@@ -140,9 +139,8 @@ export default function NodesPage({
       .then((c) => {
         setScanConf({ scan_concurrency: c.scan_concurrency, stop_scan_concurrency: c.stop_scan_concurrency })
         setChainEnabled(c.chain_enabled)
-        setChainGroups((c.chain_groups || []).join(','))
         setChainNodes((c.chain_nodes || []).join(','))
-        setFrontGroup(c.front_group || '')
+        setFrontCandidates((c.front_candidates || []).join(','))
         setFrontNode(c.front_node || '')
         setChainAutoDetect(c.chain_auto_detect)
       })
@@ -627,19 +625,17 @@ export default function NodesPage({
 
   // 链式代理：保存配置
   const handleSaveChain = async () => {
-    if (chainEnabled && !frontGroup.trim() && !frontNode.trim()) {
-      setChainError('启用链式代理前请填写前置组或手动前置节点')
-      return
-    }
     setChainBusy(true)
     setChainError('')
     try {
       await api.configSet('chain_enabled', String(chainEnabled))
-      await api.configSet('chain_groups', chainGroups)
       await api.configSet('chain_nodes', chainNodes)
-      await api.configSet('front_group', frontGroup)
+      await api.configSet('front_candidates', frontCandidates)
       await api.configSet('front_node', frontNode)
       await api.configSet('chain_auto_detect', String(chainAutoDetect))
+      // 新 UI 不再使用分组语义，清掉旧配置避免干扰。
+      await api.configSet('chain_groups', '')
+      await api.configSet('front_group', '')
       toast('链式代理配置已保存', true)
     } catch (e) {
       setChainError(String(e))
@@ -673,11 +669,7 @@ export default function NodesPage({
       toast('节点池为空', false)
       return
     }
-    if (!frontGroup.trim() && !frontNode.trim()) {
-      setChainError('请先填写前置组或手动前置节点，再一键探测')
-      return
-    }
-    if (!window.confirm(`将对 ${nodes.length} 个节点执行「直连 → 失败后经前置」探测，耗时较长，继续？`)) return
+    if (!window.confirm(`将对 ${nodes.length} 个节点执行「直连 → 失败后自动选前置」探测，耗时较长，继续？`)) return
     setScanPhase('scanning')
     try {
       const p = await api.scanStart({
@@ -695,9 +687,10 @@ export default function NodesPage({
     }
   }
 
-  // 应用计划：只把“链式可用”的节点写入 chain_nodes（直连可用的保持直连）
-  const applyChainPlan = async (names: string[]) => {
-    if (names.length === 0) {
+  // 应用计划：只把“链式可用”的节点写入 chain_nodes；
+  // 直连可用节点写入 front_candidates，作为后续自动前置。
+  const applyChainPlan = async (chainNames: string[], frontNames: string[]) => {
+    if (chainNames.length === 0) {
       toast('没有需要链式的可用节点', false)
       return
     }
@@ -705,15 +698,16 @@ export default function NodesPage({
     setChainError('')
     try {
       await api.configSet('chain_enabled', 'true')
-      await api.configSet('chain_nodes', names.join(','))
-      await api.configSet('chain_groups', '')
-      await api.configSet('front_group', frontGroup)
+      await api.configSet('chain_nodes', chainNames.join(','))
+      await api.configSet('front_candidates', frontNames.slice(0, 8).join(','))
       await api.configSet('front_node', frontNode)
       await api.configSet('chain_auto_detect', 'true')
+      await api.configSet('chain_groups', '')
+      await api.configSet('front_group', '')
       setChainEnabled(true)
-      setChainNodes(names.join(','))
-      setChainGroups('')
-      toast(`计划已应用：${names.length} 个节点走链式，其余直连`, true)
+      setChainNodes(chainNames.join(','))
+      setFrontCandidates(frontNames.slice(0, 8).join(','))
+      toast(`计划已应用：${chainNames.length} 个节点走链式，${frontNames.length} 个直连节点作为前置候选`, true)
     } catch (e) {
       setChainError(String(e))
       toast('应用计划失败', false)
@@ -1187,8 +1181,9 @@ export default function NodesPage({
               {openSections.chain && (
                 <div className="p-4 space-y-4">
                   <p className="text-[12px] text-zinc-400">
-                    本地直连被阻断的节点，经可达的前置节点中转：本地 → 前置 → 目标 → 上游。
-                    「一键探测」会先直连，失败后自动经前置重试，并把需要链式的节点整理出来。
+                    本地直连被阻断的节点，自动从全部节点中选一个可达前置中转：本地 → 前置 → 目标 → 上游。
+                    优先使用运行中的实例节点；没有时从全部节点尝试，建议先启动一个可用节点作为前置。
+                    「一键探测」会先直连，失败后自动选前置重试，并把需要链式的节点整理出来。
                   </p>
 
                   <div className="grid grid-cols-1 md:grid-cols-2 gap-3 text-[13px]">
@@ -1200,35 +1195,17 @@ export default function NodesPage({
                       <input type="checkbox" checked={chainAutoDetect} onChange={(e) => setChainAutoDetect(e.target.checked)} />
                       <span className="text-zinc-700">自动检测整条链（推荐）</span>
                     </label>
-                    <label className="space-y-1">
-                      <span className="text-zinc-500">目标组（逗号分隔，可留空）</span>
-                      <input
-                        value={chainGroups}
-                        onChange={(e) => setChainGroups(e.target.value)}
-                        placeholder="Falemon-NQIJHTF.yaml"
-                        className="w-full rounded-lg border border-zinc-300 px-3 py-2"
-                      />
-                    </label>
-                    <label className="space-y-1">
-                      <span className="text-zinc-500">前置组</span>
-                      <input
-                        value={frontGroup}
-                        onChange={(e) => setFrontGroup(e.target.value)}
-                        placeholder="merged.yaml"
-                        className="w-full rounded-lg border border-zinc-300 px-3 py-2"
-                      />
-                    </label>
                     <label className="space-y-1 md:col-span-2">
                       <span className="text-zinc-500">目标节点（一键探测后自动填入；也可手动编辑）</span>
                       <input
                         value={chainNodes}
                         onChange={(e) => setChainNodes(e.target.value)}
-                        placeholder="留空 = 按目标组匹配"
+                        placeholder="留空 = 一键探测后自动规划"
                         className="w-full rounded-lg border border-zinc-300 px-3 py-2"
                       />
                     </label>
                     <label className="space-y-1 md:col-span-2">
-                      <span className="text-zinc-500">手动前置节点（留空 = 自动从前置组选择）</span>
+                      <span className="text-zinc-500">手动前置节点（留空 = 自动从全部节点中选择）</span>
                       <input
                         value={frontNode}
                         onChange={(e) => setFrontNode(e.target.value)}
@@ -1236,6 +1213,11 @@ export default function NodesPage({
                         className="w-full rounded-lg border border-zinc-300 px-3 py-2"
                       />
                     </label>
+                    {frontCandidates && (
+                      <div className="md:col-span-2 text-[11px] text-zinc-400 break-all">
+                        自动前置候选（上次探测/规划）：{frontCandidates}
+                      </div>
+                    )}
                   </div>
 
                   <div className="flex flex-wrap items-center gap-2">
@@ -1277,7 +1259,12 @@ export default function NodesPage({
                         </div>
                       )}
                       <button
-                        onClick={() => void applyChainPlan(chainPlan.chainOK.map((r) => r.node))}
+                        onClick={() =>
+                          void applyChainPlan(
+                            chainPlan.chainOK.map((r) => r.node),
+                            chainPlan.directOK.map((r) => r.node),
+                          )
+                        }
                         disabled={chainBusy || chainPlan.chainOK.length === 0}
                         className="px-3 py-1.5 rounded-lg bg-teal-600 text-white text-[12px] hover:bg-teal-700 disabled:cursor-not-allowed disabled:opacity-50"
                       >

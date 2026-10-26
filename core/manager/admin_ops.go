@@ -255,6 +255,7 @@ type TestResult struct {
 	Name       string `json:"name"`
 	Port       uint16 `json:"port"`
 	OK         bool   `json:"ok"`
+	Category   string `json:"category,omitempty"`
 	StatusCode *int   `json:"status_code"`
 	ModelCount *int   `json:"model_count"`
 	Message    string `json:"message"`
@@ -294,37 +295,17 @@ func (m *Manager) InstancesTestHandler() http.HandlerFunc {
 			return
 		}
 		start := time.Now()
-		// 对齐 Rust probe_free_completion：超时 10s，成功文案"免费模型最小请求成功"
+		// 与节点扫描共用 classifyProbeOutcome：分类/文案一处修改，两处生效。
 		status, body, modelCount, freeTested, err := freeCompletion(inst.Port, inst.Password, 10*time.Second)
 		res := TestResult{Name: name, Port: inst.Port, LatencyMS: time.Since(start).Milliseconds()}
 		sc := status
 		res.StatusCode = &sc
-		if status >= 200 && status < 300 && err == nil {
-			res.OK = true
-			if modelCount >= 0 {
-				res.ModelCount = &modelCount
-			}
-			if freeTested {
-				res.Message = "免费模型最小请求成功"
-			} else {
-				res.Message = "models 接口连通（无免费模型可测试）"
-			}
-		} else if err != nil {
-			res.Message = "免费模型请求失败: " + err.Error()
-		} else {
-			res.Message = "免费模型请求 HTTP " + itoa(uint16(status)) + "：" + truncateBody(body, 240)
+		res.OK, res.Category, res.Message = classifyProbeOutcome(status, body, modelCount, freeTested, err)
+		if res.OK && modelCount >= 0 {
+			res.ModelCount = &modelCount
 		}
 		writeJSON(w, res)
 	}
-}
-
-// truncateBody 截断响应体（Rust truncate 移植：超长加省略号）。
-func truncateBody(s []byte, max int) string {
-	runes := []rune(string(s))
-	if len(runes) > max {
-		return string(runes[:max]) + "…"
-	}
-	return string(runes)
 }
 
 // decodeName 读取 {"name":"..."}。

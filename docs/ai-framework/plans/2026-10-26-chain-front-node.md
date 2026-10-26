@@ -17,18 +17,17 @@
 | 键 | 含义 |
 |----|------|
 | `chain_enabled` | 总开关（默认 false） |
-| `chain_groups` | 需要链式的目标组列表（逗号分隔） |
-| `chain_nodes` | 需要链式的具体节点（一键探测规划写入；优先于组） |
-| `front_group` | 前置候选组（如 `merged.yaml`） |
-| `front_node` | 手动前置节点（优先于自动；空 = 自动） |
+| `chain_nodes` | 需要链式的具体节点（一键探测规划写入） |
+| `front_candidates` | 自动探测/规划选出的可用前置（优先于运行中节点） |
+| `front_node` | 手动前置节点（最高优先；空 = 自动） |
 | `chain_auto_detect` | 自动检测（默认 true）：逐候选测试整条链 |
+| `chain_groups` / `front_group` | 旧分组语义，保留兼容；新 UI 不再使用 |
 
-> `chain_nodes` 非空时只认白名单；`chain_nodes` 与 `chain_groups` 都为空才表示“所有组”。
+### 前置选择策略
 
-### 前置组策略
-
-- **前置组 = 候选节点组**，不是目标组。候选条件：`group == front_group`、
-  `kernelUsable`、有凭据、且不是目标节点本身。
+- 自动前置顺序：手动 `front_node` → `front_candidates` → 运行中的实例节点 → 全部节点。
+- 候选条件：不是目标本身、`kernelUsable`、有凭据。
+- 一键探测/规划后，直连可用节点写入 `front_candidates`，链式可用节点写入 `chain_nodes`。
 - **自动检测必须测整条链**：临时启动 `front → target` 的 sing-box，
   经其 HTTP inbound 请求 `https://opencode.ai/zen/v1/models`；
   200 才算可用。只测前置自身健康不够（前置可达 ≠ 前置能到目标）。
@@ -59,10 +58,13 @@
 
 ### UI
 
-- 「链式代理（前置节点）」放在**节点池 → 设置**弹窗：目标组/目标节点、前置组、
-  手动前置、自动检测、一键探测（全部节点）、应用计划、检测链路。
-- 「OpenCode 免费层 Sidecar」并入**设置 → 关于**卡片，与 `opencode2api.exe` /
-  `sing-box.exe` 子程序状态放在一起。
+- 「链式代理（前置节点）」放在**节点池 → 设置**弹窗，不再要求分组：
+  目标节点、手动前置（可选）、自动检测、一键探测（全部节点）、应用计划、检测链路。
+  自动前置顺序：手动 `front_node` → 探测/规划写入的 `front_candidates` →
+  运行中的实例节点 → 全部节点。
+- 「OpenCode 免费层 Sidecar」在**设置 → 关于**卡片中只保留
+  `opencode2api.exe` / `sing-box.exe` / `free-sidecar.exe` 三个状态行；
+  不再提供检查/重启按钮，缺失/异常时重启应用即可。
 
 ## 验收
 
@@ -76,4 +78,7 @@
 | 一键探测 | `scan chain=auto` | ✅ 直连可用不套链；直连失败经前置；429 不套链 |
 | 节点白名单 | `chain_nodes` + `/chain/check` | ✅ chain_groups 为空时仍按节点名走链 |
 | UI 归位 | 设置页 / 节点池设置 | ✅ Sidecar 并入「关于」；链式代理移入「节点池设置」 |
+| 无分组自动前置 | 清空 group/candidates 后 `chain=auto` | ✅ 自动选中可达节点作为前置 |
+| 实例测试文案统一 | `/api/admin/instances/test` | ✅ 200 → `可用，models=10`；429 → `HTTP 429，...` + `category=rate_limit` |
+| 子程序状态 | `/api/admin/binaries` + 关于卡片 | ✅ 三项 ✓；不再显示检查/重启控件 |
 | 构建/单测 | `go build ./...` + `npm run build` + 目标测试 | ✅ 通过 |

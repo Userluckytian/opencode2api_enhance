@@ -147,9 +147,10 @@ func (m *Manager) ClearCallLogHandler() http.HandlerFunc {
 
 // BinariesInfo 二进制信息（前端契约）。
 type BinariesInfo struct {
-	BinDir   string `json:"bin_dir"`
-	OCExists bool   `json:"oc_exists"`
-	SBExists bool   `json:"sb_exists"`
+	BinDir        string `json:"bin_dir"`
+	OCExists      bool   `json:"oc_exists"`
+	SBExists      bool   `json:"sb_exists"`
+	SidecarExists bool   `json:"sidecar_exists"`
 }
 
 // BinariesHandler GET 二进制信息。
@@ -161,6 +162,7 @@ func (m *Manager) BinariesHandler() http.HandlerFunc {
 		info := BinariesInfo{BinDir: m.paths.BinDir}
 		info.OCExists = existsInBin(m.paths.BinDir, "opencode2api")
 		info.SBExists = existsInBin(m.paths.BinDir, "sing-box")
+		info.SidecarExists = existsInBin(m.paths.BinDir, "free-sidecar")
 		writeJSON(w, info)
 	}
 }

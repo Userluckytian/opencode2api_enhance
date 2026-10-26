@@ -2,6 +2,7 @@ import { memo, useCallback, useEffect, useRef, useState } from 'react'
 import clsx from 'clsx'
 import { Copy, Loader2, Power, RefreshCw, ShieldCheck, Network, Search, Play, Square, TestTube2, Trash2, KeyRound, Pencil, Check, X, Activity, Settings2, ChevronDown, Layers } from 'lucide-react'
 import { api, type GatewayStatus, type Instance, type TestResult, type PoolQualitySummary, type PoolQualityRecord, type PoolQualityLevel, type AutoModelConfig } from '../lib/api'
+import { testBadge } from '../components/TestBadge'
 
 function statusBadge(st: Instance['status']): [string, string] {
   if (st === 'Running') return ['bg-green-50 text-green-700', '健康']
@@ -1825,24 +1826,3 @@ function qualityBadge(r?: PoolQualityRecord) {
 }
 
 /** 测试结果徽章：✓ 通过+延迟+详情 / ✗ 失败+原因（无结果返回 null 不占位） */
-function testBadge(r?: TestResult) {
-  if (!r) return null
-  if (r.ok) {
-    return (
-      <span
-        className="inline-block max-w-[240px] px-2 py-0.5 rounded-full text-[11px] font-medium bg-green-50 text-green-700 truncate"
-        title={r.message}
-      >
-        ✓ 通过 {r.latency_ms}ms{r.message ? ` · ${r.message}` : ''}
-      </span>
-    )
-  }
-  return (
-    <span
-      className="inline-block max-w-[240px] px-2 py-0.5 rounded-full text-[11px] font-medium bg-red-50 text-red-600 truncate"
-      title={r.message || '测试失败'}
-    >
-      ✗ {r.message || '失败'}
-    </span>
-  )
-}

@@ -61,6 +61,8 @@ export type TestResult = {
   name: string
   port: number
   ok: boolean
+  /** 与节点扫描统一的分类：ok / rate_limit / upstream / timeout / other */
+  category?: string
   status_code: number | null
   model_count: number | null
   message: string
@@ -311,6 +313,7 @@ export type ConfigView = {
   chain_enabled: boolean
   chain_groups: string[]
   chain_nodes: string[]
+  front_candidates: string[]
   front_group: string
   front_node: string
   chain_auto_detect: boolean
@@ -339,6 +342,7 @@ export type BinariesInfo = {
   bin_dir: string
   oc_exists: boolean
   sb_exists: boolean
+  sidecar_exists: boolean
 }
 
 /** 免费层 Bun sidecar 状态（设置页） */

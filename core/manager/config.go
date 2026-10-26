@@ -105,12 +105,14 @@ type Config struct {
 	FreeSidecarEnabled *bool `json:"free_sidecar_enabled,omitempty"`
 
 	// 链式代理（前置节点）：本地直连被阻断的节点经可达前置节点中转。
-	// ChainEnabled 总开关（nil = 关闭）；ChainGroups 需要链式的目标组；
-	// ChainNodes 需要链式的具体节点（一键探测规划写入；优先于组）；
-	// FrontGroup 前置候选组；FrontNode 手动前置（优先）；ChainAutoDetect 自动探测整条链。
+	// ChainEnabled 总开关；ChainNodes 需要链式的具体节点（一键探测写入）；
+	// FrontCandidates 自动探测/规划选出的可用前置（优先于运行中节点）；
+	// FrontNode 手动前置（最高优先）；ChainAutoDetect 自动探测整条链。
+	// ChainGroups/FrontGroup 为旧分组语义，保留兼容；新 UI 不再使用。
 	ChainEnabled    *bool    `json:"chain_enabled,omitempty"`
 	ChainGroups     []string `json:"chain_groups,omitempty"`
 	ChainNodes      []string `json:"chain_nodes,omitempty"`
+	FrontCandidates []string `json:"front_candidates,omitempty"`
 	FrontGroup      string   `json:"front_group,omitempty"`
 	FrontNode       string   `json:"front_node,omitempty"`
 	ChainAutoDetect *bool    `json:"chain_auto_detect,omitempty"`
@@ -447,6 +449,8 @@ func (m *Manager) ConfigGet(key string) (string, error) {
 		return strings.Join(cfg.ChainGroups, ","), nil
 	case "chain_nodes":
 		return strings.Join(cfg.ChainNodes, ","), nil
+	case "front_candidates":
+		return strings.Join(cfg.FrontCandidates, ","), nil
 	case "front_group":
 		return cfg.FrontGroup, nil
 	case "front_node":
@@ -848,6 +852,15 @@ func (m *Manager) ConfigSet(key, value string) error {
 		}
 		cfg.ChainNodes = nodes
 		m.invalidateChainCache()
+	case "front_candidates":
+		var nodes []string
+		for _, n := range strings.Split(value, ",") {
+			if n = strings.TrimSpace(n); n != "" {
+				nodes = append(nodes, n)
+			}
+		}
+		cfg.FrontCandidates = nodes
+		m.invalidateChainCache()
 	case "front_group":
 		cfg.FrontGroup = strings.TrimSpace(value)
 		m.invalidateChainCache()
@@ -953,6 +966,7 @@ type ConfigView struct {
 	ChainEnabled    bool     `json:"chain_enabled"`
 	ChainGroups     []string `json:"chain_groups"`
 	ChainNodes      []string `json:"chain_nodes"`
+	FrontCandidates []string `json:"front_candidates"`
 	FrontGroup      string   `json:"front_group"`
 	FrontNode       string   `json:"front_node"`
 	ChainAutoDetect bool     `json:"chain_auto_detect"`
@@ -1023,6 +1037,7 @@ func (m *Manager) ConfigViewOf() ConfigView {
 		ChainEnabled:            chainEnabled(cfg),
 		ChainGroups:             cfg.ChainGroups,
 		ChainNodes:              cfg.ChainNodes,
+		FrontCandidates:         cfg.FrontCandidates,
 		FrontGroup:              cfg.FrontGroup,
 		FrontNode:               cfg.FrontNode,
 		ChainAutoDetect:         chainAutoDetect(cfg),

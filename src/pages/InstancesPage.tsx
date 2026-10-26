@@ -2,6 +2,7 @@ import { memo, useCallback, useEffect, useRef, useState } from 'react'
 import clsx from 'clsx'
 import { RefreshCw, Play, Square, Trash2, TestTube2, Copy, Loader2, Search, Server, Activity, Settings2, ChevronDown, X } from 'lucide-react'
 import { api, type Instance, type TestResult, type PoolQualityRecord, type PoolQualityLevel } from '../lib/api'
+import { testBadge } from '../components/TestBadge'
 
 /** 链路质量徽标（与实例池页一致）：质量分 + 等级 + 延迟（无记录显示"未探测"）；
  *  悬浮展示窗口明细（2026-08-24 问题2，与 PoolPage.qualityBadge 对齐） */
@@ -707,30 +708,6 @@ if (kind === 'delete' && !confirm(`确定释放选中的 ${names.length} 个实�
 })
 
 /** 测试结果徽章：✓ 通过+延迟+详情 / ✗ 失败+原因（无结果返回 null 不占位） */
-function testBadge(r?: TestResult) {
-  if (!r) return null
-  if (r.ok) {
-    return (
-      <span
-        className="inline-block max-w-[240px] px-2 py-0.5 rounded-full text-[11px] font-medium bg-green-50 text-green-700 truncate"
-        title={r.message}
-      >
-        ✓ 通过 {r.latency_ms}ms{r.message ? ` · ${r.message}` : ''}
-      </span>
-    )
-  }
-  return (
-    <span
-      className="inline-block max-w-[240px] px-2 py-0.5 rounded-full text-[11px] font-medium bg-red-50 text-red-600 truncate"
-      title={r.message || '测试失败'}
-    >
-      ✗ {r.message || '失败'}
-    </span>
-  )
-}
-
-
-
 function maskKey(k: string) {
   if (!k) return '未设置'
   if (k.length <= 8) return k

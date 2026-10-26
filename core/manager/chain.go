@@ -113,7 +113,105 @@ func (m *Manager) invalidateChainCache() {
 	m.chainCache = nil
 }
 
-// frontCandidates 返回目标节点的前置候选（手动优先，否则前置组内可用节点）。
+// frontCandidateOK 节点能否作为前置：不是目标本身、有凭据、内核可转发。
+func frontCandidateOK(n, target ClashNode) bool {
+	if n.Name == target.Name {
+		return false
+	}
+	if n.Server == target.Server && n.Port == target.Port {
+		return false
+	}
+	if !nodeHasCredential(n) {
+		return false
+	}
+	if usable, _ := kernelUsable(n.NodeType); !usable {
+		return false
+	}
+	return true
+}
+
+func (m *Manager) resolveCandidateNames(sf *SeamFuncs, names []string, target ClashNode) []ClashNode {
+	if sf.ResolveNode == nil {
+		return nil
+	}
+	out := make([]ClashNode, 0, chainCandidateLimit)
+	seen := map[string]bool{}
+	for _, name := range names {
+		name = strings.TrimSpace(name)
+		if name == "" || seen[name] {
+			continue
+		}
+		seen[name] = true
+		n, ok := sf.ResolveNode(name)
+		if !ok || !frontCandidateOK(n, target) {
+			continue
+		}
+		out = append(out, n)
+		if len(out) >= chainCandidateLimit {
+			break
+		}
+	}
+	return out
+}
+
+func (m *Manager) groupFrontCandidates(sf *SeamFuncs, group string, target ClashNode) []ClashNode {
+	out := make([]ClashNode, 0, chainCandidateLimit)
+	for _, n := range sf.ListNodes() {
+		if n.Group != group || !frontCandidateOK(n, target) {
+			continue
+		}
+		out = append(out, n)
+		if len(out) >= chainCandidateLimit {
+			break
+		}
+	}
+	return out
+}
+
+// runningInstanceFronts 优先使用运行中的实例节点作为前置：它们通常已经被验证过。
+func (m *Manager) runningInstanceFronts(sf *SeamFuncs, target ClashNode) []ClashNode {
+	if sf.ResolveNode == nil {
+		return nil
+	}
+	out := make([]ClashNode, 0, chainCandidateLimit)
+	seen := map[string]bool{}
+	for _, inst := range m.load() {
+		if inst.Status.State != "Running" || seen[inst.Node] {
+			continue
+		}
+		seen[inst.Node] = true
+		n, ok := sf.ResolveNode(inst.Node)
+		if !ok || !frontCandidateOK(n, target) {
+			continue
+		}
+		out = append(out, n)
+		if len(out) >= chainCandidateLimit {
+			break
+		}
+	}
+	return out
+}
+
+func (m *Manager) allFrontCandidates(sf *SeamFuncs, target ClashNode) []ClashNode {
+	out := make([]ClashNode, 0, chainCandidateLimit)
+	for _, n := range sf.ListNodes() {
+		if !frontCandidateOK(n, target) {
+			continue
+		}
+		out = append(out, n)
+		if len(out) >= chainCandidateLimit {
+			break
+		}
+	}
+	return out
+}
+
+// frontCandidates 返回目标节点的前置候选：
+//  1. 手动 front_node；
+//  2. 一键探测/规划写入的 front_candidates；
+//  3. 旧分组 front_group（兼容）；
+//  4. 运行中的实例节点（最可能已验证可用）；
+//  5. 全部节点中的前 N 个。
 func (m *Manager) frontCandidates(cfg Config, target ClashNode) ([]ClashNode, error) {
 	sf := m.currentSeams()
 	if sf.ListNodes == nil {
@@ -127,38 +225,28 @@ func (m *Manager) frontCandidates(cfg Config, target ClashNode) ([]ClashNode, er
 		if !ok {
 			return nil, fmt.Errorf("前置节点 '%s' 不存在", name)
 		}
-		if f.Server == target.Server && f.Port == target.Port {
-			return nil, errors.New("前置节点不能是目标节点本身")
+		if !frontCandidateOK(f, target) {
+			return nil, errors.New("前置节点不能是目标节点本身，或缺少凭据/内核不支持")
 		}
 		return []ClashNode{f}, nil
 	}
-	group := strings.TrimSpace(cfg.FrontGroup)
-	if group == "" {
-		return nil, errors.New("未配置前置组 front_group")
-	}
-	out := make([]ClashNode, 0, chainCandidateLimit)
-	for _, n := range sf.ListNodes() {
-		if n.Group != group || n.Name == target.Name {
-			continue
-		}
-		if n.Server == target.Server && n.Port == target.Port {
-			continue
-		}
-		if !nodeHasCredential(n) {
-			continue
-		}
-		if usable, _ := kernelUsable(n.NodeType); !usable {
-			continue
-		}
-		out = append(out, n)
-		if len(out) >= chainCandidateLimit {
-			break
+	if len(cfg.FrontCandidates) > 0 {
+		if out := m.resolveCandidateNames(sf, cfg.FrontCandidates, target); len(out) > 0 {
+			return out, nil
 		}
 	}
-	if len(out) == 0 {
-		return nil, fmt.Errorf("前置组 '%s' 中没有可用节点", group)
+	if group := strings.TrimSpace(cfg.FrontGroup); group != "" {
+		if out := m.groupFrontCandidates(sf, group, target); len(out) > 0 {
+			return out, nil
+		}
 	}
-	return out, nil
+	if out := m.runningInstanceFronts(sf, target); len(out) > 0 {
+		return out, nil
+	}
+	if out := m.allFrontCandidates(sf, target); len(out) > 0 {
+		return out, nil
+	}
+	return nil, errors.New("没有可用前置节点")
 }
 
 // resolveFrontNode 为实例/扫描解析前置节点。
@@ -199,12 +287,9 @@ func (m *Manager) resolveFrontNode(target ClashNode, autoDetect bool) (ClashNode
 }
 
 // resolveFrontNodeForPlan 一键探测/规划用：不要求 chain_enabled/chain_nodes 已开启，
-// 只要配置了手动前置或前置组，就返回一个可用于尝试的前置（手动/缓存/首个候选）。
+// 直接按 front_node → front_candidates → 运行中实例 → 全部节点 的顺序找前置。
 func (m *Manager) resolveFrontNodeForPlan(target ClashNode) (ClashNode, bool, error) {
 	cfg := m.loadConfig()
-	if strings.TrimSpace(cfg.FrontNode) == "" && strings.TrimSpace(cfg.FrontGroup) == "" {
-		return ClashNode{}, false, nil
-	}
 	candidates, err := m.frontCandidates(cfg, target)
 	if err != nil {
 		return ClashNode{}, true, err
@@ -233,10 +318,6 @@ func (m *Manager) CheckChain(targetName string) ChainCheckResult {
 		return res
 	}
 	cfg := m.loadConfig()
-	if !chainTargetMatch(cfg, target) {
-		res.Error = "目标组未启用链式代理（检查 chain_enabled / chain_groups）"
-		return res
-	}
 	candidates, err := m.frontCandidates(cfg, target)
 	if err != nil {
 		res.Error = err.Error()

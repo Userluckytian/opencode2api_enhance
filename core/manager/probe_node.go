@@ -2,7 +2,6 @@
 package manager
 
 import (
-	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -158,44 +157,8 @@ func (c *ScanController) probeNodeOnce(worker int, opts ScanOptions, node ClashN
 	}
 	// 设计原则：/v1/models 返回 2xx 即视为节点可用（能连通上游）。
 	// 免费模型 chat 测试只是额外验证——成功则更确信，失败/未测也不影响可用判定。
-	if status >= 200 && status < 300 {
-		base.OK = true
-		base.Category = "ok"
-		if freeTested && probeCompletionSuccess(status, body) {
-			if modelCount >= 0 {
-				base.Message = "可用，models=" + itoa(uint16(modelCount))
-			} else {
-				base.Message = "可用（免费模型最小请求成功）"
-			}
-		} else if modelCount >= 0 {
-			base.Message = "可用，models=" + itoa(uint16(modelCount)) + "（无免费模型可测试）"
-		} else {
-			base.Message = "可用（models 接口连通）"
-		}
-		return base
-	}
-	if httpErr != nil {
-		msg := httpErr.Error()
-		if strings.Contains(msg, "timed out") || strings.Contains(msg, "i/o timeout") || strings.Contains(msg, "超时") {
-			base.Category = "timeout"
-		} else {
-			base.Category = "other"
-		}
-		base.Message = "请求失败: " + msg
-		return base
-	}
-	switch {
-	case status >= 200 && status < 300:
-		base.Category = "invalid_response"
-	case status == 429:
-		// 429 是上游限流/指纹拒绝，不是链路超时；单独归类，避免误报 i/o timeout。
-		base.Category = "rate_limit"
-	case status == 502 || status == 503 || status == 504:
-		base.Category = "upstream"
-	default:
-		base.Category = "other"
-	}
-	base.Message = fmt.Sprintf("HTTP %d，%s", status, truncateProbe(string(body), 160))
+	// 分类/文案与实例测试共用 classifyProbeOutcome，避免两处口径漂移。
+	base.OK, base.Category, base.Message = classifyProbeOutcome(status, body, modelCount, freeTested, httpErr)
 	return base
 }
 

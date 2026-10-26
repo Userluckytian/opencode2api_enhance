@@ -107,6 +107,43 @@ func probeCompletionSuccess(status int, body []byte) bool {
 	return ok && len(chs) > 0
 }
 
+// isTimeoutMessage 传输层超时文案判定（扫描/实例测试共用）。
+func isTimeoutMessage(msg string) bool {
+	return strings.Contains(msg, "timed out") || strings.Contains(msg, "i/o timeout") || strings.Contains(msg, "超时")
+}
+
+// classifyProbeOutcome 统一扫描探针与实例测试的分类/文案。
+// 返回 (ok, category, message)；category 取值：ok / rate_limit / upstream / timeout / other。
+func classifyProbeOutcome(status int, body []byte, modelCount int, freeTested bool, err error) (bool, string, string) {
+	if err != nil {
+		if isTimeoutMessage(err.Error()) {
+			return false, "timeout", "请求失败: " + err.Error()
+		}
+		return false, "other", "请求失败: " + err.Error()
+	}
+	if status >= 200 && status < 300 {
+		if freeTested && probeCompletionSuccess(status, body) {
+			if modelCount >= 0 {
+				return true, "ok", "可用，models=" + itoa(uint16(modelCount))
+			}
+			return true, "ok", "可用（免费模型最小请求成功）"
+		}
+		if modelCount >= 0 {
+			return true, "ok", "可用，models=" + itoa(uint16(modelCount)) + "（无免费模型可测试）"
+		}
+		return true, "ok", "可用（models 接口连通）"
+	}
+	msg := "HTTP " + itoa(uint16(status)) + "，" + truncateProbe(string(body), 240)
+	switch status {
+	case 429:
+		return false, "rate_limit", msg
+	case 502, 503, 504:
+		return false, "upstream", msg
+	default:
+		return false, "other", msg
+	}
+}
+
 // modelsCount 从 /v1/models 响应统计数量。
 func modelsCount(body []byte) (int, bool) {
 	var obj struct {

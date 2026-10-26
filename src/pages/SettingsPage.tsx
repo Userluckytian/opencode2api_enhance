@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from 'react'
 import clsx from 'clsx'
 import { Loader2, RefreshCw, Search, Settings, Trash2 } from 'lucide-react'
 import { api, type OrphanProcess } from '../lib/api'
-import type { ConfigView, BinariesInfo, FreeSidecarStatus, FreeSidecarCheck } from '../lib/api'
+import type { ConfigView, BinariesInfo } from '../lib/api'
 import { isDesktop } from '../lib/env'
 import type { UpdateInfo } from '../lib/updates'
 
@@ -50,12 +50,6 @@ export default function SettingsPage({
   const [savingClash, setSavingClash] = useState(false)
   const [autostartBusy, setAutostartBusy] = useState(false)
   const [cleanLevel, setCleanLevel] = useState<1 | 2 | 3 | null>(null)
-
-  // 免费层 Bun sidecar（状态 / 环境检查 / 重启）
-  const [sidecar, setSidecar] = useState<FreeSidecarStatus | null>(null)
-  const [sidecarChecks, setSidecarChecks] = useState<FreeSidecarCheck[] | null>(null)
-  const [sidecarBusy, setSidecarBusy] = useState(false)
-  const [sidecarError, setSidecarError] = useState('')
 
 
   // G31/L10: toast 用 ref 封装（App 的 showToast 每次渲染重建）——effect 固定只跑一次，
@@ -220,57 +214,6 @@ export default function SettingsPage({
       setCleanLevel(null)
     }
   }
-
-  const refreshSidecar = async () => {
-    try {
-      setSidecar(await api.freeSidecarStatus())
-      setSidecarError('')
-    } catch (e) {
-      setSidecarError(String(e))
-    }
-  }
-
-  const checkSidecar = async () => {
-    setSidecarBusy(true)
-    setSidecarError('')
-    try {
-      setSidecarChecks(await api.freeSidecarCheck())
-    } catch (e) {
-      setSidecarError(String(e))
-      toast('免费层 sidecar 环境检查失败', false)
-    } finally {
-      setSidecarBusy(false)
-    }
-  }
-
-  const restartSidecar = async () => {
-    setSidecarBusy(true)
-    setSidecarError('')
-    try {
-      const s = await api.freeSidecarRestart()
-      setSidecar(s)
-      setSidecarChecks(null)
-      toast('免费层 sidecar 已重启', true)
-    } catch (e) {
-      setSidecarError(String(e))
-      toast('重启免费层 sidecar 失败', false)
-    } finally {
-      setSidecarBusy(false)
-    }
-  }
-
-  useEffect(() => {
-    let alive = true
-    api
-      .freeSidecarStatus()
-      .then((s) => {
-        if (alive) setSidecar(s)
-      })
-      .catch(() => {})
-    return () => {
-      alive = false
-    }
-  }, [])
 
   if (!config || !binariesInfo) {
     return <div className="p-8 text-zinc-500">加载中...</div>
@@ -585,105 +528,12 @@ export default function SettingsPage({
               <span>sing-box.exe</span>
             </div>
             <div className="flex items-center space-x-2 text-sm">
-              <span className={sidecar?.bin ? 'text-green-600' : sidecar ? 'text-red-600' : 'text-zinc-400'}>
-                {sidecar?.bin ? '✓' : sidecar ? '✗' : '…'}
+              <span className={binariesInfo.sidecar_exists ? 'text-green-600' : 'text-red-600'}>
+                {binariesInfo.sidecar_exists ? '✓' : '✗'}
               </span>
               <span>free-sidecar.exe</span>
             </div>
           </div>
-        </div>
-
-        <div className="space-y-2 border-t border-zinc-100 pt-4">
-          <div className="flex flex-wrap items-start justify-between gap-2">
-            <div>
-              <label className="block text-sm font-medium text-zinc-700">OpenCode 免费层 Sidecar</label>
-              <p className="text-zinc-500 text-xs">
-                Bun sidecar 负责免费层的客户端 TLS 指纹（Go 标准 TLS 会被上游 429）。异常时先检查环境，再重启；仅监听 127.0.0.1。
-              </p>
-            </div>
-            <div className="flex flex-wrap gap-2">
-              <button
-                onClick={() => void refreshSidecar()}
-                disabled={sidecarBusy}
-                className="flex items-center gap-1.5 px-3 py-2 rounded-lg border border-zinc-300 text-[13px] hover:bg-zinc-100 disabled:cursor-not-allowed disabled:opacity-50"
-              >
-                <RefreshCw size={14} />
-                刷新
-              </button>
-              <button
-                onClick={() => void checkSidecar()}
-                disabled={sidecarBusy}
-                className="flex items-center gap-1.5 px-3 py-2 rounded-lg border border-zinc-300 text-[13px] hover:bg-zinc-100 disabled:cursor-not-allowed disabled:opacity-50"
-              >
-                {sidecarBusy ? <Loader2 size={14} className="animate-spin" /> : <Search size={14} />}
-                检查环境
-              </button>
-              <button
-                onClick={() => void restartSidecar()}
-                disabled={sidecarBusy}
-                className="flex items-center gap-1.5 bg-zinc-900 text-white rounded-lg px-4 py-2 text-[13px] hover:bg-zinc-700 disabled:cursor-not-allowed disabled:opacity-60"
-              >
-                {sidecarBusy ? <Loader2 size={14} className="animate-spin" /> : <RefreshCw size={14} />}
-                {sidecarBusy ? '处理中…' : '重启 Sidecar'}
-              </button>
-            </div>
-          </div>
-
-          {sidecar ? (
-            <div className="grid grid-cols-2 gap-2 text-[13px] text-zinc-700">
-              <div>
-                状态：
-                <span className={clsx('font-medium', sidecar.healthy ? 'text-green-600' : sidecar.running ? 'text-amber-600' : 'text-red-600')}>
-                  {sidecar.running ? '运行中' : '未运行'}
-                </span>
-                <span className="text-zinc-400">{sidecar.healthy ? '（健康）' : '（不健康）'}</span>
-              </div>
-              <div>端口：{sidecar.port}</div>
-              <div className="col-span-2 break-all">地址：{sidecar.url || '—'}</div>
-              <div>PID：{sidecar.pid || '—'}</div>
-              <div>开关：{sidecar.enabled ? '启用' : '禁用'}</div>
-              {sidecar.bin && (
-                <div className="col-span-2 break-all text-zinc-500">
-                  二进制：{sidecar.bin}
-                  {sidecar.script ? ` + ${sidecar.script}` : ''}
-                </div>
-              )}
-              {sidecar.error && <div className="col-span-2 text-red-600 break-all">错误：{sidecar.error}</div>}
-            </div>
-          ) : (
-            <p className="text-zinc-500 text-xs">未获取到 sidecar 状态（旧版本核心可能不支持）。</p>
-          )}
-
-          {sidecarError && <p className="text-red-600 text-xs break-all">{sidecarError}</p>}
-
-          {sidecarChecks && (
-            <div className="rounded-lg border border-zinc-200 overflow-hidden">
-              <table className="w-full text-[13px]">
-                <thead>
-                  <tr className="text-left text-zinc-400 bg-zinc-50 border-b border-zinc-100">
-                    <th className="py-2 pl-3">检查项</th>
-                    <th className="py-2 pl-2">结果</th>
-                    <th className="py-2 pl-2 pr-3">详情</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {sidecarChecks.map((c) => (
-                    <tr key={c.name} className="border-b border-zinc-50">
-                      <td className="py-2 pl-3 text-zinc-700">{c.name}</td>
-                      <td className="py-2 pl-2">
-                        <span className={c.ok ? 'text-green-600' : 'text-red-600'}>{c.ok ? 'OK' : 'FAIL'}</span>
-                      </td>
-                      <td className="py-2 pl-2 pr-3 text-zinc-500 break-all">{c.detail}</td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          )}
-
-          <p className="text-zinc-400 text-[11px]">
-            修改端口/开关后点击「重启 Sidecar」生效；运行中的实例/网关需在实例池页重启后才会拿到新地址。
-          </p>
         </div>
 
         <p className="text-zinc-500 text-xs">子程序随主程序内嵌，运行时不满足时自动释放</p>
