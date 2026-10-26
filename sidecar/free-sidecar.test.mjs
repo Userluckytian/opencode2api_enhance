@@ -46,6 +46,55 @@ describe("free-sidecar", () => {
     expect(body.tools.length).toBe(2)
   })
 
+  test("chat body keeps client system prompt and prepends env block", () => {
+    const body = {
+      model: "m",
+      messages: [
+        { role: "system", content: "You are a coding agent." },
+        { role: "user", content: "hi" },
+      ],
+    }
+    normalizeBody(body, "https://opencode.ai/inference/v1/chat/completions", true)
+    expect(body.messages.length).toBe(2)
+    const sys = body.messages[0]
+    expect(sys.role).toBe("system")
+    expect(sys.content).toContain("<env>")
+    expect(sys.content).toContain("Working directory:")
+    expect(sys.content).toContain("You are a coding agent.")
+  })
+
+  test("chat body does not duplicate an existing env block", () => {
+    const sys = {
+      role: "developer",
+      content: "Here is some useful information about the environment you are running in:\n<env>\n  Working directory: .\n</env>\n\nYou are a coding agent.",
+    }
+    const body = { model: "m", messages: [sys, { role: "user", content: "hi" }] }
+    normalizeBody(body, "https://opencode.ai/inference/v1/chat/completions", true)
+    expect(body.messages[0].content.match(/<env>/g).length).toBe(1)
+  })
+
+  test("chat body handles system content parts", () => {
+    const body = {
+      model: "m",
+      messages: [
+        { role: "system", content: [{ type: "text", text: "You are a coding agent." }] },
+        { role: "user", content: "hi" },
+      ],
+    }
+    normalizeBody(body, "https://opencode.ai/inference/v1/chat/completions", true)
+    const parts = body.messages[0].content
+    expect(Array.isArray(parts)).toBe(true)
+    expect(parts[0].text).toContain("<env>")
+    expect(parts[1].text).toBe("You are a coding agent.")
+  })
+
+  test("responses body prepends env block to custom instructions", () => {
+    const body = { model: "m", instructions: "You are a coding agent.", input: "hi" }
+    normalizeBody(body, "https://opencode.ai/inference/v1/responses", true)
+    expect(body.instructions).toContain("<env>")
+    expect(body.instructions).toContain("You are a coding agent.")
+  })
+
   test("aggregate SSE keeps model and content", async () => {
     const sse =
       'data: {"choices":[{"delta":{"content":"hi"},"finish_reason":"stop"}],"usage":{"total_tokens":1}}\n\ndata: [DONE]\n\n'

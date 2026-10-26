@@ -45,6 +45,10 @@ opencode.ai
   GET **优先走节点 HTTP inbound**（保持实例池出口），无节点时才直连。
 - **只有 opencode 厂商**使用 sidecar；custom `via_proxy` / remote / plugin 源
   继续走原传输，Authorization 与 body 不会被改写。
+- 免费层还要求 system 提示包含官方环境块（`<env>` + `Working directory:`）。
+  `ensureEnv` 会把它前置拼进客户端已有的 system/developer 消息（或 responses 的
+  `instructions`），已含环境块时不重复注入。缺少环境块时上游会回
+  `429 FreeUsageLimitError`，典型表现是「应用内测试 200、agent 客户端 429」。
 
 ## 构建
 
@@ -123,6 +127,7 @@ powershell -ExecutionPolicy Bypass -File scripts/build-free-sidecar.ps1
 | 现象 | 检查 |
 |------|------|
 | 免费层仍 429 | 设置页「检查环境」；或 `curl http://127.0.0.1:40200/health` |
+| agent 客户端 429、但应用内测试 200 | 客户端自带的 system 提示缺少官方 `<env>` 块。确认运行的是包含 `ensureEnv` 修复的 sidecar；旧版只在「没有 system 消息」时注入 |
 | 全部 429 且节点池像没生效 | sidecar 进程环境不能有 `NO_PROXY=*`：Bun fetch 会因此忽略 `X-Oc2a-Proxy`，实际直连上游。应为 `NO_PROXY=127.0.0.1,localhost`（代码已内置，见 `freeSidecarEnv`） |
 | 503 `sidecar_unavailable` | sidecar 被误杀/未启动：设置页点「重启 Sidecar」 |
 | 503 `no_healthy_node` | 实例 `/api/admin/pool/health`；节点是否被 429 打进 `bad_quota` |

@@ -153,16 +153,37 @@ const ENV_PROMPT = [
   "</env>",
 ].join("\n")
 
+// 上游免费层要求 system 提示里带官方环境块；缺了会被判成非官方客户端并回
+// 429 FreeUsageLimitError。客户端自带 system 提示时也要把环境块并进去，
+// 不能只在“没有 system 消息”时注入（dsh/Codex 等 agent 客户端都会自带）。
+function hasEnvBlock(s) {
+  return typeof s === "string" && s.includes("<env>") && s.includes("Working directory:")
+}
+
+function withEnvPrompt(s) {
+  const cur = typeof s === "string" ? s : ""
+  if (hasEnvBlock(cur)) return cur
+  return cur.trim() === "" ? ENV_PROMPT : ENV_PROMPT + "\n\n" + cur
+}
+
 function ensureEnv(body, flat) {
   if (flat) {
-    if (typeof body.instructions !== "string" || body.instructions.trim() === "") {
-      body.instructions = ENV_PROMPT
-    }
+    body.instructions = withEnvPrompt(body.instructions)
     return
   }
   const msgs = Array.isArray(body.messages) ? body.messages : []
-  const hasSystem = msgs.some((m) => m && (m.role === "system" || m.role === "developer"))
-  if (!hasSystem) msgs.unshift({ role: "system", content: ENV_PROMPT })
+  const sys = msgs.find((m) => m && (m.role === "system" || m.role === "developer"))
+  if (!sys) {
+    msgs.unshift({ role: "system", content: ENV_PROMPT })
+    body.messages = msgs
+    return
+  }
+  if (Array.isArray(sys.content)) {
+    const has = sys.content.some((p) => p && typeof p.text === "string" && hasEnvBlock(p.text))
+    if (!has) sys.content = [{ type: "text", text: ENV_PROMPT }, ...sys.content]
+  } else {
+    sys.content = withEnvPrompt(sys.content)
+  }
   body.messages = msgs
 }
 

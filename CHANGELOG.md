@@ -1,5 +1,14 @@
 # Changelog
 
+## v1.8.1（2026-10-26，正式版）
+
+### 免费层 429 修复
+
+- **自定义 system 提示**：sidecar 的 `ensureEnv` 改为无条件保证官方 `<env>` 环境块存在；客户端（dsh/Codex 等 agent）自带 system 提示时前置拼接，不再因缺少环境块被上游判为非官方客户端而回 429 `FreeUsageLimitError`。
+- **不重复注入**：已含 `<env>` + `Working directory:` 的请求保持原样，避免多轮累积。
+- **测试**：新增 4 条 sidecar 单测（自定义 system / content parts / responses instructions / 去重），`bun test sidecar/` 9 pass。
+- 文档补充免费层 system 门禁说明与排障条目。
+
 ## v1.8.0（2026-10-26，正式版）
 
 ### OpenCode 免费层恢复
