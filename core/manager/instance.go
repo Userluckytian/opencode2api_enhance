@@ -5,6 +5,7 @@ package manager
 import (
 	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"time"
@@ -99,9 +100,22 @@ func (m *Manager) startInstanceLockFree(runner Runner, inst *Instance) error {
 	if err := os.MkdirAll(filepath.Join(dir, "logs"), 0o755); err != nil {
 		return fmt.Errorf("创建实例目录失败: %w", err)
 	}
-	sbCfg, err := sf.BuildSingbox(node, inst.SingboxPort)
+	// 链式代理：目标组命中 chain_groups 时先解析前置（自动检测整条链并缓存）。
+	front, chained, err := m.resolveFrontNode(node, true)
+	if err != nil {
+		return fmt.Errorf("链式代理前置节点不可用: %w", err)
+	}
+	var sbCfg []byte
+	if chained && sf.BuildSingboxChained != nil {
+		sbCfg, err = sf.BuildSingboxChained(node, front, inst.SingboxPort)
+	} else {
+		sbCfg, err = sf.BuildSingbox(node, inst.SingboxPort)
+	}
 	if err != nil {
 		return fmt.Errorf("生成 sing-box 配置失败: %w", err)
+	}
+	if chained {
+		slog.Info("instance chain enabled", "instance", inst.Name, "target", node.Name, "front", front.Name)
 	}
 	if err := os.WriteFile(filepath.Join(dir, "singbox.json"), sbCfg, 0o644); err != nil {
 		return fmt.Errorf("写入 sing-box 配置失败: %w", err)

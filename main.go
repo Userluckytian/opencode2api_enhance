@@ -190,8 +190,9 @@ func main() {
 		BuildSingbox: func(node manager.ClashNode, port uint16) ([]byte, error) {
 			return manager.BuildSingboxConfigFor(node, port)
 		},
-		BuildOpenCfg: managerInst.BuildOpenCodeCfgFor,
-		ListNodes:    managerInst.ListNodesWithGroup,
+		BuildSingboxChained: manager.BuildSingboxConfigForChain,
+		BuildOpenCfg:        managerInst.BuildOpenCodeCfgFor,
+		ListNodes:           managerInst.ListNodesWithGroup,
 	})
 
 	// 免费层 sidecar：OpenCode 免费层校验客户端 TLS 指纹，Go 标准 TLS 会被 429；
@@ -361,6 +362,7 @@ func registerHTTPRoutes(mux *http.ServeMux, managerInst *manager.Manager, plugin
 	mux.HandleFunc("/api/admin/free-sidecar/status", loggingMiddleware(requireAuth(managerInst.FreeSidecarStatusHandler())))
 	mux.HandleFunc("/api/admin/free-sidecar/check", loggingMiddleware(requireAuth(managerInst.FreeSidecarCheckHandler())))
 	mux.HandleFunc("/api/admin/free-sidecar/restart", loggingMiddleware(requireAuth(managerInst.FreeSidecarRestartHandler())))
+	mux.HandleFunc("/api/admin/chain/check", loggingMiddleware(requireAuth(managerInst.ChainCheckHandler())))
 	// T3: 订阅源列表管理（新增/删除/立即拉取）+ 列表查看。
 	mux.HandleFunc("/api/admin/subscriptions", loggingMiddleware(requireAuth(managerInst.SubscriptionsListHandler())))
 	mux.HandleFunc("/api/admin/subscriptions/count", loggingMiddleware(requireAuth(managerInst.SubscriptionsCountHandler())))

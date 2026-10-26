@@ -14,6 +14,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 )
 
 // writeJSON 统一 JSON 输出。
@@ -70,6 +71,23 @@ func (m *Manager) ConfigSetHandler() http.HandlerFunc {
 			return
 		}
 		writeJSON(w, map[string]any{"status": "ok", "key": req.Key})
+	}
+}
+
+// ChainCheckHandler POST {node}：检测目标节点经前置组的整条链。
+func (m *Manager) ChainCheckHandler() http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if !requireMethod(w, r, http.MethodPost) {
+			return
+		}
+		var req struct {
+			Node string `json:"node"`
+		}
+		if json.NewDecoder(r.Body).Decode(&req) != nil || strings.TrimSpace(req.Node) == "" {
+			writeErr(w, http.StatusBadRequest, "请求体需含 node")
+			return
+		}
+		writeJSON(w, m.CheckChain(strings.TrimSpace(req.Node)))
 	}
 }
 

@@ -63,6 +63,7 @@ type ProbeResult struct {
 	StatusCode int    `json:"status_code,omitempty"`
 	ModelCount *int   `json:"model_count,omitempty"`
 	Message    string `json:"message,omitempty"`
+	FrontNode  string `json:"front_node,omitempty"`
 	LatencyMS  int64  `json:"latency_ms"`
 }
 

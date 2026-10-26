@@ -104,6 +104,15 @@ type Config struct {
 	// 关闭或 sidecar 缺失时回退现有直连/代理池行为。
 	FreeSidecarEnabled *bool `json:"free_sidecar_enabled,omitempty"`
 
+	// 链式代理（前置节点）：本地直连被阻断的节点经可达前置节点中转。
+	// ChainEnabled 总开关（nil = 关闭）；ChainGroups 需要链式的目标组（空 = 所有组）；
+	// FrontGroup 前置候选组；FrontNode 手动前置（优先）；ChainAutoDetect 自动探测整条链。
+	ChainEnabled    *bool    `json:"chain_enabled,omitempty"`
+	ChainGroups     []string `json:"chain_groups,omitempty"`
+	FrontGroup      string   `json:"front_group,omitempty"`
+	FrontNode       string   `json:"front_node,omitempty"`
+	ChainAutoDetect *bool    `json:"chain_auto_detect,omitempty"`
+
 	// 端口配置（0 = 未设置，按 env > config > 编译默认 三源读取）：
 	// 供 headless/Web 直跑与自定义部署使用；桌面壳经环境变量按槽位表注入（优先于 config）。
 	GatewayPort      uint16 `json:"gateway_port,omitempty"`
@@ -430,6 +439,16 @@ func (m *Manager) ConfigGet(key string) (string, error) {
 		return strconv.Itoa(m.freeSidecarPort()), nil
 	case "free_sidecar_enabled":
 		return strconv.FormatBool(freeSidecarEnabled(cfg)), nil
+	case "chain_enabled":
+		return strconv.FormatBool(chainEnabled(cfg)), nil
+	case "chain_groups":
+		return strings.Join(cfg.ChainGroups, ","), nil
+	case "front_group":
+		return cfg.FrontGroup, nil
+	case "front_node":
+		return cfg.FrontNode, nil
+	case "chain_auto_detect":
+		return strconv.FormatBool(chainAutoDetect(cfg)), nil
 	default:
 		return "", fmt.Errorf("Unknown config key: %s", key)
 	}
@@ -800,6 +819,35 @@ func (m *Manager) ConfigSet(key, value string) error {
 			return fmt.Errorf("invalid boolean for free_sidecar_enabled: %s", value)
 		}
 		cfg.FreeSidecarEnabled = &b
+	case "chain_enabled":
+		b, err := strconv.ParseBool(value)
+		if err != nil {
+			return fmt.Errorf("invalid boolean for chain_enabled: %s", value)
+		}
+		cfg.ChainEnabled = &b
+		m.invalidateChainCache()
+	case "chain_groups":
+		var groups []string
+		for _, g := range strings.Split(value, ",") {
+			if g = strings.TrimSpace(g); g != "" {
+				groups = append(groups, g)
+			}
+		}
+		cfg.ChainGroups = groups
+		m.invalidateChainCache()
+	case "front_group":
+		cfg.FrontGroup = strings.TrimSpace(value)
+		m.invalidateChainCache()
+	case "front_node":
+		cfg.FrontNode = strings.TrimSpace(value)
+		m.invalidateChainCache()
+	case "chain_auto_detect":
+		b, err := strconv.ParseBool(value)
+		if err != nil {
+			return fmt.Errorf("invalid boolean for chain_auto_detect: %s", value)
+		}
+		cfg.ChainAutoDetect = &b
+		m.invalidateChainCache()
 	default:
 		return errors.New("Unknown config key: " + key)
 	}
@@ -888,6 +936,12 @@ type ConfigView struct {
 	// 免费层 Bun sidecar
 	FreeSidecarPort    int  `json:"free_sidecar_port"`
 	FreeSidecarEnabled bool `json:"free_sidecar_enabled"`
+	// 链式代理（前置节点）
+	ChainEnabled    bool     `json:"chain_enabled"`
+	ChainGroups     []string `json:"chain_groups"`
+	FrontGroup      string   `json:"front_group"`
+	FrontNode       string   `json:"front_node"`
+	ChainAutoDetect bool     `json:"chain_auto_detect"`
 	// 统一网关监听端口（0 = 未设置，用环境槽位/默认 40080）
 	GatewayPort uint16 `json:"gateway_port"`
 }
@@ -952,6 +1006,11 @@ func (m *Manager) ConfigViewOf() ConfigView {
 		GatewayKey:              maskSecret(cfg.GatewayKey),
 		FreeSidecarPort:         m.freeSidecarPort(),
 		FreeSidecarEnabled:      freeSidecarEnabled(cfg),
+		ChainEnabled:            chainEnabled(cfg),
+		ChainGroups:             cfg.ChainGroups,
+		FrontGroup:              cfg.FrontGroup,
+		FrontNode:               cfg.FrontNode,
+		ChainAutoDetect:         chainAutoDetect(cfg),
 		GatewayPort:             cfg.GatewayPort,
 	}
 }

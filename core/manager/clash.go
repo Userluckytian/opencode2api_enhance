@@ -57,6 +57,8 @@ type SeamFuncs struct {
 	ResolveNode func(name string) (ClashNode, bool)
 	// BuildSingbox 生成 sing-box 配置（P4-3 singbox.go 填）。
 	BuildSingbox func(node ClashNode, listenPort uint16) ([]byte, error)
+	// BuildSingboxChained 生成链式 sing-box 配置（目标经前置中转；可选）。
+	BuildSingboxChained func(node, front ClashNode, listenPort uint16) ([]byte, error)
 	// BuildOpenCfg 生成实例 opencode2api.json（opencode_cfg.go 填）。
 	BuildOpenCfg func(singboxPort uint16) ([]byte, error)
 	// ListNodes 全量节点列表（P4-3 clash.go 填，探针用）。

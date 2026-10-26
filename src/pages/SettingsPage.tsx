@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from 'react'
 import clsx from 'clsx'
 import { Loader2, RefreshCw, Search, Settings, Trash2 } from 'lucide-react'
 import { api, type OrphanProcess } from '../lib/api'
-import type { ConfigView, BinariesInfo, FreeSidecarStatus, FreeSidecarCheck } from '../lib/api'
+import type { ConfigView, BinariesInfo, FreeSidecarStatus, FreeSidecarCheck, ChainCheckResult } from '../lib/api'
 import { isDesktop } from '../lib/env'
 import type { UpdateInfo } from '../lib/updates'
 
@@ -57,6 +57,17 @@ export default function SettingsPage({
   const [sidecarBusy, setSidecarBusy] = useState(false)
   const [sidecarError, setSidecarError] = useState('')
 
+  // 链式代理（前置节点）
+  const [chainEnabled, setChainEnabled] = useState(false)
+  const [chainGroups, setChainGroups] = useState('')
+  const [frontGroup, setFrontGroup] = useState('')
+  const [frontNode, setFrontNode] = useState('')
+  const [chainAutoDetect, setChainAutoDetect] = useState(true)
+  const [chainBusy, setChainBusy] = useState(false)
+  const [chainError, setChainError] = useState('')
+  const [chainCheckNode, setChainCheckNode] = useState('')
+  const [chainResult, setChainResult] = useState<ChainCheckResult | null>(null)
+
 
   // G31/L10: toast 用 ref 封装（App 的 showToast 每次渲染重建）——effect 固定只跑一次，
   // 不因 toast 变化重发 3 个请求，也不会把服务器旧值覆盖回未保存的表单输入
@@ -87,6 +98,11 @@ export default function SettingsPage({
       .then((cfg) => {
         setClashUrl(cfg.clash_external_url)
         setOcVersion(cfg.opencode_client_version || '')
+        setChainEnabled(cfg.chain_enabled)
+        setChainGroups((cfg.chain_groups || []).join(','))
+        setFrontGroup(cfg.front_group || '')
+        setFrontNode(cfg.front_node || '')
+        setChainAutoDetect(cfg.chain_auto_detect)
       })
       .catch(() => {})
   }, [])
@@ -256,6 +272,44 @@ export default function SettingsPage({
       toast('重启免费层 sidecar 失败', false)
     } finally {
       setSidecarBusy(false)
+    }
+  }
+
+  const saveChainConfig = async () => {
+    setChainBusy(true)
+    setChainError('')
+    try {
+      await api.configSet('chain_enabled', String(chainEnabled))
+      await api.configSet('chain_groups', chainGroups)
+      await api.configSet('front_group', frontGroup)
+      await api.configSet('front_node', frontNode)
+      await api.configSet('chain_auto_detect', String(chainAutoDetect))
+      toast('链式代理配置已保存', true)
+      const cfg = await api.configGet()
+      setConfig(cfg)
+    } catch (e) {
+      setChainError(String(e))
+      toast('保存链式代理配置失败', false)
+    } finally {
+      setChainBusy(false)
+    }
+  }
+
+  const runChainCheck = async () => {
+    if (!chainCheckNode.trim()) {
+      setChainError('请输入要检测的目标节点名')
+      return
+    }
+    setChainBusy(true)
+    setChainError('')
+    setChainResult(null)
+    try {
+      setChainResult(await api.chainCheck(chainCheckNode.trim()))
+    } catch (e) {
+      setChainError(String(e))
+      toast('链路检测失败', false)
+    } finally {
+      setChainBusy(false)
     }
   }
 
@@ -473,6 +527,97 @@ export default function SettingsPage({
 
         <p className="text-zinc-400 text-[11px]">
           修改端口/开关后点击「重启 Sidecar」生效；运行中的实例/网关需在实例池页重启后才会拿到新地址。
+        </p>
+      </div>
+
+      {/* 链式代理（前置节点） */}
+      <div className="bg-white rounded-2xl border p-5 space-y-4">
+        <div>
+          <h2 className="text-lg font-semibold text-zinc-900">链式代理（前置节点）</h2>
+          <p className="text-zinc-500 text-xs">
+            本地直连被阻断的目标组，经一个可达的前置组节点中转：本地 → 前置 → 目标 → 上游。
+            自动检测会实际验证整条链（请求 opencode.ai 模型目录），只验证链路，不消耗免费 chat 额度。
+          </p>
+        </div>
+
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-3 text-[13px]">
+          <label className="flex items-center gap-2">
+            <input type="checkbox" checked={chainEnabled} onChange={(e) => setChainEnabled(e.target.checked)} />
+            <span className="text-zinc-700">启用链式代理</span>
+          </label>
+          <label className="flex items-center gap-2">
+            <input type="checkbox" checked={chainAutoDetect} onChange={(e) => setChainAutoDetect(e.target.checked)} />
+            <span className="text-zinc-700">自动检测（推荐）</span>
+          </label>
+          <label className="space-y-1">
+            <span className="text-zinc-500">目标组（逗号分隔；空 = 所有组）</span>
+            <input
+              value={chainGroups}
+              onChange={(e) => setChainGroups(e.target.value)}
+              placeholder="Falemon-NQIJHTF.yaml"
+              className="w-full rounded-lg border border-zinc-300 px-3 py-2"
+            />
+          </label>
+          <label className="space-y-1">
+            <span className="text-zinc-500">前置组</span>
+            <input
+              value={frontGroup}
+              onChange={(e) => setFrontGroup(e.target.value)}
+              placeholder="merged.yaml"
+              className="w-full rounded-lg border border-zinc-300 px-3 py-2"
+            />
+          </label>
+          <label className="space-y-1 md:col-span-2">
+            <span className="text-zinc-500">手动前置节点（留空 = 自动从前置组选择）</span>
+            <input
+              value={frontNode}
+              onChange={(e) => setFrontNode(e.target.value)}
+              placeholder="晚高峰 | node1.touf.shop (216.36.105.42)"
+              className="w-full rounded-lg border border-zinc-300 px-3 py-2"
+            />
+          </label>
+        </div>
+
+        <div className="flex flex-wrap items-center gap-2">
+          <button
+            onClick={() => void saveChainConfig()}
+            disabled={chainBusy}
+            className="bg-zinc-900 text-white rounded-lg px-4 py-2 text-[13px] hover:bg-zinc-700 disabled:cursor-not-allowed disabled:opacity-60"
+          >
+            {chainBusy ? '处理中…' : '保存链式配置'}
+          </button>
+          <input
+            value={chainCheckNode}
+            onChange={(e) => setChainCheckNode(e.target.value)}
+            placeholder="输入目标节点名检测整条链"
+            className="flex-1 min-w-[220px] rounded-lg border border-zinc-300 px-3 py-2 text-[13px]"
+          />
+          <button
+            onClick={() => void runChainCheck()}
+            disabled={chainBusy}
+            className="flex items-center gap-1.5 px-3 py-2 rounded-lg border border-zinc-300 text-[13px] hover:bg-zinc-100 disabled:cursor-not-allowed disabled:opacity-50"
+          >
+            {chainBusy ? <Loader2 size={14} className="animate-spin" /> : <Search size={14} />}
+            检测链路
+          </button>
+        </div>
+
+        {chainError && <p className="text-red-600 text-xs break-all">{chainError}</p>}
+        {chainResult && (
+          <div
+            className={clsx(
+              'rounded-lg border px-3 py-2 text-[13px]',
+              chainResult.ok ? 'border-green-200 bg-green-50 text-green-700' : 'border-red-200 bg-red-50 text-red-700',
+            )}
+          >
+            {chainResult.ok
+              ? `链路可用：前置 ${chainResult.front}，耗时 ${chainResult.latency_ms ?? '?'}ms`
+              : `链路不可用：${chainResult.error || '未知错误'}`}
+          </div>
+        )}
+
+        <p className="text-zinc-400 text-[11px]">
+          保存后，新启动/重启的实例会按配置生成链式 sing-box；扫描也会对命中目标组的节点走前置。自动检测结果缓存 10 分钟。
         </p>
       </div>
 

@@ -1473,8 +1473,12 @@ function badgeNode(r?: ProbeResult) {
   }
   const [cl, label] = map[r.category] || ['bg-zinc-100 text-zinc-500', r.category]
   return (
-    <span className={clsx('inline-block shrink-0 px-2 py-0.5 rounded-full text-[11px] font-medium', cl)}>
+    <span
+      className={clsx('inline-block shrink-0 px-2 py-0.5 rounded-full text-[11px] font-medium', cl)}
+      title={r.front_node ? `经前置: ${r.front_node}` : undefined}
+    >
       {label}
+      {r.front_node ? ' 链' : ''}
       {r.latency_ms > 0 ? ` ${r.latency_ms}ms` : ''}
     </span>
   )

@@ -30,6 +30,40 @@ func buildSingboxConfig(node ClashNode, listenPort uint16) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
+	return singboxConfigJSON(listenPort, []any{
+		outbound,
+		map[string]any{"type": "direct", "tag": "direct"},
+	})
+}
+
+// buildSingboxConfigWithFront 生成链式配置：目标出站经 front 出站中转
+// （sing-box outbound.detour）。用于本地直连被阻断、但可经另一节点到达的目标。
+func buildSingboxConfigWithFront(node, front ClashNode, listenPort uint16) ([]byte, error) {
+	if front.Server == "" || front.Port == 0 {
+		return nil, errors.New("前置节点缺少 server/port")
+	}
+	if node.Server == front.Server && node.Port == front.Port {
+		return nil, errors.New("前置节点不能是目标节点本身")
+	}
+	target, err := singboxOutbound(node)
+	if err != nil {
+		return nil, err
+	}
+	frontOut, err := singboxOutbound(front)
+	if err != nil {
+		return nil, fmt.Errorf("前置节点配置失败: %w", err)
+	}
+	frontOut["tag"] = "front"
+	target["detour"] = "front"
+	return singboxConfigJSON(listenPort, []any{
+		frontOut,
+		target,
+		map[string]any{"type": "direct", "tag": "direct"},
+	})
+}
+
+// singboxConfigJSON 组装入站/DNS/路由（单出站与链式出站共用）。
+func singboxConfigJSON(listenPort uint16, outbounds []any) ([]byte, error) {
 	inbounds := []any{
 		map[string]any{"type": "socks", "listen": "127.0.0.1", "listen_port": listenPort},
 	}
@@ -39,12 +73,9 @@ func buildSingboxConfig(node ClashNode, listenPort uint16) ([]byte, error) {
 		inbounds = append(inbounds, map[string]any{"type": "http", "listen": "127.0.0.1", "listen_port": httpPort})
 	}
 	cfg := map[string]any{
-		"log":      map[string]any{"level": "warn", "timestamp": true},
-		"inbounds": inbounds,
-		"outbounds": []any{
-			outbound,
-			map[string]any{"type": "direct", "tag": "direct"},
-		},
+		"log":       map[string]any{"level": "warn", "timestamp": true},
+		"inbounds":  inbounds,
+		"outbounds": outbounds,
 		// DoH 解析目标/节点域名，绕过被劫持的系统 DNS（Clash TUN fake-ip 等）。
 		// 多服务器冗余 + 直连出站（不套代理，避免 DNS 依赖代理先解析的鸡生蛋问题）。
 		"dns": map[string]any{
@@ -70,6 +101,11 @@ func buildSingboxConfig(node ClashNode, listenPort uint16) ([]byte, error) {
 // BuildSingboxConfigFor 导出包装（main 装配实例接缝用）。
 func BuildSingboxConfigFor(node ClashNode, listenPort uint16) ([]byte, error) {
 	return buildSingboxConfig(node, listenPort)
+}
+
+// BuildSingboxConfigForChain 导出包装（链式出站；main 装配实例接缝用）。
+func BuildSingboxConfigForChain(node, front ClashNode, listenPort uint16) ([]byte, error) {
+	return buildSingboxConfigWithFront(node, front, listenPort)
 }
 
 // parseBandwidthMbps 将 Clash hysteria2 的带宽字段解析为 Mbps 数值（Rust singbox.rs 移植）。

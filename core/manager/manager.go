@@ -98,6 +98,10 @@ type Manager struct {
 	// onURLChanged 由 main 注入：sidecar URL 变化后写回根配置并热应用。
 	onURLChanged func(string)
 
+	// 链式代理（前置节点）自动检测缓存：目标节点名 → 选中的前置节点。
+	chainMu    sync.Mutex
+	chainCache map[string]chainCacheEntry
+
 	// poolProbeMu 串行化链路探活轮（后台循环与手动触发互斥执行），防止并发
 	// load+save pool_quality.json；配合 savePoolQuality 临时文件+Rename 原子落盘。
 	poolProbeMu sync.Mutex

@@ -22,7 +22,21 @@ func (c *ScanController) probeNode(worker int, opts ScanOptions, node ClashNode,
 	deadline := time.Now().Add(budget)
 	password := c.m.effectiveDefaultPassword()
 
-	sbCfg, err := buildSingboxConfig(node, pair.socks)
+	// 链式代理：扫描时优先使用手动/缓存/首个候选（12s 预算内不做完整自动探测）。
+	front, chained, ferr := c.m.resolveFrontNode(node, false)
+	if ferr != nil {
+		base.Category = "config"
+		base.Message = "链式前置不可用: " + ferr.Error()
+		return base
+	}
+	var sbCfg []byte
+	var err error
+	if chained {
+		sbCfg, err = buildSingboxConfigWithFront(node, front, pair.socks)
+		base.FrontNode = front.Name
+	} else {
+		sbCfg, err = buildSingboxConfig(node, pair.socks)
+	}
 	if err != nil {
 		base.Category = "config"
 		base.Message = err.Error()

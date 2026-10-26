@@ -253,6 +253,8 @@ export type ProbeResult = {
   status_code: number | null
   model_count: number | null
   message: string
+  /** 链式代理：本次扫描使用的前置节点（空 = 直连） */
+  front_node?: string
   latency_ms: number
 }
 
@@ -305,6 +307,12 @@ export type ConfigView = {
   /** 免费层 Bun sidecar 端口 / 开关 */
   free_sidecar_port: number
   free_sidecar_enabled: boolean
+  /** 链式代理（前置节点） */
+  chain_enabled: boolean
+  chain_groups: string[]
+  front_group: string
+  front_node: string
+  chain_auto_detect: boolean
   /** 实例池链路探活（P1） */
   pool_probe_interval_sec: number
   pool_probe_timeout_sec: number
@@ -349,6 +357,15 @@ export type FreeSidecarCheck = {
   name: string
   ok: boolean
   detail: string
+}
+
+/** 链式代理检测结果（设置页「检测链路」） */
+export type ChainCheckResult = {
+  target: string
+  front?: string
+  ok: boolean
+  latency_ms?: number
+  error?: string
 }
 
 // ─── 全流程调用日志 ─────────────────────────────────────────────
@@ -835,6 +852,8 @@ export const api = {
   freeSidecarStatus: () => req<FreeSidecarStatus>('GET', '/free-sidecar/status'),
   freeSidecarCheck: () => req<FreeSidecarCheck[]>('GET', '/free-sidecar/check'),
   freeSidecarRestart: () => req<FreeSidecarStatus>('POST', '/free-sidecar/restart'),
+  // 链式代理：检测目标节点经前置组的整条链
+  chainCheck: (node: string) => req<ChainCheckResult>('POST', '/chain/check', { node }),
   // auto 虚拟模型：GET 当前配置 / POST 保存即传播子进程（热生效，无需重启）
   autoModelGet: () => req<AutoModelConfig>('GET', '/auto-model'),
   autoModelSave: (cfg: AutoModelConfig) => req<{ status: string; config: AutoModelConfig }>('POST', '/auto-model', cfg),
