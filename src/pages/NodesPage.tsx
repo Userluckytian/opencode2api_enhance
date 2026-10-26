@@ -87,6 +87,8 @@ export default function NodesPage({
   const [chainError, setChainError] = useState('')
   const [chainCheckNode, setChainCheckNode] = useState('')
   const [chainResult, setChainResult] = useState<ChainCheckResult | null>(null)
+  // 一键探测范围：选中的分组（空 = 全部节点）
+  const [planGroups, setPlanGroups] = useState<string[]>([])
 
   // T3: 订阅源列表管理（多条订阅：新增/删除/立即拉取）
   const [subs, setSubs] = useState<SubscriptionSource[]>([])
@@ -669,18 +671,24 @@ export default function NodesPage({
       toast('节点池为空', false)
       return
     }
-    if (!window.confirm(`将对 ${nodes.length} 个节点执行「直连 → 失败后自动选前置」探测，耗时较长，继续？`)) return
+    const pool = planGroups.length > 0 ? nodes.filter((n) => planGroups.includes(n.group || '')) : nodes
+    if (pool.length === 0) {
+      toast('所选分组没有节点', false)
+      return
+    }
+    const scope = planGroups.length > 0 ? planGroups.map((g) => g || '未分组').join('、') : '全部节点'
+    if (!window.confirm(`将对 ${pool.length} 个节点（${scope}）执行「直连 → 失败后自动选前置」探测，耗时较长，继续？`)) return
     setScanPhase('scanning')
     try {
       const p = await api.scanStart({
-        nodes: nodes.map((n) => n.name),
+        nodes: pool.map((n) => n.name),
         timeout: 20,
         chain: 'auto',
         concurrency: scanConf.scan_concurrency,
       })
       setScan(p)
       onTask({ id: 'scan', type: 'scan', title: '一键探测节点', done: p.current, total: p.total, busy: true })
-      toast(`开始一键探测 ${nodes.length} 个节点…`)
+      toast(`开始一键探测 ${pool.length} 个节点…`)
     } catch (e) {
       setScanPhase('idle')
       toast(String(e), false)
@@ -717,6 +725,20 @@ export default function NodesPage({
   }
 
   // 一键探测结果汇总（基于当前 scan.results）
+  // 节点分组清单（一键探测范围多选）
+  const nodeGroups = useMemo(() => {
+    const counts = new Map<string, number>()
+    for (const n of nodes) {
+      const g = n.group || ''
+      counts.set(g, (counts.get(g) || 0) + 1)
+    }
+    return [...counts.entries()].sort((a, b) => a[0].localeCompare(b[0]))
+  }, [nodes])
+
+  const togglePlanGroup = (g: string) => {
+    setPlanGroups((prev) => (prev.includes(g) ? prev.filter((x) => x !== g) : [...prev, g]))
+  }
+
   const chainPlan = useMemo(() => {
     const rs = scan?.results ?? []
     return {
@@ -1213,6 +1235,44 @@ export default function NodesPage({
                         className="w-full rounded-lg border border-zinc-300 px-3 py-2"
                       />
                     </label>
+                    <div className="md:col-span-2 space-y-1">
+                      <div className="flex items-center justify-between">
+                        <span className="text-zinc-500">探测范围（分组可多选；不选 = 全部节点）</span>
+                        <div className="flex gap-2 text-[11px]">
+                          <button
+                            type="button"
+                            onClick={() => setPlanGroups(nodeGroups.map(([g]) => g))}
+                            className="text-teal-700 hover:underline"
+                          >
+                            全选
+                          </button>
+                          <button type="button" onClick={() => setPlanGroups([])} className="text-zinc-500 hover:underline">
+                            清空
+                          </button>
+                        </div>
+                      </div>
+                      <div className="flex flex-wrap gap-1.5 max-h-28 overflow-y-auto border border-zinc-200 rounded-lg p-2">
+                        {nodeGroups.map(([g, count]) => {
+                          const active = planGroups.includes(g)
+                          return (
+                            <button
+                              key={g || '__none'}
+                              type="button"
+                              onClick={() => togglePlanGroup(g)}
+                              className={clsx(
+                                'px-2 py-1 rounded-full border text-[11px] transition-colors',
+                                active
+                                  ? 'bg-teal-50 border-teal-300 text-teal-700'
+                                  : 'bg-white border-zinc-200 text-zinc-600 hover:bg-zinc-50',
+                              )}
+                              title={g || '未分组'}
+                            >
+                              {g || '未分组'} <span className="text-zinc-400">{count}</span>
+                            </button>
+                          )
+                        })}
+                      </div>
+                    </div>
                     {frontCandidates && (
                       <div className="md:col-span-2 text-[11px] text-zinc-400 break-all">
                         自动前置候选（上次探测/规划）：{frontCandidates}
@@ -1234,7 +1294,7 @@ export default function NodesPage({
                       className="flex items-center gap-1.5 px-3 py-2 rounded-lg border border-zinc-300 text-[13px] hover:bg-zinc-100 disabled:cursor-not-allowed disabled:opacity-50"
                     >
                       <Radar size={14} />
-                      一键探测（全部节点）
+                      一键探测{planGroups.length > 0 ? `（${planGroups.length} 个分组）` : '（全部节点）'}
                     </button>
                   </div>
 
