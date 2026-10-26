@@ -1,5 +1,32 @@
 # Changelog
 
+## v1.8.0（2026-10-26，正式版）
+
+### OpenCode 免费层恢复
+
+- **Bun sidecar**：新增免费层 Bun sidecar，用与官方 CLI 一致的 TLS 指纹发送免费请求，修复 Go/curl/Node 被上游 429 `FreeUsageLimitError` 的问题。
+- **节点路由修复**：修复 `NO_PROXY=*` 导致 Bun fetch 忽略 `X-Oc2a-Proxy`、sidecar 直连上游、节点池失效的问题；改为仅回环 bypass，并补回归单测。
+- **实例/网关接入**：Go TierFree 请求转发 sidecar；sing-box 同时提供 SOCKS 与 HTTP inbound；管理器负责 sidecar 生命周期、健康检查和配置回写。
+- **设置页**：Sidecar 状态并入「关于」卡片，只保留 `opencode2api.exe` / `sing-box.exe` / `free-sidecar.exe` 三个状态行。
+
+### 链式代理（前置节点）
+
+- **自动前置**：目标节点直连失败时，自动从全部节点中选择可达前置，经 `sing-box detour` 中转；出口仍是目标节点。
+- **一键探测/规划**：节点池设置新增一键探测，先直连、失败后自动经前置重试；汇总直连可用 / 链式可用 / 额度 429 / 不可用。
+- **分组多选**：一键探测支持选择一个或多个分组；不选 = 全部节点。
+- **按节点应用计划**：直连可用节点写入前置候选，链式可用节点写入 `chain_nodes`，直连可用目标保持直连。
+- **手动指定**：支持手动指定前置节点；自动检测结果缓存 10 分钟。
+
+### 统一错误文案
+
+- 节点扫描与实例测试共用 `classifyProbeOutcome` 分类/文案（ok / rate_limit / upstream / timeout / other）。
+- `TestResult` 增加 `category`；实例池/独享测试使用共享徽章，一处修改两处生效。
+
+### 诊断与文档
+
+- 记录 edgetunnel 分组 Cloudflare WebSocket 403 诊断（443/2053/8443 全中，mihomo 同样失败）。
+- 补充 `docs/FREE-SIDECAR.md` 与链式代理阶段计划/验收记录。
+
 ## v1.7.10-beta.2（2026-10-23，Beta）
 
 ### 更新弹窗修复
