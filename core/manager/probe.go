@@ -92,6 +92,11 @@ type ScanOptions struct {
 	SocksPort   uint16   // 0 = 默认 29000
 	TimeoutSec  int      // 单节点预算；<3 按 3
 	Concurrency int      // 默认 8，上限 8
+	// ChainMode 扫描时的链式策略：
+	//   ""/"config" = 按 chain_enabled/chain_nodes/chain_groups 配置（默认）
+	//   "off"       = 强制直连
+	//   "auto"      = 先直连，失败后自动经前置重试（一键探测/规划）
+	ChainMode string
 }
 
 // probeProcs 一个 worker 当前正在探测的探针进程对（V1 停止中断用）。

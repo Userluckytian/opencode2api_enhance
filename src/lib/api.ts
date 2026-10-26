@@ -310,6 +310,7 @@ export type ConfigView = {
   /** 链式代理（前置节点） */
   chain_enabled: boolean
   chain_groups: string[]
+  chain_nodes: string[]
   front_group: string
   front_node: string
   chain_auto_detect: boolean
@@ -834,6 +835,8 @@ export const api = {
     timeout?: number
     /** 并发 worker 数（可选，默认后端 8） */
     concurrency?: number
+    /** 链式策略：config（默认）/ off（强制直连）/ auto（直连失败后自动经前置） */
+    chain?: 'config' | 'off' | 'auto'
   }) =>
     req<ScanProgress>('POST', '/scan/start', {
       nodes: opts?.nodes ?? undefined,
@@ -841,6 +844,7 @@ export const api = {
       socksPort: opts?.socksPort ?? undefined,
       timeout: opts?.timeout ?? undefined,
       concurrency: opts?.concurrency ?? undefined,
+      chain: opts?.chain ?? undefined,
     }),
   scanStatus: () => req<ScanProgress>('GET', '/scan/status'),
   scanStop: () => req<ScanProgress>('POST', '/scan/stop'),

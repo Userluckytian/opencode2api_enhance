@@ -64,6 +64,29 @@ func chainGroupMatch(cfg Config, group string) bool {
 	return false
 }
 
+// chainTargetMatch 判断具体节点是否需要链式代理：
+// chain_nodes 白名单优先；未配置白名单时再看 chain_groups（空 = 所有组）。
+func chainTargetMatch(cfg Config, target ClashNode) bool {
+	if !chainEnabled(cfg) {
+		return false
+	}
+	for _, n := range cfg.ChainNodes {
+		if strings.TrimSpace(n) == target.Name {
+			return true
+		}
+	}
+	if len(cfg.ChainGroups) == 0 {
+		// 有节点白名单时不再“默认所有组”，否则一键规划会把直连可用节点也套上链。
+		return len(cfg.ChainNodes) == 0
+	}
+	for _, g := range cfg.ChainGroups {
+		if strings.TrimSpace(g) == target.Group {
+			return true
+		}
+	}
+	return false
+}
+
 func (m *Manager) cachedFront(target string) (string, bool) {
 	m.chainMu.Lock()
 	defer m.chainMu.Unlock()
@@ -143,7 +166,7 @@ func (m *Manager) frontCandidates(cfg Config, target ClashNode) ([]ClashNode, er
 // 返回 chained=false 表示目标组未启用链式代理。
 func (m *Manager) resolveFrontNode(target ClashNode, autoDetect bool) (ClashNode, bool, error) {
 	cfg := m.loadConfig()
-	if !chainGroupMatch(cfg, target.Group) {
+	if !chainTargetMatch(cfg, target) {
 		return ClashNode{}, false, nil
 	}
 	candidates, err := m.frontCandidates(cfg, target)
@@ -175,6 +198,27 @@ func (m *Manager) resolveFrontNode(target ClashNode, autoDetect bool) (ClashNode
 	return ClashNode{}, true, fmt.Errorf("前置组无可用链路: %w", lastErr)
 }
 
+// resolveFrontNodeForPlan 一键探测/规划用：不要求 chain_enabled/chain_nodes 已开启，
+// 只要配置了手动前置或前置组，就返回一个可用于尝试的前置（手动/缓存/首个候选）。
+func (m *Manager) resolveFrontNodeForPlan(target ClashNode) (ClashNode, bool, error) {
+	cfg := m.loadConfig()
+	if strings.TrimSpace(cfg.FrontNode) == "" && strings.TrimSpace(cfg.FrontGroup) == "" {
+		return ClashNode{}, false, nil
+	}
+	candidates, err := m.frontCandidates(cfg, target)
+	if err != nil {
+		return ClashNode{}, true, err
+	}
+	if name, ok := m.cachedFront(target.Name); ok {
+		for _, c := range candidates {
+			if c.Name == name {
+				return c, true, nil
+			}
+		}
+	}
+	return candidates[0], true, nil
+}
+
 // CheckChain 手动检测某个目标节点的整条链（设置页「检测链路」）。
 func (m *Manager) CheckChain(targetName string) ChainCheckResult {
 	res := ChainCheckResult{Target: targetName}
@@ -189,7 +233,7 @@ func (m *Manager) CheckChain(targetName string) ChainCheckResult {
 		return res
 	}
 	cfg := m.loadConfig()
-	if !chainGroupMatch(cfg, target.Group) {
+	if !chainTargetMatch(cfg, target) {
 		res.Error = "目标组未启用链式代理（检查 chain_enabled / chain_groups）"
 		return res
 	}

@@ -9,8 +9,47 @@ import (
 	"time"
 )
 
-// probeNode 单节点完整探测。worker 为并发 worker 索引（0 起），用于停止时登记活跃探针。
+// probeNode 单节点完整探测（含链式策略）。
+//   - ""/config：按 chain_nodes/chain_groups 配置决定是否链式；
+//   - off：强制直连；
+//   - auto：先直连，连接类失败后自动经前置重试（一键探测/规划）。
 func (c *ScanController) probeNode(worker int, opts ScanOptions, node ClashNode, pair portPair, workerDir string) ProbeResult {
+	base := ProbeResult{Node: node.Name, NodeType: node.NodeType, Server: node.Server, Port: node.Port}
+	switch opts.ChainMode {
+	case "off":
+		return c.probeNodeOnce(worker, opts, node, pair, workerDir, nil)
+	case "auto":
+		direct := c.probeNodeOnce(worker, opts, node, pair, workerDir, nil)
+		// 直连成功、真实额度 429、或用户已停止：不再尝试链式。
+		if direct.OK || direct.Category == "rate_limit" || direct.Category == "stopped" {
+			return direct
+		}
+		front, chained, err := c.m.resolveFrontNodeForPlan(node)
+		if err != nil || !chained {
+			return direct
+		}
+		chainedRes := c.probeNodeOnce(worker, opts, node, pair, workerDir, &front)
+		chainedRes.FrontNode = front.Name
+		if chainedRes.OK {
+			chainedRes.Message = "经前置 " + front.Name + "：" + chainedRes.Message
+		}
+		return chainedRes
+	default:
+		front, chained, err := c.m.resolveFrontNode(node, false)
+		if err != nil {
+			base.Category = "config"
+			base.Message = "链式前置不可用: " + err.Error()
+			return base
+		}
+		if chained {
+			return c.probeNodeOnce(worker, opts, node, pair, workerDir, &front)
+		}
+		return c.probeNodeOnce(worker, opts, node, pair, workerDir, nil)
+	}
+}
+
+// probeNodeOnce 单次探测（front=nil 直连；非 nil 经前置链式）。
+func (c *ScanController) probeNodeOnce(worker int, opts ScanOptions, node ClashNode, pair portPair, workerDir string, front *ClashNode) ProbeResult {
 	base := ProbeResult{Node: node.Name, NodeType: node.NodeType, Server: node.Server, Port: node.Port}
 	// S1: 停止扫描响应——探测开始前若已收到停止请求，直接放弃该节点（不 spawn 探针进程）。
 	if c.isStopping() {
@@ -22,17 +61,10 @@ func (c *ScanController) probeNode(worker int, opts ScanOptions, node ClashNode,
 	deadline := time.Now().Add(budget)
 	password := c.m.effectiveDefaultPassword()
 
-	// 链式代理：扫描时优先使用手动/缓存/首个候选（12s 预算内不做完整自动探测）。
-	front, chained, ferr := c.m.resolveFrontNode(node, false)
-	if ferr != nil {
-		base.Category = "config"
-		base.Message = "链式前置不可用: " + ferr.Error()
-		return base
-	}
 	var sbCfg []byte
 	var err error
-	if chained {
-		sbCfg, err = buildSingboxConfigWithFront(node, front, pair.socks)
+	if front != nil {
+		sbCfg, err = buildSingboxConfigWithFront(node, *front, pair.socks)
 		base.FrontNode = front.Name
 	} else {
 		sbCfg, err = buildSingboxConfig(node, pair.socks)

@@ -725,12 +725,13 @@ func (m *Manager) ScanStartHandler() http.HandlerFunc {
 			SocksPort   *uint16  `json:"socksPort"`
 			Timeout     *int     `json:"timeout"`
 			Concurrency *int     `json:"concurrency"`
+			Chain       string   `json:"chain"`
 		}
 		if json.NewDecoder(r.Body).Decode(&req) != nil {
 			writeErr(w, http.StatusBadRequest, "bad body")
 			return
 		}
-		opts := ScanOptions{Nodes: req.Nodes}
+		opts := ScanOptions{Nodes: req.Nodes, ChainMode: req.Chain}
 		if req.APIPort != nil {
 			opts.APIPort = *req.APIPort
 		}

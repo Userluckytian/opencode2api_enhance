@@ -6,6 +6,7 @@ import {
   Radar,
   RefreshCw,
   Rss,
+  Search,
   Settings2,
   Square,
   Trash2,
@@ -20,6 +21,7 @@ import {
 import { open as openDialog } from '@tauri-apps/plugin-dialog'
 import {
   api,
+  type ChainCheckResult,
   type LocalProfileSource,
   type NodeView,
   type ProbeResult,
@@ -71,9 +73,21 @@ export default function NodesPage({
   }
   // N2: 节点扫描配置（按钮 title 并发数与设置面板表单），生效值来自 configGet
   const [scanConf, setScanConf] = useState({ scan_concurrency: 8, stop_scan_concurrency: 4 })
-  // N2: 节点池设置弹窗（节点扫描配置折叠面板，默认收起）
+  // N2: 节点池设置弹窗（节点扫描配置 / 链式代理折叠面板，默认收起）
   const [settingsOpen, setSettingsOpen] = useState(false)
-  const [openSections, setOpenSections] = useState<{ scan: boolean }>({ scan: false })
+  const [openSections, setOpenSections] = useState<{ scan: boolean; chain: boolean }>({ scan: false, chain: false })
+
+  // 链式代理（前置节点）
+  const [chainEnabled, setChainEnabled] = useState(false)
+  const [chainGroups, setChainGroups] = useState('')
+  const [chainNodes, setChainNodes] = useState('')
+  const [frontGroup, setFrontGroup] = useState('')
+  const [frontNode, setFrontNode] = useState('')
+  const [chainAutoDetect, setChainAutoDetect] = useState(true)
+  const [chainBusy, setChainBusy] = useState(false)
+  const [chainError, setChainError] = useState('')
+  const [chainCheckNode, setChainCheckNode] = useState('')
+  const [chainResult, setChainResult] = useState<ChainCheckResult | null>(null)
 
   // T3: 订阅源列表管理（多条订阅：新增/删除/立即拉取）
   const [subs, setSubs] = useState<SubscriptionSource[]>([])
@@ -119,13 +133,19 @@ export default function NodesPage({
       .catch(() => {})
   }, [])
 
-  // N2: 加载节点扫描配置（按钮 title / 设置面板生效值）
+  // N2: 加载节点扫描配置 + 链式代理配置
   useEffect(() => {
     api
       .configGet()
-      .then((c) =>
-        setScanConf({ scan_concurrency: c.scan_concurrency, stop_scan_concurrency: c.stop_scan_concurrency }),
-      )
+      .then((c) => {
+        setScanConf({ scan_concurrency: c.scan_concurrency, stop_scan_concurrency: c.stop_scan_concurrency })
+        setChainEnabled(c.chain_enabled)
+        setChainGroups((c.chain_groups || []).join(','))
+        setChainNodes((c.chain_nodes || []).join(','))
+        setFrontGroup(c.front_group || '')
+        setFrontNode(c.front_node || '')
+        setChainAutoDetect(c.chain_auto_detect)
+      })
       .catch(() => {})
   }, [])
 
@@ -605,6 +625,115 @@ export default function NodesPage({
     }
   }
 
+  // 链式代理：保存配置
+  const handleSaveChain = async () => {
+    if (chainEnabled && !frontGroup.trim() && !frontNode.trim()) {
+      setChainError('启用链式代理前请填写前置组或手动前置节点')
+      return
+    }
+    setChainBusy(true)
+    setChainError('')
+    try {
+      await api.configSet('chain_enabled', String(chainEnabled))
+      await api.configSet('chain_groups', chainGroups)
+      await api.configSet('chain_nodes', chainNodes)
+      await api.configSet('front_group', frontGroup)
+      await api.configSet('front_node', frontNode)
+      await api.configSet('chain_auto_detect', String(chainAutoDetect))
+      toast('链式代理配置已保存', true)
+    } catch (e) {
+      setChainError(String(e))
+      toast('保存链式代理配置失败', false)
+    } finally {
+      setChainBusy(false)
+    }
+  }
+
+  // 链式代理：检测单个目标节点的整条链
+  const handleChainCheck = async () => {
+    if (!chainCheckNode.trim()) {
+      setChainError('请输入要检测的目标节点名')
+      return
+    }
+    setChainBusy(true)
+    setChainError('')
+    setChainResult(null)
+    try {
+      setChainResult(await api.chainCheck(chainCheckNode.trim()))
+    } catch (e) {
+      setChainError(String(e))
+    } finally {
+      setChainBusy(false)
+    }
+  }
+
+  // 一键探测：全部节点先直连，连接失败后自动经前置重试
+  const startPlanScan = async () => {
+    if (nodes.length === 0) {
+      toast('节点池为空', false)
+      return
+    }
+    if (!frontGroup.trim() && !frontNode.trim()) {
+      setChainError('请先填写前置组或手动前置节点，再一键探测')
+      return
+    }
+    if (!window.confirm(`将对 ${nodes.length} 个节点执行「直连 → 失败后经前置」探测，耗时较长，继续？`)) return
+    setScanPhase('scanning')
+    try {
+      const p = await api.scanStart({
+        nodes: nodes.map((n) => n.name),
+        timeout: 20,
+        chain: 'auto',
+        concurrency: scanConf.scan_concurrency,
+      })
+      setScan(p)
+      onTask({ id: 'scan', type: 'scan', title: '一键探测节点', done: p.current, total: p.total, busy: true })
+      toast(`开始一键探测 ${nodes.length} 个节点…`)
+    } catch (e) {
+      setScanPhase('idle')
+      toast(String(e), false)
+    }
+  }
+
+  // 应用计划：只把“链式可用”的节点写入 chain_nodes（直连可用的保持直连）
+  const applyChainPlan = async (names: string[]) => {
+    if (names.length === 0) {
+      toast('没有需要链式的可用节点', false)
+      return
+    }
+    setChainBusy(true)
+    setChainError('')
+    try {
+      await api.configSet('chain_enabled', 'true')
+      await api.configSet('chain_nodes', names.join(','))
+      await api.configSet('chain_groups', '')
+      await api.configSet('front_group', frontGroup)
+      await api.configSet('front_node', frontNode)
+      await api.configSet('chain_auto_detect', 'true')
+      setChainEnabled(true)
+      setChainNodes(names.join(','))
+      setChainGroups('')
+      toast(`计划已应用：${names.length} 个节点走链式，其余直连`, true)
+    } catch (e) {
+      setChainError(String(e))
+      toast('应用计划失败', false)
+    } finally {
+      setChainBusy(false)
+    }
+  }
+
+  // 一键探测结果汇总（基于当前 scan.results）
+  const chainPlan = useMemo(() => {
+    const rs = scan?.results ?? []
+    return {
+      total: rs.length,
+      directOK: rs.filter((r) => r.ok && !r.front_node),
+      chainOK: rs.filter((r) => r.ok && !!r.front_node),
+      quota: rs.filter((r) => r.category === 'rate_limit'),
+      dead: rs.filter((r) => !r.ok && r.category !== 'rate_limit' && r.category !== 'stopped'),
+    }
+  }, [scan])
+
   // P2 audit: 删除勾选节点（仅订阅缓存节点可删；外部 Clash 节点只读跳过）
   const handleDeleteNodes = async () => {
     if (selected.size === 0 || deleting) return
@@ -1035,6 +1164,161 @@ export default function NodesPage({
                       {savingScanConf ? '保存中…' : '保存'}
                     </button>
                   </div>
+                </div>
+              )}
+            </section>
+
+            {/* 链式代理（前置节点） */}
+            <section className="border border-zinc-200 rounded-xl overflow-hidden">
+              <button
+                type="button"
+                onClick={() => setOpenSections((s) => ({ ...s, chain: !s.chain }))}
+                className={clsx(
+                  'w-full flex items-center justify-between px-4 py-3 text-left hover:bg-zinc-50',
+                  openSections.chain && 'border-b border-zinc-200',
+                )}
+              >
+                <span className="text-[14px] font-semibold text-zinc-900">链式代理（前置节点）</span>
+                <ChevronDown
+                  size={16}
+                  className={clsx('text-zinc-400 transition-transform', !openSections.chain && '-rotate-90')}
+                />
+              </button>
+              {openSections.chain && (
+                <div className="p-4 space-y-4">
+                  <p className="text-[12px] text-zinc-400">
+                    本地直连被阻断的节点，经可达的前置节点中转：本地 → 前置 → 目标 → 上游。
+                    「一键探测」会先直连，失败后自动经前置重试，并把需要链式的节点整理出来。
+                  </p>
+
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-3 text-[13px]">
+                    <label className="flex items-center gap-2">
+                      <input type="checkbox" checked={chainEnabled} onChange={(e) => setChainEnabled(e.target.checked)} />
+                      <span className="text-zinc-700">启用链式代理</span>
+                    </label>
+                    <label className="flex items-center gap-2">
+                      <input type="checkbox" checked={chainAutoDetect} onChange={(e) => setChainAutoDetect(e.target.checked)} />
+                      <span className="text-zinc-700">自动检测整条链（推荐）</span>
+                    </label>
+                    <label className="space-y-1">
+                      <span className="text-zinc-500">目标组（逗号分隔，可留空）</span>
+                      <input
+                        value={chainGroups}
+                        onChange={(e) => setChainGroups(e.target.value)}
+                        placeholder="Falemon-NQIJHTF.yaml"
+                        className="w-full rounded-lg border border-zinc-300 px-3 py-2"
+                      />
+                    </label>
+                    <label className="space-y-1">
+                      <span className="text-zinc-500">前置组</span>
+                      <input
+                        value={frontGroup}
+                        onChange={(e) => setFrontGroup(e.target.value)}
+                        placeholder="merged.yaml"
+                        className="w-full rounded-lg border border-zinc-300 px-3 py-2"
+                      />
+                    </label>
+                    <label className="space-y-1 md:col-span-2">
+                      <span className="text-zinc-500">目标节点（一键探测后自动填入；也可手动编辑）</span>
+                      <input
+                        value={chainNodes}
+                        onChange={(e) => setChainNodes(e.target.value)}
+                        placeholder="留空 = 按目标组匹配"
+                        className="w-full rounded-lg border border-zinc-300 px-3 py-2"
+                      />
+                    </label>
+                    <label className="space-y-1 md:col-span-2">
+                      <span className="text-zinc-500">手动前置节点（留空 = 自动从前置组选择）</span>
+                      <input
+                        value={frontNode}
+                        onChange={(e) => setFrontNode(e.target.value)}
+                        placeholder="晚高峰 | node1.touf.shop (216.36.105.42)"
+                        className="w-full rounded-lg border border-zinc-300 px-3 py-2"
+                      />
+                    </label>
+                  </div>
+
+                  <div className="flex flex-wrap items-center gap-2">
+                    <button
+                      onClick={() => void handleSaveChain()}
+                      disabled={chainBusy}
+                      className="bg-zinc-900 text-white rounded-lg px-4 py-2 text-[13px] hover:bg-zinc-700 disabled:cursor-not-allowed disabled:opacity-60"
+                    >
+                      {chainBusy ? '处理中…' : '保存链式配置'}
+                    </button>
+                    <button
+                      onClick={() => void startPlanScan()}
+                      disabled={chainBusy || phase !== 'idle'}
+                      className="flex items-center gap-1.5 px-3 py-2 rounded-lg border border-zinc-300 text-[13px] hover:bg-zinc-100 disabled:cursor-not-allowed disabled:opacity-50"
+                    >
+                      <Radar size={14} />
+                      一键探测（全部节点）
+                    </button>
+                  </div>
+
+                  {chainError && <p className="text-red-600 text-xs break-all">{chainError}</p>}
+
+                  {chainPlan.total > 0 && (
+                    <div className="rounded-lg border border-zinc-200 p-3 space-y-2 text-[12px]">
+                      <div className="flex flex-wrap gap-3 text-zinc-600">
+                        <span>直连可用 <b className="text-green-600">{chainPlan.directOK.length}</b></span>
+                        <span>链式可用 <b className="text-teal-600">{chainPlan.chainOK.length}</b></span>
+                        <span>额度 429 <b className="text-amber-600">{chainPlan.quota.length}</b></span>
+                        <span>不可用 <b className="text-red-600">{chainPlan.dead.length}</b></span>
+                      </div>
+                      {chainPlan.chainOK.length > 0 && (
+                        <div className="text-zinc-500 break-all">
+                          建议链式：
+                          {chainPlan.chainOK
+                            .slice(0, 8)
+                            .map((r) => `${r.node}（${r.front_node}）`)
+                            .join('、')}
+                          {chainPlan.chainOK.length > 8 ? ` 等 ${chainPlan.chainOK.length} 个` : ''}
+                        </div>
+                      )}
+                      <button
+                        onClick={() => void applyChainPlan(chainPlan.chainOK.map((r) => r.node))}
+                        disabled={chainBusy || chainPlan.chainOK.length === 0}
+                        className="px-3 py-1.5 rounded-lg bg-teal-600 text-white text-[12px] hover:bg-teal-700 disabled:cursor-not-allowed disabled:opacity-50"
+                      >
+                        应用计划（只链式这些节点）
+                      </button>
+                    </div>
+                  )}
+
+                  <div className="flex flex-wrap items-center gap-2">
+                    <input
+                      value={chainCheckNode}
+                      onChange={(e) => setChainCheckNode(e.target.value)}
+                      placeholder="输入目标节点名检测整条链"
+                      className="flex-1 min-w-[220px] rounded-lg border border-zinc-300 px-3 py-2 text-[13px]"
+                    />
+                    <button
+                      onClick={() => void handleChainCheck()}
+                      disabled={chainBusy}
+                      className="flex items-center gap-1.5 px-3 py-2 rounded-lg border border-zinc-300 text-[13px] hover:bg-zinc-100 disabled:cursor-not-allowed disabled:opacity-50"
+                    >
+                      {chainBusy ? <Loader2 size={14} className="animate-spin" /> : <Search size={14} />}
+                      检测链路
+                    </button>
+                  </div>
+
+                  {chainResult && (
+                    <div
+                      className={clsx(
+                        'rounded-lg border px-3 py-2 text-[13px]',
+                        chainResult.ok ? 'border-green-200 bg-green-50 text-green-700' : 'border-red-200 bg-red-50 text-red-700',
+                      )}
+                    >
+                      {chainResult.ok
+                        ? `链路可用：前置 ${chainResult.front}，耗时 ${chainResult.latency_ms ?? '?'}ms`
+                        : `链路不可用：${chainResult.error || '未知错误'}`}
+                    </div>
+                  )}
+
+                  <p className="text-[11px] text-zinc-400">
+                    保存后，新启动/重启的实例会按配置生成链式 sing-box；扫描也会对命中目标组/目标节点的节点走前置。自动检测结果缓存 10 分钟。
+                  </p>
                 </div>
               )}
             </section>

@@ -105,10 +105,12 @@ type Config struct {
 	FreeSidecarEnabled *bool `json:"free_sidecar_enabled,omitempty"`
 
 	// 链式代理（前置节点）：本地直连被阻断的节点经可达前置节点中转。
-	// ChainEnabled 总开关（nil = 关闭）；ChainGroups 需要链式的目标组（空 = 所有组）；
+	// ChainEnabled 总开关（nil = 关闭）；ChainGroups 需要链式的目标组；
+	// ChainNodes 需要链式的具体节点（一键探测规划写入；优先于组）；
 	// FrontGroup 前置候选组；FrontNode 手动前置（优先）；ChainAutoDetect 自动探测整条链。
 	ChainEnabled    *bool    `json:"chain_enabled,omitempty"`
 	ChainGroups     []string `json:"chain_groups,omitempty"`
+	ChainNodes      []string `json:"chain_nodes,omitempty"`
 	FrontGroup      string   `json:"front_group,omitempty"`
 	FrontNode       string   `json:"front_node,omitempty"`
 	ChainAutoDetect *bool    `json:"chain_auto_detect,omitempty"`
@@ -443,6 +445,8 @@ func (m *Manager) ConfigGet(key string) (string, error) {
 		return strconv.FormatBool(chainEnabled(cfg)), nil
 	case "chain_groups":
 		return strings.Join(cfg.ChainGroups, ","), nil
+	case "chain_nodes":
+		return strings.Join(cfg.ChainNodes, ","), nil
 	case "front_group":
 		return cfg.FrontGroup, nil
 	case "front_node":
@@ -835,6 +839,15 @@ func (m *Manager) ConfigSet(key, value string) error {
 		}
 		cfg.ChainGroups = groups
 		m.invalidateChainCache()
+	case "chain_nodes":
+		var nodes []string
+		for _, n := range strings.Split(value, ",") {
+			if n = strings.TrimSpace(n); n != "" {
+				nodes = append(nodes, n)
+			}
+		}
+		cfg.ChainNodes = nodes
+		m.invalidateChainCache()
 	case "front_group":
 		cfg.FrontGroup = strings.TrimSpace(value)
 		m.invalidateChainCache()
@@ -939,6 +952,7 @@ type ConfigView struct {
 	// 链式代理（前置节点）
 	ChainEnabled    bool     `json:"chain_enabled"`
 	ChainGroups     []string `json:"chain_groups"`
+	ChainNodes      []string `json:"chain_nodes"`
 	FrontGroup      string   `json:"front_group"`
 	FrontNode       string   `json:"front_node"`
 	ChainAutoDetect bool     `json:"chain_auto_detect"`
@@ -1008,6 +1022,7 @@ func (m *Manager) ConfigViewOf() ConfigView {
 		FreeSidecarEnabled:      freeSidecarEnabled(cfg),
 		ChainEnabled:            chainEnabled(cfg),
 		ChainGroups:             cfg.ChainGroups,
+		ChainNodes:              cfg.ChainNodes,
 		FrontGroup:              cfg.FrontGroup,
 		FrontNode:               cfg.FrontNode,
 		ChainAutoDetect:         chainAutoDetect(cfg),
