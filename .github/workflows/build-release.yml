@@ -135,8 +135,7 @@ jobs:
           if [ "${{ runner.os }}" = "Windows" ]; then
             powershell -ExecutionPolicy Bypass -File scripts/build-free-sidecar.ps1
           else
-            curl -fsSL https://bun.sh/install | bash
-            export PATH="$HOME/.bun/bin:$PATH"
+            # 脚本自带固定 Bun 1.4.4 下载（与 Windows 一致），不再依赖 bun.sh/install
             ./scripts/build-free-sidecar.sh
           fi
           ls -lh bin/
