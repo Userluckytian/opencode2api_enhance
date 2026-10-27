@@ -21,6 +21,10 @@ type AppConfig struct {
 	// 官方 Bun 客户端可过；Go/curl/Node 会被 429）。空 = 回退现有直连/代理池行为。
 	FreeSidecarURL string `json:"free_sidecar_url,omitempty"`
 
+	// ProviderPort 供应商服务端口（自定义源 + 插件供应商的独立入口）。
+	// 0 = 默认 50080；与统一网关（40080）/实例池完全解耦。
+	ProviderPort int `json:"provider_port,omitempty"`
+
 	// 流内超时切换配置（毫秒；区间随机，防上游识别为定时扫描）
 	TTFTMinMS    int `json:"timeout_ttft_min_ms,omitempty"`
 	TTFTMaxMS    int `json:"timeout_ttft_max_ms,omitempty"`

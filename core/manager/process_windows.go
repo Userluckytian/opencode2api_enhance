@@ -23,16 +23,26 @@ func killProcess(pid int) error {
 	return taskkill.Run()
 }
 
-// pidAliveWindows Windows：tasklist 过滤该 PID；无匹配输出 "No tasks"。
+// pidAlive Windows：tasklist 过滤该 PID，按 CSV 第二列精确比对。
+// 不能匹配英文 "No tasks"——中文/其它语言的 Windows 输出为本地化文案
+// （如「没有运行的任务匹配指定标准」），旧实现会把已退出进程误判为存活，
+// 导致供应商服务/网关看护协程永远不重启。
 func pidAlive(pid int) bool {
 	if pid <= 0 {
 		return false
 	}
-	out, err := exec.Command("tasklist", "/FI", "PID eq "+strconv.Itoa(pid)).Output()
+	cmd := exec.Command("tasklist", "/FI", "PID eq "+strconv.Itoa(pid), "/FO", "CSV", "/NH")
+	applyNoWindow(cmd, true)
+	out, err := cmd.Output()
 	if err != nil {
 		return false
 	}
-	return !strings.Contains(string(out), "No tasks")
+	line := strings.SplitN(strings.TrimSpace(string(out)), "\n", 2)[0]
+	fields := strings.Split(line, ",")
+	if len(fields) < 2 {
+		return false
+	}
+	return strings.Trim(fields[1], "\" \r") == strconv.Itoa(pid)
 }
 
 func intToToken(n int) string {

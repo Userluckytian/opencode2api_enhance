@@ -198,12 +198,27 @@ func (m *Manager) buildRouterCfg(singboxPorts []uint16, portNames map[uint16]str
 // injectVendorConfig 把管理器配置里的厂商注册表与路由写入子进程配置。
 // 子进程（实例子进程 / 网关子进程）与核心同二进制，读同一格式的 opencode2api.json，
 // 不带 providers 则只认 opencode —— 多厂商在 exe 实例/网关形态下不可用。
+//
+// 2026-10 拆分：type=custom 的自定义源已迁到供应商服务（50080），不再注入实例/网关；
+// 全部是 custom 时省略 providers 键，让子进程回退「自动注册内建（opencode）」语义。
 func injectVendorConfig(cfg map[string]any, appCfg Config) map[string]any {
-	if len(appCfg.Providers) > 0 {
-		cfg["providers"] = appCfg.Providers
+	if ps := providersWithoutCustom(appCfg.Providers); len(ps) > 0 {
+		cfg["providers"] = ps
 	}
 	if len(appCfg.Routing) > 0 {
 		cfg["routing"] = appCfg.Routing
 	}
 	return cfg
+}
+
+// providersWithoutCustom 剔除自定义源条目（其余厂商原样保留）。
+func providersWithoutCustom(cfgs []map[string]any) []map[string]any {
+	out := make([]map[string]any, 0, len(cfgs))
+	for _, p := range cfgs {
+		if t, _ := p["type"].(string); t == "custom" {
+			continue
+		}
+		out = append(out, p)
+	}
+	return out
 }

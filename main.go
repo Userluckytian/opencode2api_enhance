@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"flag"
 	"fmt"
 	"log/slog"
@@ -96,6 +97,15 @@ func versionString() string {
 	return fmt.Sprintf("opencode2api %s (branch=%s, commit=%s, built=%s)", version, branch, commit, date)
 }
 
+// 供应商服务 / 插件宿主模式（进程级，供 resolveProcessRole 与厂商装配读取）。
+var (
+	// providerServiceMode 供应商服务模式：只装配自定义源 + 插件供应商，
+	// 不加载 OpenCode 免费池、不启动 sidecar / 实例 / 网关。
+	providerServiceMode bool
+	// noPlugins 禁止本进程启动插件子进程（实例/网关子进程注入，插件只由供应商服务托管）。
+	noPlugins bool
+)
+
 func main() {
 	// 阶段 4：doctor 子命令拦截（早于 flag 定义，避免与服务端标志集冲突）。
 	if len(os.Args) > 1 && os.Args[1] == "doctor" {
@@ -115,6 +125,8 @@ func main() {
 	flag.BoolVar(&debugMode, "debug", false, "启用调试日志")
 	flag.StringVar(&debugSubsystemFlag, "debug-subsystem", "", "启动即开启 debug 的子系统列表（逗号分隔；运行时热切换见 POST /api/admin/debug）")
 	flag.BoolVar(&gatewayMode, "gateway", false, "统一网关模式（记录节点级统计）")
+	flag.BoolVar(&providerServiceMode, "provider-service", false, "供应商服务模式（只装配自定义源 + 插件供应商，不加载 OpenCode 免费池）")
+	flag.BoolVar(&noPlugins, "no-plugins", false, "不启动插件式供应商子进程（实例/网关子进程注入；插件统一由供应商服务托管）")
 	flag.BoolVar(&callLogFlag, "call-log", false, "启用调用日志写盘（实例子进程注入；-gateway 自动启用）")
 	flag.StringVar(&poolQualityPath, "pool-quality", "", "实例池质量文件路径（网关子进程注入；空 = 无质量约束）")
 	flag.StringVar(&logLevel, "log-level", "info", "日志级别: debug/info/warn/error")
@@ -153,7 +165,7 @@ func main() {
 	loadTokenStats()
 	loadNodeStats()
 	initCallLog()
-	callLogEnabled = gatewayMode || callLogFlag // 网关自动记录；独享/池成员实例子进程经 -call-log 注入后同样写盘（cwd/call_log.jsonl）
+	callLogEnabled = gatewayMode || callLogFlag || providerServiceMode // 网关/供应商服务自动记录；独享/池成员实例子进程经 -call-log 注入后同样写盘（cwd/call_log.jsonl）
 	slog.Info("config loaded", "path", configPath)
 	globalAgg = newAggregator()
 	chatRouterVar = newChatRouter(globalAgg)
@@ -176,6 +188,12 @@ func main() {
 		slog.Info("admin panel disabled (no password)")
 	}
 	// P4: 管理域（实例/统计/日志/配置）并入 core，Web/桌面共用一份实现。
+	// 供应商服务模式：只承载自定义源 + 插件供应商，早退于管理器/实例/sidecar 装配之前。
+	if providerServiceMode {
+		runProviderServiceMode(port, listenAddr)
+		return
+	}
+
 	managerInst := manager.New("")
 	// P4-3：装配实例/探针接缝（clash 节点解析 + sing-box 配置 + opencode2api 配置生成）。
 	managerInst.SetSeams(&manager.SeamFuncs{
@@ -194,6 +212,23 @@ func main() {
 		BuildOpenCfg:        managerInst.BuildOpenCodeCfgFor,
 		ListNodes:           managerInst.ListNodesWithGroup,
 	})
+
+	// 供应商服务（50080）：自定义源 + 插件供应商的独立入口，与 OpenCode 免费池解耦。
+	// 只有管理进程（role=manager）才拉起它；实例/网关/探针子进程也会走到这里，
+	// 若不加角色判断会各自再起一个 50080 子进程，互相抢端口。
+	var providerSvc *manager.ProviderService
+	if getProcessRole() == RoleManager {
+		// 先清掉实例/网关 runtime 配置里残留的 custom 条目，再拉起服务（插件唯一宿主）。
+		providerSvc = manager.NewProviderService(managerInst, configPath)
+		if err := managerInst.StripCustomProvidersFromRuntime(); err != nil {
+			slog.Warn("strip custom providers from runtime configs failed", "error", err)
+		}
+		if err := providerSvc.Start(manager.NewRealRunner()); err != nil {
+			slog.Warn("provider service unavailable", "error", err)
+		}
+		go providerSvc.Watchdog(manager.NewRealRunner())
+		defer providerSvc.Close()
+	}
 
 	// 免费层 sidecar：OpenCode 免费层校验客户端 TLS 指纹，Go 标准 TLS 会被 429；
 	// 启动失败只告警，不阻断应用（回退旧直连/代理池行为）。
@@ -217,26 +252,14 @@ func main() {
 	defer managerInst.StopFreeSidecar(sidecarRunner)
 
 	mux := http.NewServeMux()
-	// R1 插件式供应商：providers/ 目录扫描 + 子进程生命周期 + 管理 API。
-	// 主进程正常退出时经 Close 统一 kill 全部插件子进程（设计文档 §4.3）；
-	// 强杀路径（taskkill /F / SIGKILL）无法触发，Linux 由 systemd cgroup 兜底，
-	// Windows 桌面壳按进程树回收，属既有进程管理边界（详见 PLUGIN-PROVIDERS.md §9）。
-	// R2：OnChange（子进程就绪/状态/增删）→ syncPlugins 重建插件厂商并入 rebuildVendors。
-	// bind 必须在 Start 之前（就绪行由监督协程异步到达，先记引用再拉起）。
-	//
-	// 所有 opencode2api 进程（主管理器 / 实例子进程 / 统一网关子进程）都装配插件
-	// 管理器：客户端无论从管理入口、实例端口还是统一网关（如 48280/v1）调用，
-	// 插件模型都可用（running 时）。启停状态经 <providers>/.plugin-state.json 跨进程
-	// 共享：主管理器开关落盘，实例/网关子进程下一扫描周期（≤3s）跟随停/启自家插件
-	// 并移除/恢复聚合模型——开关全局一致生效（2026-08-20 现场：客户端连统一网关
-	// 48280，网关进程旧装配不启插件，导致开/关都获取不到插件模型）。
-	pluginMgr := bindPluginMgr(pluginprovider.New(pluginprovider.Config{
-		OnChange:       syncPlugins,
-		OnModelRefresh: onPluginModelRefresh,
-	}))
-	pluginMgr.Start()
-	defer pluginMgr.Close()
-	registerHTTPRoutes(mux, managerInst, pluginMgr)
+	// 2026-10 拆分：插件子进程只由供应商服务（50080）托管一份。
+	// 管理进程不再启动插件管理器，插件管理 API 由 providerSvc.ProxyHandler 反代；
+	// 实例/网关子进程注入 -no-plugins，避免重复拉起（账号状态/固定面板端口互抢）。
+	if noPlugins {
+		slog.Info("plugin host disabled in this process (-no-plugins)")
+	}
+	var pluginMgr *pluginprovider.Manager
+	registerHTTPRoutes(mux, managerInst, pluginMgr, providerSvc)
 	addr := ":" + port
 	if listenAddr != "" {
 		addr = listenAddr + ":" + port
@@ -269,9 +292,98 @@ func withRecover(next http.Handler) http.Handler {
 	})
 }
 
+// runProviderServiceMode 供应商服务进程（-provider-service）：
+// 只注册模型端点 + 插件管理 API，不装配管理器/实例/网关/sidecar。
+func runProviderServiceMode(port, listenAddr string) {
+	mux := http.NewServeMux()
+	pluginMgr := bindPluginMgr(pluginprovider.New(pluginprovider.Config{
+		OnChange:       syncPlugins,
+		OnModelRefresh: onPluginModelRefresh,
+	}))
+	pluginMgr.Start()
+	defer pluginMgr.Close()
+
+	mux.HandleFunc("/v1/chat/completions", loggingMiddleware(apiKeyAuthMiddleware(chatCompletionsHandler)))
+	mux.HandleFunc("/v1/responses", loggingMiddleware(apiKeyAuthMiddleware(responsesHandler)))
+	mux.HandleFunc("/v1/messages", loggingMiddleware(apiKeyAuthMiddleware(claudeMessagesHandler)))
+	mux.HandleFunc("/v1/models", loggingMiddleware(apiKeyAuthMiddleware(listModelsHandler)))
+	// 统计/日志清理契约（管理进程聚合时按进程 HTTP 调用）。
+	mux.HandleFunc("/api/reset-stats", loggingMiddleware(apiKeyAuthMiddleware(resetStatsHandler)))
+	mux.HandleFunc("/api/clear-call-log", loggingMiddleware(apiKeyAuthMiddleware(clearCallLogHandler)))
+	// 优雅停止：管理器先请求此端点，让插件子进程随 Close 一起回收，再兜底强杀。
+	mux.HandleFunc("/api/admin/shutdown", loggingMiddleware(apiKeyAuthMiddleware(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusAccepted)
+		go func() {
+			time.Sleep(100 * time.Millisecond)
+			pluginMgr.Close()
+			os.Exit(0)
+		}()
+	})))
+	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("OK"))
+	})
+	// 插件管理 API（管理进程反代到这里；也可本机直连 50080 调试）。
+	// 用 apiKeyAuthMiddleware（Bearer/x-api-key）而非 requireAuth（仅会话 Cookie）：
+	// 反代方携带的是 -password 密钥，没有管理面板会话。
+	mux.HandleFunc("/api/admin/plugins", loggingMiddleware(apiKeyAuthMiddleware(pluginMgr.ListHandler())))
+	mux.HandleFunc("/api/admin/plugins/rescan", loggingMiddleware(apiKeyAuthMiddleware(pluginMgr.RescanHandler())))
+	mux.HandleFunc("/api/admin/plugins/{id}/config", loggingMiddleware(apiKeyAuthMiddleware(pluginMgr.ConfigSaveHandler())))
+	mux.HandleFunc("/api/admin/plugins/{id}/toggle", loggingMiddleware(apiKeyAuthMiddleware(pluginMgr.ToggleHandler())))
+	mux.HandleFunc("/api/admin/plugins/{id}/exposed-models", loggingMiddleware(apiKeyAuthMiddleware(pluginMgr.ExposedModelsHandler())))
+	mux.HandleFunc("/api/admin/plugins/{id}/refresh-models", loggingMiddleware(apiKeyAuthMiddleware(pluginMgr.RefreshModelsHandler())))
+	mux.HandleFunc("/api/admin/plugins/{id}", loggingMiddleware(apiKeyAuthMiddleware(pluginMgr.DeleteHandler())))
+
+	addr := ":" + port
+	if listenAddr != "" {
+		addr = listenAddr + ":" + port
+	}
+	slog.Info("provider service listening", "addr", addr)
+	if err := http.ListenAndServe(addr, withRecover(mux)); err != nil {
+		slog.Error("provider service terminated", "error", err)
+		os.Exit(1)
+	}
+}
+
+func providerServiceStatusHandler(p *manager.ProviderService) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(p.Status())
+	}
+}
+
+// providerServiceModelsRefreshHandler 同步刷新 50080 的模型目录（卡片「刷新模型」）。
+func providerServiceModelsRefreshHandler(p *manager.ProviderService) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(p.ForceRefreshModels())
+	}
+}
+
+func providerServiceStartHandler(p *manager.ProviderService) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if err := p.Start(manager.NewRealRunner()); err != nil {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusInternalServerError)
+			_ = json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(p.Status())
+	}
+}
+
+func providerServiceStopHandler(p *manager.ProviderService) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		_ = p.Stop(manager.NewRealRunner())
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(p.Status())
+	}
+}
+
 // registerHTTPRoutes 注册全部 HTTP 路由（/v1、/api、/api/admin、/health、静态 SPA）。
 // pluginMgr 为 R1 插件式供应商管理器（nil = 不注册插件路由，测试用）。
-func registerHTTPRoutes(mux *http.ServeMux, managerInst *manager.Manager, pluginMgr *pluginprovider.Manager) {
+func registerHTTPRoutes(mux *http.ServeMux, managerInst *manager.Manager, pluginMgr *pluginprovider.Manager, providerSvc *manager.ProviderService) {
 	mux.HandleFunc("/v1/chat/completions", loggingMiddleware(apiKeyAuthMiddleware(chatCompletionsHandler)))
 	mux.HandleFunc("/v1/responses", loggingMiddleware(apiKeyAuthMiddleware(responsesHandler)))
 	mux.HandleFunc("/v1/messages", loggingMiddleware(apiKeyAuthMiddleware(claudeMessagesHandler)))
@@ -348,7 +460,8 @@ func registerHTTPRoutes(mux *http.ServeMux, managerInst *manager.Manager, plugin
 	mux.HandleFunc("/api/admin/custom-providers/probe", loggingMiddleware(requireAuth(customProvidersProbeHandler())))
 	mux.HandleFunc("/api/admin/custom-providers/reset-keys", loggingMiddleware(requireAuth(customProvidersResetKeysHandler())))
 	mux.HandleFunc("/api/admin/custom-providers/clear", loggingMiddleware(requireAuth(customProvidersClearHandler(managerInst))))
-	// R1 插件式供应商（第七页「自定义模型」插件 tab）：列表 / 配置保存 / 启停 / 删除 / 手动重扫。
+	// 插件式供应商（第七页「自定义模型」插件 tab）：列表 / 配置保存 / 启停 / 删除 / 手动重扫。
+	// 拆分后由供应商服务（50080）唯一托管；管理进程只做反代。
 	if pluginMgr != nil {
 		mux.HandleFunc("/api/admin/plugins", loggingMiddleware(requireAuth(pluginMgr.ListHandler())))
 		mux.HandleFunc("/api/admin/plugins/rescan", loggingMiddleware(requireAuth(pluginMgr.RescanHandler())))
@@ -357,6 +470,17 @@ func registerHTTPRoutes(mux *http.ServeMux, managerInst *manager.Manager, plugin
 		mux.HandleFunc("/api/admin/plugins/{id}/exposed-models", loggingMiddleware(requireAuth(pluginMgr.ExposedModelsHandler())))
 		mux.HandleFunc("/api/admin/plugins/{id}/refresh-models", loggingMiddleware(requireAuth(pluginMgr.RefreshModelsHandler())))
 		mux.HandleFunc("/api/admin/plugins/{id}", loggingMiddleware(requireAuth(pluginMgr.DeleteHandler())))
+	} else if providerSvc != nil {
+		proxy := providerSvc.ProxyHandler()
+		mux.Handle("/api/admin/plugins", loggingMiddleware(requireAuth(proxy.ServeHTTP)))
+		mux.Handle("/api/admin/plugins/", loggingMiddleware(requireAuth(proxy.ServeHTTP)))
+	}
+	// 供应商服务状态 / 启停（自定义源 + 插件供应商独立入口）。
+	if providerSvc != nil {
+		mux.HandleFunc("/api/admin/provider-service", loggingMiddleware(requireAuth(providerServiceStatusHandler(providerSvc))))
+		mux.HandleFunc("/api/admin/provider-service/start", loggingMiddleware(requireAuth(providerServiceStartHandler(providerSvc))))
+		mux.HandleFunc("/api/admin/provider-service/stop", loggingMiddleware(requireAuth(providerServiceStopHandler(providerSvc))))
+		mux.HandleFunc("/api/admin/provider-service/models/refresh", loggingMiddleware(requireAuth(providerServiceModelsRefreshHandler(providerSvc))))
 	}
 	// 免费层 sidecar：状态 / 环境检查 / 重启（设置页）。
 	mux.HandleFunc("/api/admin/free-sidecar/status", loggingMiddleware(requireAuth(managerInst.FreeSidecarStatusHandler())))

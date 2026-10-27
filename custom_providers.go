@@ -25,6 +25,35 @@ import (
 // 厂商热重建
 // ---------------------------------------------------------------------------
 
+// providerCfgsForProcess 按进程角色裁剪厂商注册表：
+//   - 供应商服务（-provider-service）：只保留 type=custom，插件经 remote 桥接单独并入；
+//   - 其他进程：原样（实例/网关的 custom 剔除在 injectVendorConfig 完成）。
+func providerCfgsForProcess(cfgs []ProviderCfg) []ProviderCfg {
+	if !providerServiceMode {
+		return cfgs
+	}
+	out := make([]ProviderCfg, 0, len(cfgs))
+	for _, pc := range cfgs {
+		if pc.Type == "custom" {
+			out = append(out, pc)
+		}
+	}
+	return out
+}
+
+// providersWithoutCustom 生成实例/网关配置时剔除自定义源：
+// 自定义源已迁到供应商服务（50080），不再随 OpenCode 池子进程启动/传播。
+func providersWithoutCustom(cfgs []map[string]any) []map[string]any {
+	out := make([]map[string]any, 0, len(cfgs))
+	for _, p := range cfgs {
+		if t, _ := p["type"].(string); t == "custom" {
+			continue
+		}
+		out = append(out, p)
+	}
+	return out
+}
+
 var (
 	vendorsSigMu   sync.Mutex
 	lastVendorsSig string
@@ -77,6 +106,8 @@ func rebuildVendors() {
 	configMu.RLock()
 	cfgs := append([]ProviderCfg(nil), providersCfg...)
 	configMu.RUnlock()
+	// 供应商服务只装配自定义源；OpenCode/内建厂商不进 50080。
+	cfgs = providerCfgsForProcess(cfgs)
 
 	old := map[string]contract.Vendor{}
 	for _, v := range globalAgg.Vendors() {
@@ -121,7 +152,21 @@ func rebuildVendors() {
 	reused := []string{}
 	fresh := []string{}
 	skipped := []string{}
-	if len(cfgs) > 0 {
+	if providerServiceMode {
+		// 供应商服务：只注册自定义源；没有 custom 条目时保持空集合，
+		// 绝不回退到「自动注册内建厂商」（否则 OpenCode 又混进 50080）。
+		for _, pc := range cfgs {
+			if pc.ID == "" || (pc.Enabled != nil && !*pc.Enabled) {
+				continue
+			}
+			if v, ok := create(pc); ok {
+				list = append(list, v)
+				fresh = append(fresh, pc.ID)
+			} else {
+				skipped = append(skipped, pc.ID)
+			}
+		}
+	} else if len(cfgs) > 0 {
 		for _, pc := range cfgs {
 			if pc.ID == "" || (pc.Enabled != nil && !*pc.Enabled) {
 				continue
@@ -522,15 +567,11 @@ func applyCustomProvidersSave(m *manager.Manager, inputs []customProviderInput) 
 	applyConfig(cfg)
 	rebuildVendors()
 
-	// manager 配置透传：后续生成的实例/网关子进程配置继承自定义源（尽力而为）。
+	// manager 配置透传：供应商服务与主进程共用同一 config.json，custom 保存后
+	// 50080 经配置监视热重建（不再向实例/网关 runtime 配置传播，见 2026-10 拆分）。
 	if m != nil {
 		if err := m.SyncCustomProviders(configPath, customEntriesForManager(kept)); err != nil {
 			slog.Warn("sync custom providers to manager config failed", "error", err)
-		}
-		// 传播到已存在实例/网关的 runtime 配置：运行中的子进程经 3s 配置监视
-		// 热重建厂商（不重启即出现在其 /v1/models），停着的实例保持磁盘一致。
-		if err := m.PropagateCustomProviders(); err != nil {
-			slog.Warn("propagate custom providers to runtime configs failed", "error", err)
 		}
 	}
 

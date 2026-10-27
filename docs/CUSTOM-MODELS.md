@@ -1,16 +1,18 @@
 # 自定义模型源使用指南
 
-> 面板第七页「自定义模型」——用你自己的 API Key 接入任意第三方模型供应商，与内建的免费源（OpenCode）并列聚合在同一个网关下。
+> 面板第七页「自定义模型」——用你自己的 API Key 接入任意第三方模型供应商。
+> 2026-10 起自定义源与插件供应商独立到**供应商服务**（默认 `127.0.0.1:50080`），
+> 不再与 OpenCode 免费池（统一网关 40080）混在一起。
 
 ## 这是什么
 
-很多工具（Claude Code、Cursor、Cline 等）只认一个 OpenAI 兼容端点。本功能让你像其他 API 路由器一样：**填 API 地址 + 协议 + Key，即可把第三方供应商（GLM、DeepSeek、Kimi、OpenRouter、OpenAI、Anthropic、Gemini……）的模型接入本项目的统一网关**——统一鉴权、统一 `/v1/models`、统一统计与调用日志，并复用节点池/多实例的出口能力。
+很多工具（Claude Code、Cursor、Cline 等）只认一个 OpenAI 兼容端点。本功能让你像其他 API 路由器一样：**填 API 地址 + 协议 + Key，即可把第三方供应商（GLM、DeepSeek、Kimi、OpenRouter、OpenAI、Anthropic、Gemini……）的模型接入供应商服务**——统一鉴权、统一 `/v1/models`、统一统计与调用日志。
 
 核心特性：
 
 - **可同时接入多个源**，每个源一个独立 ID；支持 **OpenAI 兼容 / Anthropic / OpenAI Responses / Gemini** 四种上游协议
 - **多 Key 池**：一个源配多个 Key，可选 **轮询（round_robin）** 或 **错误转移（failover）** 调度；429 自动冷却（读 `Retry-After`）、401/403 自动禁用并换 Key
-- **保存即热生效**：无需重启网关，也不用重启实例池/独享实例
+- **保存即热生效**：无需重启供应商服务
 - 模型清单**磁盘缓存**：重启后第一个请求即返回模型列表，不依赖上游可达
 - 调用链路完整复用：token 统计、调用日志、失败切换（厂商级 failover）
 
@@ -29,14 +31,19 @@
 之后在任意客户端：
 
 ```bash
-# 模型列表：自定义模型带 {源ID}/ 前缀
-curl http://127.0.0.1:40080/v1/models
+# 模型列表：自定义模型带 {源ID}/ 前缀（供应商服务端口 50080）
+curl http://127.0.0.1:50080/v1/models \
+  -H 'Authorization: Bearer sk-unified-local'
 
 # 对话（三种入站协议都行，OpenAI / Claude / Responses）
-curl http://127.0.0.1:40080/v1/chat/completions \
+curl http://127.0.0.1:50080/v1/chat/completions \
+  -H 'Authorization: Bearer sk-unified-local' \
   -H 'Content-Type: application/json' \
   -d '{"model":"myglm/glm-4.7","messages":[{"role":"user","content":"你好"}]}'
 ```
+
+> OpenCode 免费模型仍走统一网关 `40080`；两端口互不影响。密钥与统一网关同源
+> （默认 `sk-unified-local`，可在面板修改 `gateway_key`）。
 
 ## 支持的协议与地址示例
 

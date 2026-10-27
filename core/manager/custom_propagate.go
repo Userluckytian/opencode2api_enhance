@@ -132,3 +132,61 @@ func providersEquivalent(a, b []map[string]any) bool {
 	}
 	return true
 }
+
+// StripCustomProvidersFromRuntime 从已存在的实例/网关配置中移除 type=custom 条目。
+// 2026-10 拆分迁移：自定义源改由供应商服务（50080）承载，OpenCode 池子进程不再注册。
+// providers 被清空时删除该键，让子进程回退「自动注册内建（opencode）」语义。
+// 仅写有变化的文件；运行中的子进程经 3s 配置监视热重建。
+func (m *Manager) StripCustomProvidersFromRuntime() error {
+	entries, err := os.ReadDir(m.paths.RuntimeDir)
+	if err != nil {
+		return nil // runtime 目录不存在 = 尚无实例/网关
+	}
+	for _, e := range entries {
+		if !e.IsDir() {
+			continue
+		}
+		cfgPath := filepath.Join(m.paths.RuntimeDir, e.Name(), "opencode2api.json")
+		data, err := os.ReadFile(cfgPath)
+		if err != nil {
+			continue
+		}
+		var cfg map[string]any
+		if err := json.Unmarshal(data, &cfg); err != nil {
+			continue
+		}
+		raw, ok := cfg["providers"].([]any)
+		if !ok {
+			continue
+		}
+		kept := make([]any, 0, len(raw))
+		removed := 0
+		for _, p := range raw {
+			if m, ok := p.(map[string]any); ok {
+				if t, _ := m["type"].(string); t == "custom" {
+					removed++
+					continue
+				}
+			}
+			kept = append(kept, p)
+		}
+		if removed == 0 {
+			continue
+		}
+		if len(kept) == 0 {
+			delete(cfg, "providers")
+		} else {
+			cfg["providers"] = kept
+		}
+		out, err := json.MarshalIndent(cfg, "", "  ")
+		if err != nil {
+			continue
+		}
+		if err := WriteFileAtomic(cfgPath, out, 0o644); err != nil {
+			slog.Warn("strip custom providers from runtime config failed", "path", cfgPath, "error", err)
+			continue
+		}
+		slog.Info("stripped custom providers from runtime config", "path", cfgPath, "removed", removed)
+	}
+	return nil
+}

@@ -24,6 +24,9 @@ func (m *Manager) DataClean(runner Runner, gw *Gateway, level int) error {
 	}
 	m.StopAllInstances(runner)
 	time.Sleep(300 * time.Millisecond)
+	// 供应商服务（50080）持有 runtime/_provider-service 下的日志/统计文件句柄，
+	// 不先停掉会导致 Windows 上 RemoveAll 失败。它由主进程看护，清理后会自动重启。
+	m.stopProviderServiceForClean()
 
 	if err := m.cleanDataAt(level); err != nil {
 		return err
@@ -115,4 +118,18 @@ func copyFile(src, dst string) error {
 		_ = os.MkdirAll(dir, 0o755)
 	}
 	return os.WriteFile(dst, data, 0o644)
+}
+
+// stopProviderServiceForClean 请求供应商服务优雅退出，释放 runtime/_provider-service
+// 下的文件句柄。服务由主进程看护，清理完成后会自动重启；未运行则直接跳过。
+func (m *Manager) stopProviderServiceForClean() {
+	port := m.managerProviderPort()
+	if !probePort(port, statsResetProbeTimeout) {
+		return
+	}
+	_, _, _ = httpRequest("POST", "/api/admin/shutdown", port, 2*time.Second, effectiveGatewayKey(m.loadConfig()), nil, 2*time.Second)
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) && probePort(port, 200*time.Millisecond) {
+		time.Sleep(100 * time.Millisecond)
+	}
 }

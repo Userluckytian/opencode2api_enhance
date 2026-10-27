@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import clsx from 'clsx'
-import { Loader2, Pencil, Plus, PlugZap, Activity, Trash2, X, Plug, RefreshCw, ListChecks, Search, Globe } from 'lucide-react'
-import { api, type CustomKeyStrategy, type CustomProviderInput, type CustomProviderTestResult, type CustomProviderView, type CustomProtocol, type PluginModelDetail, type PluginProviderView, type PluginStatus } from '../lib/api'
+import { Loader2, Pencil, Plus, PlugZap, Activity, Trash2, X, Plug, RefreshCw, ListChecks, Search, Globe, Copy, Play, Square, Server } from 'lucide-react'
+import { api, type CustomKeyStrategy, type CustomProviderInput, type CustomProviderTestResult, type CustomProviderView, type CustomProtocol, type PluginModelDetail, type PluginProviderView, type PluginStatus, type ProviderServiceStatus } from '../lib/api'
 
 // 自定义模型源表单（新增/编辑共用）。编辑时 key 留空 = 保留原 key。
 type FormState = {
@@ -167,6 +167,10 @@ export default function CustomModelsPage({ toast }: { toast: (msg: string, ok?: 
   const [confirmClear, setConfirmClear] = useState(false)
   const [clearing, setClearing] = useState(false)
   const [resetKeysId, setResetKeysId] = useState<string | null>(null)
+  // 供应商服务（自定义源 + 插件供应商的独立入口，默认 50080）
+  const [provSvc, setProvSvc] = useState<ProviderServiceStatus | null>(null)
+  const [provBusy, setProvBusy] = useState(false)
+  const [provModelsRefreshing, setProvModelsRefreshing] = useState(false)
 
   // 双标签：默认展示自定义供应商 tab（插件列表仍在 useEffect 预加载，切过去即有数据）
   const [tab, setTab] = useState<'plugins' | 'custom'>('custom')
@@ -195,9 +199,56 @@ export default function CustomModelsPage({ toast }: { toast: (msg: string, ok?: 
     }
   }
 
+  const loadProviderSvc = async () => {
+    try {
+      setProvSvc(await api.providerServiceStatus())
+    } catch {
+      // 旧后端无该端点：忽略，卡片保持默认展示
+    }
+  }
+
+  const copyText = async (text: string, label: string) => {
+    try {
+      await navigator.clipboard.writeText(text)
+      toastRef.current(`已复制${label}`, true)
+    } catch {
+      toastRef.current('复制失败', false)
+    }
+  }
+
+  const doToggleProviderService = async (start: boolean) => {
+    setProvBusy(true)
+    try {
+      const ps = start ? await api.providerServiceStart() : await api.providerServiceStop()
+      setProvSvc(ps)
+      toastRef.current(start ? '供应商服务已启动' : '供应商服务已停止', true)
+    } catch (e) {
+      toastRef.current(e instanceof Error ? e.message : String(e), false)
+    } finally {
+      setProvBusy(false)
+    }
+  }
+
+  const handleRefreshProvModels = async () => {
+    setProvModelsRefreshing(true)
+    try {
+      setProvSvc(await api.providerServiceModelsRefresh())
+    } catch (e) {
+      toastRef.current(e instanceof Error ? e.message : String(e), false)
+    } finally {
+      setProvModelsRefreshing(false)
+    }
+  }
+
+  useEffect(() => {
+    const t = setInterval(() => { void loadProviderSvc() }, 15000)
+    return () => clearInterval(t)
+  }, [])
+
   useEffect(() => {
     void reload()
     void loadPlugins()
+    void loadProviderSvc()
   }, [])
 
   useEffect(() => {
@@ -683,6 +734,82 @@ export default function CustomModelsPage({ toast }: { toast: (msg: string, ok?: 
               </button>
             </>
           )}
+        </div>
+      </div>
+
+      {/* 供应商服务：自定义源 + 插件供应商的独立入口（与 OpenCode 免费池解耦） */}
+      <div className="bg-white rounded-2xl border border-zinc-200 shadow-sm p-5">
+        <div className="flex items-center gap-2 mb-4">
+          <Server size={16} className="text-teal-600" />
+          <h3 className="text-[15px] font-semibold text-zinc-900">供应商服务</h3>
+          <span className="flex-1" />
+          <span className="text-[12px] text-zinc-400">{provSvc?.message || '加载中…'}</span>
+          <button
+            onClick={() => void doToggleProviderService(!provSvc?.running)}
+            disabled={provBusy}
+            className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-[13px] text-teal-700 bg-teal-50 border border-teal-100 hover:bg-teal-100 disabled:cursor-not-allowed disabled:opacity-50"
+          >
+            {provBusy ? <Loader2 size={14} className="animate-spin" /> : provSvc?.running ? <Square size={13} /> : <Play size={13} />}
+            {provSvc?.running ? '停止' : '启动'}
+          </button>
+        </div>
+
+        <div className="grid grid-cols-2 gap-4">
+          <div className="rounded-xl border border-zinc-100 bg-zinc-50/60 p-4">
+            <div className="text-[12px] text-zinc-500 mb-1.5">供应商 API 地址（自定义源 + 插件）</div>
+            <button
+              onClick={() => void copyText(provSvc?.address ?? 'http://127.0.0.1:50080/v1', '供应商 API 地址')}
+              className="flex items-center gap-1 text-teal-700 hover:underline"
+              title="点击复制"
+            >
+              <code className="text-[13px]">{provSvc?.address ?? 'http://127.0.0.1:50080/v1'}</code>
+              <Copy size={12} />
+            </button>
+            <div className="mt-1 text-[11px] text-zinc-400">OpenCode 免费池仍用统一网关（40080），两者互不影响</div>
+          </div>
+
+          <div className="rounded-xl border border-zinc-100 bg-zinc-50/60 p-4">
+            <div className="text-[12px] text-zinc-500 mb-1.5">密钥</div>
+            <button
+              onClick={() => void copyText(provSvc?.api_key ?? 'sk-unified-local', '供应商服务密钥')}
+              className="flex items-center gap-1 text-zinc-600 hover:underline"
+              title="点击复制"
+            >
+              <code className="text-[13px]">{provSvc?.api_key ?? 'sk-unified-local'}</code>
+              <Copy size={12} />
+            </button>
+            <div className="mt-1 text-[11px] text-zinc-400">与统一网关同源；配置客户端时使用此密钥</div>
+          </div>
+        </div>
+
+        {/* 可用模型：与网关卡片的「可用模型」同款 chips */}
+        <div className="mt-4 flex flex-wrap items-center gap-x-4 gap-y-2">
+          <span className="text-[12px] text-zinc-500">供应商服务可用模型：</span>
+          {provModelsRefreshing ? (
+            <span className="flex items-center gap-1 text-[12px] text-zinc-400">
+              <Loader2 size={12} className="animate-spin" /> 刷新中…
+            </span>
+          ) : (provSvc?.models?.length ?? 0) > 0 ? (
+            <div className="flex flex-wrap gap-1.5">
+              {provSvc!.models.map((m) => (
+                <span key={m} className="px-2 py-0.5 rounded-md bg-teal-50 text-teal-700 text-[11px] font-medium">
+                  {m}
+                </span>
+              ))}
+            </div>
+          ) : provSvc?.models_error ? (
+            <span className="text-[12px] text-red-500">{provSvc.models_error}</span>
+          ) : (
+            <span className="text-[12px] text-zinc-400">—</span>
+          )}
+          <button
+            onClick={() => void handleRefreshProvModels()}
+            disabled={provModelsRefreshing}
+            className="flex items-center gap-1 px-2 py-1 rounded-md text-[11px] text-zinc-500 hover:bg-zinc-100 hover:text-zinc-700 disabled:opacity-50"
+            title="强制重新拉取供应商服务模型目录（绕过缓存，同步等待结果）"
+          >
+            <RefreshCw size={11} /> 刷新模型
+          </button>
         </div>
       </div>
 

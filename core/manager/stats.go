@@ -401,6 +401,24 @@ func (m *Manager) ResetStats(clearDeleted bool) ResetStatsResult {
 		}
 	}
 
+	// 供应商服务（自定义源 + 插件）：与网关同款 HTTP 优先、未运行则磁盘覆写。
+	psPort := m.managerProviderPort()
+	psDir := filepath.Join(m.paths.RuntimeDir, providerServiceDirBase)
+	if probePort(psPort, statsResetProbeTimeout) {
+		status, _, err := httpDeleteJSON(psPort, "/api/reset-stats", 6*time.Second, effectiveGatewayKey(m.loadConfig()))
+		if err == nil && status >= 200 && status < 300 {
+			res.ResetCount++
+		} else if err != nil {
+			res.Failed = append(res.Failed, "供应商服务: "+err.Error())
+		} else {
+			res.Failed = append(res.Failed, "供应商服务: HTTP "+strconv.Itoa(status))
+		}
+	} else if data, err := os.ReadFile(filepath.Join(psDir, "stats.json")); err == nil && len(data) > 0 {
+		if writeEmptyStatsFile(filepath.Join(psDir, "stats.json"), false) == nil {
+			res.ResetCount++
+		}
+	}
+
 	if clearDeleted {
 		if entries, err := os.ReadDir(m.paths.RuntimeDir); err == nil {
 			for _, entry := range entries {
@@ -408,7 +426,7 @@ func (m *Manager) ResetStats(clearDeleted bool) ResetStatsResult {
 					continue
 				}
 				name := entry.Name()
-				if name == "_unified-gateway" || name == "_probe" || known[name] {
+				if name == "_unified-gateway" || name == "_probe" || name == providerServiceDirBase || known[name] {
 					continue
 				}
 				dir := filepath.Join(m.paths.RuntimeDir, name)

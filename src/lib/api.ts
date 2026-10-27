@@ -494,6 +494,19 @@ export type GatewayStatus = {
   free_models_error: string | null
 }
 
+/** 供应商服务（自定义源 + 插件供应商独立入口，默认 50080） */
+export type ProviderServiceStatus = {
+  running: boolean
+  address: string
+  port: number
+  api_key: string
+  message: string
+  /** 当前暴露的模型（自定义源 + 插件） */
+  models: string[]
+  models_updated_at?: number
+  models_error?: string
+}
+
 export type RestartPoolResult = {
   stopped: number
   started: number
@@ -998,6 +1011,12 @@ export const api = {
   gatewayStop: () => req<void>('POST', '/gateway/stop'),
   setJoinGateway: (name: string, join: boolean) =>
     req<void>('POST', '/instances/join-gateway', { name, join }),
+
+  // 供应商服务（自定义源 + 插件供应商独立入口，默认 50080）
+  providerServiceStatus: () => req<ProviderServiceStatus>('GET', '/provider-service'),
+  providerServiceStart: () => req<ProviderServiceStatus>('POST', '/provider-service/start'),
+  providerServiceStop: () => req<ProviderServiceStatus>('POST', '/provider-service/stop'),
+  providerServiceModelsRefresh: () => req<ProviderServiceStatus>('POST', '/provider-service/models/refresh'),
 
   // 一键重启实例池（全停→强制清端口→全启→网关同步）
   restartPool: () => req<RestartPoolResult>('POST', '/pool/restart'),

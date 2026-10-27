@@ -50,6 +50,7 @@ sudo systemctl status opencode2api
 | `call_log_max` | int | 内存环形日志/回放保留上限（不影响日志页展示全部历史；日志页默认读取全部） |
 | `show_node_prefix` | bool | 对话流是否展示「节点 · 模型」前缀 |
 | `gateway_port` | int | 统一网关监听端口（0 = 回退槽位默认，release 槽位 +80） |
+| `provider_port` | int | 供应商服务监听端口（自定义源 + 插件供应商；0 = 默认 `50080`） |
 | `gateway_key` | string | 统一网关鉴权密钥（空 = 默认 `sk-unified-local`；设置须 ≥8 字符） |
 | `subscribe_url` | string | 订阅 URL（空 = 未配置） |
 | `subscribe_interval_min` | int | 订阅自动拉取间隔（分钟，0 = 不自动拉取） |

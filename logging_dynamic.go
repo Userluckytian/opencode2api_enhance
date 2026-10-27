@@ -27,12 +27,13 @@ func setBaseLogLevel(l slog.Level) { logLevelVar.Set(l) }
 
 // ============================ 进程角色 ============================
 
-// 四类角色：管理器 / 网关子进程 / 实例子进程 / 探针子进程。
+// 五类角色：管理器 / 网关子进程 / 实例子进程 / 探针子进程 / 供应商服务。
 const (
-	RoleManager  = "manager"
-	RoleGateway  = "gateway"
-	RoleInstance = "instance"
-	RoleProbe    = "probe"
+	RoleManager         = "manager"
+	RoleGateway         = "gateway"
+	RoleInstance        = "instance"
+	RoleProbe           = "probe"
+	RoleProviderService = "provider-service"
 )
 
 var (
@@ -65,6 +66,8 @@ func resolveProcessRole() string {
 		return v
 	}
 	switch {
+	case providerServiceMode:
+		return RoleProviderService
 	case gatewayMode:
 		return RoleGateway
 	case callLogFlag:

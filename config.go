@@ -136,7 +136,14 @@ func applyConfig(cfg AppConfig) {
 	}
 	routingCfg = cfg.Routing
 	// auto 虚拟模型配置（nil 回默认：关闭 + balanced；键被清除时热重载即时生效）。
-	setAutoConfig(cfg.AutoModel)
+	if providerServiceMode {
+		// 供应商服务只承载 custom/插件，auto 是「实例池 × 模型」概念，必须关闭；
+		// 路由也清空，避免默认 provider 指向未注册的 opencode。
+		setAutoConfig(nil)
+		routingCfg = RoutingCfg{}
+	} else {
+		setAutoConfig(cfg.AutoModel)
+	}
 
 	if cfg.RouteMode == "round_robin" || cfg.RouteMode == "failover" || cfg.RouteMode == "smart" {
 		routeMode.Store(cfg.RouteMode)

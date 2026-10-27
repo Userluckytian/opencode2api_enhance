@@ -192,6 +192,8 @@ func (g *Gateway) startChild(runner Runner) error {
 			"-config", cfgPath,
 			"-password", pwd,
 			"-gateway",
+			// 插件子进程只由供应商服务（50080）托管，网关进程不再重复拉起。
+			"-no-plugins",
 			// P2: 注入实例池质量文件路径，子进程路由按质量分加权/熔断（空 = 无质量约束）。
 			"-pool-quality", filepath.Join(g.m.Paths().RuntimeDir, "pool_quality.json"),
 			// 网关日志级别：info 级包含 key 选择/流中断续写等诊断埋点（warn 会过滤掉）。

@@ -152,7 +152,7 @@ func (m *Manager) startInstanceLockFree(runner Runner, inst *Instance) error {
 	// -call-log：独享/池成员进程把调用日志写到 cwd/call_log.jsonl（日志页 S4 聚合读取）
 	ocPID, err := runner.Start(ExecSpec{
 		Bin:      m.binPath("opencode2api"),
-		Args:     []string{"-port", itoa(inst.Port), "-config", filepath.Join(dir, "opencode2api.json"), "-password", inst.Password, "-call-log"},
+		Args:     []string{"-port", itoa(inst.Port), "-config", filepath.Join(dir, "opencode2api.json"), "-password", inst.Password, "-call-log", "-no-plugins"},
 		Env:      append([]string{"OPCODE2API_ROLE=instance"}, traceEnvKV()...), // 阶段 2：自报角色（日志 role 字段 + /api/logs 过滤）；阶段 3：透传 OPENCODE2API_TRACE
 		Dir:      dir,                                                           // Go core 把 stats.json 写在 cwd
 		LogOut:   filepath.Join(dir, "logs", "opencode2api.out.log"),

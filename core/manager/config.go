@@ -120,6 +120,7 @@ type Config struct {
 	// 端口配置（0 = 未设置，按 env > config > 编译默认 三源读取）：
 	// 供 headless/Web 直跑与自定义部署使用；桌面壳经环境变量按槽位表注入（优先于 config）。
 	GatewayPort      uint16 `json:"gateway_port,omitempty"`
+	ProviderPort     uint16 `json:"provider_port,omitempty"`
 	InstanceBasePort uint16 `json:"instance_base_port,omitempty"`
 	ProbeAPIPort     uint16 `json:"probe_api_port,omitempty"`
 	ProbeSocksPort   uint16 `json:"probe_socks_port,omitempty"`

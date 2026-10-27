@@ -206,6 +206,32 @@ func newAggregator() *aggregator.Aggregator {
 	configMu.RLock()
 	cfgs := append([]ProviderCfg(nil), providersCfg...)
 	configMu.RUnlock()
+	// 供应商服务只装配自定义源；插件由 remote 桥接随后并入。
+	cfgs = providerCfgsForProcess(cfgs)
+
+	// 供应商服务：显式只注册 custom，即使为空也不回退内建厂商。
+	if providerServiceMode {
+		for _, pc := range cfgs {
+			if pc.Enabled != nil && !*pc.Enabled {
+				continue
+			}
+			name := pc.Name
+			if name == "" {
+				name = pc.ID
+			}
+			if v, err := contract.Create(pc.Type, contract.ProviderSpec{
+				Type:   pc.Type,
+				ID:     pc.ID,
+				Name:   name,
+				Params: mergeVendorParams(pc.Type, pc.Params),
+			}); err == nil {
+				agg.Register(v)
+			} else {
+				slog.Warn("vendor create failed, skipped", "type", pc.Type, "error", err)
+			}
+		}
+		return agg
+	}
 
 	// 有显式配置 → 按配置注册（允许 enabled:false 关闭某厂商）
 	if len(cfgs) > 0 {

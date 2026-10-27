@@ -121,6 +121,12 @@ func (m *Manager) InstanceCallLogPath(name string) string {
 	return filepath.Join(m.paths.RuntimeDirOf(name), "call_log.jsonl")
 }
 
+// ProviderServiceCallLogPath 返回供应商服务运行目录（cwd）下的调用日志路径。
+// 自定义源 + 插件的请求在 50080 处理，日志与网关/实例分开落盘后由日志页聚合。
+func (m *Manager) ProviderServiceCallLogPath() string {
+	return filepath.Join(m.paths.RuntimeDir, providerServiceDirBase, "call_log.jsonl")
+}
+
 // ReadCallLog 聚合读取调用日志：统一网关日志 + 各 Running 实例（含独享）
 // call_log.jsonl，按实例名标注 Source、按时间合并升序（旧→新，与既有 API 语义一致）。
 // max<=0 = 全部历史；max>0 = 只取最近 max 条。缺失/损坏 → 跳过。
@@ -139,6 +145,8 @@ func (m *Manager) ReadCallLog(max int) []CallLogRecord {
 	}
 	var files []logFile
 	files = append(files, logFile{path: m.CallLogPath()})
+	// 供应商服务（自定义源 + 插件）独立日志：与网关/实例一起聚合。
+	files = append(files, logFile{path: m.ProviderServiceCallLogPath(), source: "供应商服务"})
 	for _, inst := range m.ListInstances() {
 		if inst.Status.State != "Running" {
 			continue
@@ -326,6 +334,16 @@ func (m *Manager) ClearCallLog() error {
 		}
 	} else if err := removeLogFileRetry(m.CallLogPath()); err != nil {
 		errs = append(errs, "统一网关: "+err.Error())
+	}
+
+	// 供应商服务（自定义源 + 插件）
+	psPort := m.managerProviderPort()
+	if probePort(psPort, statsResetProbeTimeout) {
+		if err := clearLogHTTP(psPort, effectiveGatewayKey(m.loadConfig()), "供应商服务"); err != nil {
+			errs = append(errs, err.Error())
+		}
+	} else if err := removeLogFileRetry(m.ProviderServiceCallLogPath()); err != nil {
+		errs = append(errs, "供应商服务: "+err.Error())
 	}
 
 	// 各实例（含独享实例 cwd 下的 call_log.jsonl）
