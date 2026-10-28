@@ -60,11 +60,11 @@ func TestValidateUpstreamBaseURL_Blocks(t *testing.T) {
 }
 
 // TestPutSettingsRejectsSSRF 是意图要求的接口级单测：
-// PUT /api/admin/settings 携带非法 upstream_base_url 必须 400，且配置保持原值。
+// POST /api/admin/upstreams 携带非法 base_url 必须 400，且不落盘。
 func TestPutSettingsRejectsSSRF(t *testing.T) {
 	app, srv := newAdminApp(t)
 	defer srv.Close()
-	orig := app.Cfg.UpstreamBaseURL
+	before := len(app.Cfg.Upstreams)
 	tok := adminToken(t, srv)
 
 	bad := []string{
@@ -73,8 +73,8 @@ func TestPutSettingsRejectsSSRF(t *testing.T) {
 		"file:///etc/passwd",
 	}
 	for _, u := range bad {
-		body := fmt.Sprintf(`{"upstream_base_url":%q,"ttl_days":1,"token_quota":1000,"rate_limit_per_min":10}`, u)
-		req, _ := http.NewRequest(http.MethodPut, srv.URL+"/api/admin/settings", strings.NewReader(body))
+		body := fmt.Sprintf(`{"id":"bad","base_url":%q,"enabled":true}`, u)
+		req, _ := http.NewRequest(http.MethodPost, srv.URL+"/api/admin/upstreams", strings.NewReader(body))
 		req.Header.Set("Authorization", "Bearer "+tok)
 		resp, err := srv.Client().Do(req)
 		if err != nil {
@@ -86,8 +86,8 @@ func TestPutSettingsRejectsSSRF(t *testing.T) {
 		if resp.StatusCode != http.StatusBadRequest {
 			t.Fatalf("%s 应返回 400，实际 %d", u, resp.StatusCode)
 		}
-		if app.Cfg.UpstreamBaseURL != orig {
-			t.Fatalf("%s 被拒绝后配置被改写: %q", u, app.Cfg.UpstreamBaseURL)
+		if len(app.Cfg.Upstreams) != before {
+			t.Fatalf("%s 被拒绝后仍写入了上游列表: %+v", u, app.Cfg.Upstreams)
 		}
 	}
 
@@ -100,8 +100,8 @@ func TestPutSettingsRejectsSSRF(t *testing.T) {
 		return nil, fmt.Errorf("no such host")
 	}
 	app.Guard = g
-	body := `{"upstream_base_url":"http://internal.evil.example/v1","ttl_days":1,"token_quota":1000,"rate_limit_per_min":10}`
-	req, _ := http.NewRequest(http.MethodPut, srv.URL+"/api/admin/settings", strings.NewReader(body))
+	body := `{"id":"bad2","base_url":"http://internal.evil.example/v1","enabled":true}`
+	req, _ := http.NewRequest(http.MethodPost, srv.URL+"/api/admin/upstreams", strings.NewReader(body))
 	req.Header.Set("Authorization", "Bearer "+tok)
 	resp, err := srv.Client().Do(req)
 	if err != nil {
@@ -111,13 +111,13 @@ func TestPutSettingsRejectsSSRF(t *testing.T) {
 	if resp.StatusCode != http.StatusBadRequest {
 		t.Fatalf("内网域名应 400，实际 %d", resp.StatusCode)
 	}
-	if app.Cfg.UpstreamBaseURL != orig {
-		t.Fatalf("内网域名被拒后配置被改写: %q", app.Cfg.UpstreamBaseURL)
+	if len(app.Cfg.Upstreams) != before {
+		t.Fatalf("内网域名被拒后仍写入了上游列表: %+v", app.Cfg.Upstreams)
 	}
 }
 
 // TestPutSettingsAcceptsLoopbackUpstream 验证修复不破坏现网形态：
-// PUT http://127.0.0.1:<port>/v1 应 200，且后续 /v1/models 仍可用。
+// POST http://127.0.0.1:<port>/v1 应 200，且后续 /v1/models 仍可用。
 func TestPutSettingsAcceptsLoopbackUpstream(t *testing.T) {
 	up := httptest.NewServer(&upstreamHandler{stream: false, usage: `"prompt_tokens":1,"completion_tokens":1,"total_tokens":2`})
 	defer up.Close()
@@ -131,8 +131,8 @@ func TestPutSettingsAcceptsLoopbackUpstream(t *testing.T) {
 	defer srv.Close()
 	tok := adminToken(t, srv)
 
-	body := fmt.Sprintf(`{"upstream_base_url":%q,"ttl_days":1,"token_quota":100000,"rate_limit_per_min":100}`, up.URL+"/v1")
-	req, _ := http.NewRequest(http.MethodPut, srv.URL+"/api/admin/settings", strings.NewReader(body))
+	body := fmt.Sprintf(`{"id":"local","base_url":%q,"enabled":true}`, up.URL+"/v1")
+	req, _ := http.NewRequest(http.MethodPost, srv.URL+"/api/admin/upstreams", strings.NewReader(body))
 	req.Header.Set("Authorization", "Bearer "+tok)
 	resp, err := srv.Client().Do(req)
 	if err != nil {
@@ -142,8 +142,9 @@ func TestPutSettingsAcceptsLoopbackUpstream(t *testing.T) {
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("合法回环上游应 200，实际 %d", resp.StatusCode)
 	}
-	if app.Cfg.UpstreamBaseURL != up.URL+"/v1" {
-		t.Fatalf("配置未生效: %q", app.Cfg.UpstreamBaseURL)
+	added, ok := FindUpstream(app.Cfg.Upstreams, "local")
+	if !ok || added.BaseURL != up.URL+"/v1" {
+		t.Fatalf("配置未生效: %+v", app.Cfg.Upstreams)
 	}
 
 	// /v1/models 由本地按 Key 应答（finding 546），应仍然 200。
@@ -163,7 +164,7 @@ func TestPutSettingsAcceptsLoopbackUpstream(t *testing.T) {
 	}
 
 	// 通过受保护 client 真正打一次上游（证明回环上游在防护下仍可用）。
-	models, err := FetchModels(app.Cfg.UpstreamBaseURL, "", app.Client)
+	models, err := FetchModels(added.BaseURL, "", app.Client)
 	if err != nil {
 		t.Fatalf("受保护 client 访问白名单回环上游失败: %v", err)
 	}

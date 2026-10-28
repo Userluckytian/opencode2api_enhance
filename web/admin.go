@@ -97,25 +97,7 @@ func (a *App) handleOverview(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-func (a *App) handleAdminModels(w http.ResponseWriter, r *http.Request) {
-	a.Mu.RLock()
-	allowed := append([]string(nil), a.Cfg.AllowedModels...)
-	upstream := a.Cfg.UpstreamBaseURL
-	apiKey := a.Cfg.UpstreamAPIKey
-	a.Mu.RUnlock()
-	out := map[string]any{"models": []string{}, "allowed": allowed}
-	if strings.TrimSpace(upstream) == "" {
-		out["warning"] = "尚未配置上游实例地址，请先到「参数设置」填写后再拉取模型"
-	} else {
-		models, err := FetchModels(upstream, apiKey, a.client())
-		if err != nil {
-			out["warning"] = "无法连接上游拉取模型: " + err.Error()
-		} else {
-			out["models"] = models
-		}
-	}
-	writeJSON(w, http.StatusOK, out)
-}
+// handleAdminModels 已迁移到 admin_upstreams.go（多上游版本，按上游分组返回）。
 
 func (a *App) handleSaveModels(w http.ResponseWriter, r *http.Request) {
 	var req struct {
@@ -139,21 +121,21 @@ func (a *App) handleSaveModels(w http.ResponseWriter, r *http.Request) {
 func (a *App) handleGetSettings(w http.ResponseWriter, r *http.Request) {
 	a.Mu.RLock()
 	out := map[string]any{
-		"upstream_base_url": a.Cfg.UpstreamBaseURL,
-		// 上游密钥不回传明文：管理员会话一旦泄露，明文密钥可直接绕过本服务
-		// 直连上游，等于绕过全部 IP 策略。页面只显示末 4 位。
-		"upstream_api_key_masked": maskSecret(a.Cfg.UpstreamAPIKey),
-		"upstream_api_key_set":    a.Cfg.UpstreamAPIKey != "",
-		"public_base_url":         a.Cfg.PublicBaseURL,
-		"ttl_days":                a.Cfg.TTLDays,
-		"token_quota":             a.Cfg.TokenQuota,
-		"rate_limit_per_min":      a.Cfg.RateLimitPerMin,
-		"lan_ip":                  lanIPv4(),
+		"public_base_url":    a.Cfg.PublicBaseURL,
+		"ttl_days":           a.Cfg.TTLDays,
+		"token_quota":        a.Cfg.TokenQuota,
+		"rate_limit_per_min": a.Cfg.RateLimitPerMin,
+		"lan_ip":             lanIPv4(),
 		// 只读展示：部署方下发的上游主机白名单（config.json / 环境变量），
 		// 管理 API 不可写，避免拿到管理员会话后自行扩白名单绕过 SSRF 防护。
 		"upstream_allowed_hosts": a.guard().AllowedHosts(),
 	}
 	a.Mu.RUnlock()
+	// 上游已改为独立列表管理（多上游）。这里仍回显一份只读摘要，
+	// 便于前端在「参数设置」页展示当前默认上游，避免与上游管理页割裂。
+	views, defaultID := a.upstreamViews()
+	out["upstreams"] = views
+	out["default_upstream_id"] = defaultID
 	writeJSON(w, http.StatusOK, out)
 }
 
@@ -164,16 +146,18 @@ func (a *App) handleGetSettings(w http.ResponseWriter, r *http.Request) {
 // 管理员（或拿到会话的攻击者）可以把上游指向 http://169.254.169.254/、内网任意
 // 主机端口，随后 /v1 请求或「拉取模型」就会由服务端代发，构成管理端 SSRF。
 // 校验失败返回 400 且保持原值不变（不落盘、不生效）。
+// handlePutSettings 保存参数设置。
+//
+// 多上游（2026-10-28）后，上游地址与密钥不再经本接口写入——改由
+// /api/admin/upstreams 逐条管理（每条的 base_url 都要单独过 SSRF 校验）。
+// 这里只保留额度/有效期/限速/对外地址。
 func (a *App) handlePutSettings(w http.ResponseWriter, r *http.Request) {
 	// 合并语义（修复 finding 564 / fact 591）：
 	// 旧实现 decode 进非指针结构体后整体赋值，前端只要漏提交一个字段（或攻击者
-	// 故意只发 {"token_quota":N}），其余字段就会被零值覆盖 —— upstream_base_url
-	// 变空（然后 /v1 直接 502）、rate_limit_per_min 变 0（等于关掉限速）、
-	// ttl_days 变 0（等于把已发 Key 改成永不过期）。
+	// 故意只发 {"token_quota":N}），其余字段就会被零值覆盖 ——
+	// rate_limit_per_min 变 0（等于关掉限速）、ttl_days 变 0（等于把已发 Key 改成永不过期）。
 	// 现在用指针字段：nil = 未提交 → 保持原值。
 	var req struct {
-		UpstreamBaseURL *string `json:"upstream_base_url"`
-		UpstreamAPIKey  *string `json:"upstream_api_key"`
 		PublicBaseURL   *string `json:"public_base_url"`
 		TTLDays         *int    `json:"ttl_days"`
 		TokenQuota      *int    `json:"token_quota"`
@@ -186,7 +170,7 @@ func (a *App) handlePutSettings(w http.ResponseWriter, r *http.Request) {
 
 	a.Mu.RLock()
 	curTTL, curQuota, curRate := a.Cfg.TTLDays, a.Cfg.TokenQuota, a.Cfg.RateLimitPerMin
-	curUpstream, curPublic := a.Cfg.UpstreamBaseURL, a.Cfg.PublicBaseURL
+	curPublic := a.Cfg.PublicBaseURL
 	a.Mu.RUnlock()
 
 	// ttl_days=0 表示「Key 永不过期」（用量由每日 08:00 自动重置的额度控制），
@@ -224,26 +208,6 @@ func (a *App) handlePutSettings(w http.ResponseWriter, r *http.Request) {
 		newRate = *req.RateLimitPerMin
 	}
 
-	// 上游地址 SSRF 校验：scheme 只允许 http/https、禁止 userinfo、解析主机名后
-	// 拒绝回环/RFC1918/链路本地/CGNAT/云元数据地址（除非该主机在部署方下发的白名单中；
-	// 元数据地址即便在白名单里也拒绝）。非法 → 400，配置保持原值。
-	newUpstream := curUpstream
-	if req.UpstreamBaseURL != nil {
-		newUpstream = strings.TrimSpace(*req.UpstreamBaseURL)
-		if err := ValidateUpstreamBaseURL(newUpstream, a.guard()); err != nil {
-			if a.Audit != nil {
-				a.Audit.Write(AuditEntry{
-					Time:   time.Now().Format(time.RFC3339),
-					Action: "update_settings",
-					Detail: fmt.Sprintf("upstream_base_url: rejected %q: %v", newUpstream, err),
-					IP:     clientIP(r),
-					Result: "denied",
-				})
-			}
-			writeErr(w, http.StatusBadRequest, "upstream_base_url 被拒绝: "+err.Error())
-			return
-		}
-	}
 	newPublic := curPublic
 	if req.PublicBaseURL != nil {
 		newPublic = strings.TrimSpace(*req.PublicBaseURL)
@@ -268,21 +232,11 @@ func (a *App) handlePutSettings(w http.ResponseWriter, r *http.Request) {
 	}
 
 	a.Mu.Lock()
-	oldKey := a.Cfg.UpstreamAPIKey
-	oldUpstream := a.Cfg.UpstreamBaseURL
 	oldQuota, oldRate, oldTTL := a.Cfg.TokenQuota, a.Cfg.RateLimitPerMin, a.Cfg.TTLDays
-	a.Cfg.UpstreamBaseURL = newUpstream
-	// 上游密钥：留空/未提交 = 保持原值不变（页面不再回传明文，无法原样回填）。
-	keyChanged := false
-	if req.UpstreamAPIKey != nil && strings.TrimSpace(*req.UpstreamAPIKey) != "" {
-		a.Cfg.UpstreamAPIKey = strings.TrimSpace(*req.UpstreamAPIKey)
-		keyChanged = true
-	}
 	a.Cfg.PublicBaseURL = newPublic
 	a.Cfg.TTLDays = newTTL
 	a.Cfg.TokenQuota = newQuota
 	a.Cfg.RateLimitPerMin = newRate
-	newKey := a.Cfg.UpstreamAPIKey
 	err := a.Cfg.Save(a.ConfigPath)
 	a.Mu.Unlock()
 	if err != nil {
@@ -307,30 +261,30 @@ func (a *App) handlePutSettings(w http.ResponseWriter, r *http.Request) {
 		log.Printf("[额度变更] token_quota %d → %d，将在次日 08:00 对存量 Key 生效（当天不打断在用 Key）",
 			oldQuota, newQuota)
 	}
-	// 敏感配置变更落审计：谁在什么时候把上游指向了哪里、换了什么密钥。
+	// 敏感配置变更落审计（上游地址/密钥已改由 /api/admin/upstreams 记录）。
 	if a.Audit != nil {
-		detail := fmt.Sprintf("upstream_base_url: %s → %s", oldUpstream, newUpstream)
-		if keyChanged {
-			detail += fmt.Sprintf("; upstream_api_key: %s → %s", maskSecret(oldKey), maskSecret(newKey))
-		} else {
-			detail += "; upstream_api_key: 未修改"
-		}
+		detail := ""
 		if newQuota != oldQuota {
-			detail += fmt.Sprintf("; token_quota: %d → %d", oldQuota, newQuota)
+			detail += fmt.Sprintf("token_quota: %d → %d; ", oldQuota, newQuota)
 		}
 		if newRate != oldRate {
-			detail += fmt.Sprintf("; rate_limit_per_min: %d → %d", oldRate, newRate)
+			detail += fmt.Sprintf("rate_limit_per_min: %d → %d; ", oldRate, newRate)
 		}
 		if newTTL != oldTTL {
-			detail += fmt.Sprintf("; ttl_days: %d → %d", oldTTL, newTTL)
+			detail += fmt.Sprintf("ttl_days: %d → %d; ", oldTTL, newTTL)
 		}
-		a.Audit.Write(AuditEntry{
-			Time:   time.Now().Format(time.RFC3339),
-			Action: "update_settings",
-			Detail: detail,
-			IP:     clientIP(r),
-			Result: "ok",
-		})
+		if newPublic != curPublic {
+			detail += fmt.Sprintf("public_base_url: %s → %s; ", curPublic, newPublic)
+		}
+		if detail != "" {
+			a.Audit.Write(AuditEntry{
+				Time:   time.Now().Format(time.RFC3339),
+				Action: "update_settings",
+				Detail: strings.TrimSuffix(detail, "; "),
+				IP:     clientIP(r),
+				Result: "ok",
+			})
+		}
 	}
 	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
 }

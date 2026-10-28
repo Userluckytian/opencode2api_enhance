@@ -200,16 +200,15 @@ func TestClaimPolicyEmptyListSurvivesRestart(t *testing.T) {
 /* 三、settings 部分更新 + token_quota 上界（finding 564 / fact 591）   */
 /* ------------------------------------------------------------------ */
 
-// 只 PUT token_quota 时，其余字段（尤其 upstream_base_url / rate_limit_per_min）
-// 必须保持原值；旧实现会把它们清零（upstream 变空 → /v1 全 502，限速被关掉）。
+// 只 PUT token_quota 时，其余字段（尤其 rate_limit_per_min / ttl_days）
+// 必须保持原值；旧实现会把它们清零（限速被关掉、Key 变永不过期）。
 func TestAdminPutSettingsPartialUpdateKeepsOthers(t *testing.T) {
 	_, srv := newAdminApp(t)
 	defer srv.Close()
 	tok := adminToken(t, srv)
 
-	// 先落一组合法配置（不含 upstream：DefaultConfig 里是 127.0.0.1:1，会被 SSRF 校验拒绝，
-	// 因此先显式设成公网地址）。
-	body := `{"upstream_base_url":"http://1.2.3.4:18080/v1","ttl_days":7,"token_quota":500000,"rate_limit_per_min":17}`
+	// 先落一组合法配置（上游已拆到 /api/admin/upstreams，这里只设其余字段）。
+	body := `{"ttl_days":7,"token_quota":500000,"rate_limit_per_min":17}`
 	req, _ := http.NewRequest(http.MethodPut, srv.URL+"/api/admin/settings", bytes.NewBufferString(body))
 	req.Header.Set("Authorization", "Bearer "+tok)
 	resp, err := srv.Client().Do(req)
@@ -235,10 +234,9 @@ func TestAdminPutSettingsPartialUpdateKeepsOthers(t *testing.T) {
 	}
 
 	var got struct {
-		UpstreamBaseURL string `json:"upstream_base_url"`
-		RateLimitPerMin int    `json:"rate_limit_per_min"`
-		TTLDays         int    `json:"ttl_days"`
-		TokenQuota      int    `json:"token_quota"`
+		RateLimitPerMin int `json:"rate_limit_per_min"`
+		TTLDays         int `json:"ttl_days"`
+		TokenQuota      int `json:"token_quota"`
 	}
 	req3, _ := http.NewRequest(http.MethodGet, srv.URL+"/api/admin/settings", nil)
 	req3.Header.Set("Authorization", "Bearer "+tok)
@@ -249,9 +247,6 @@ func TestAdminPutSettingsPartialUpdateKeepsOthers(t *testing.T) {
 	defer resp3.Body.Close()
 	if err := json.NewDecoder(resp3.Body).Decode(&got); err != nil {
 		t.Fatal(err)
-	}
-	if got.UpstreamBaseURL != "http://1.2.3.4:18080/v1" {
-		t.Fatalf("upstream_base_url 被清空了: %q", got.UpstreamBaseURL)
 	}
 	if got.RateLimitPerMin != 17 {
 		t.Fatalf("rate_limit_per_min 被清零了: %d", got.RateLimitPerMin)

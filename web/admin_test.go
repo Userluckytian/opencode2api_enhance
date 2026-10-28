@@ -32,6 +32,14 @@ func newAdminApp(t *testing.T) (*App, *httptest.Server) {
 	mux.Handle("GET /api/admin/overview", app.adminAuth(http.HandlerFunc(app.handleOverview)))
 	mux.Handle("GET /api/admin/settings", app.adminAuth(http.HandlerFunc(app.handleGetSettings)))
 	mux.Handle("PUT /api/admin/settings", app.adminAuth(http.HandlerFunc(app.handlePutSettings)))
+	// 多上游管理路由（2026-10-28）：上游已从「参数设置」拆出独立接口。
+	mux.Handle("GET /api/admin/upstreams", app.adminAuth(http.HandlerFunc(app.handleListUpstreams)))
+	mux.Handle("POST /api/admin/upstreams", app.adminAuth(http.HandlerFunc(app.handleCreateUpstream)))
+	mux.Handle("PUT /api/admin/upstreams/{id}", app.adminAuth(http.HandlerFunc(app.handleUpdateUpstream)))
+	mux.Handle("DELETE /api/admin/upstreams/{id}", app.adminAuth(http.HandlerFunc(app.handleDeleteUpstream)))
+	mux.Handle("POST /api/admin/upstreams/{id}/test", app.adminAuth(http.HandlerFunc(app.handleTestUpstream)))
+	mux.Handle("GET /api/admin/models", app.adminAuth(http.HandlerFunc(app.handleAdminModels)))
+	mux.Handle("POST /api/admin/models", app.adminAuth(http.HandlerFunc(app.handleSaveModels)))
 	mux.Handle("GET /api/admin/keys", app.adminAuth(http.HandlerFunc(app.handleListKeys)))
 	mux.Handle("POST /api/admin/keys/{id}/disable", app.adminAuth(http.HandlerFunc(app.handleDisableKey)))
 	mux.Handle("POST /api/admin/keys/{id}/enable", app.adminAuth(http.HandlerFunc(app.handleEnableKey)))
@@ -98,7 +106,8 @@ func TestAdminSettingsRoundTrip(t *testing.T) {
 	defer srv.Close()
 	tok := adminToken(t, srv)
 
-	body := `{"upstream_base_url":"http://1.2.3.4:18080/v1","upstream_api_key":"sk-test123","ttl_days":3,"token_quota":500000,"rate_limit_per_min":10}`
+	// 上游已拆到 /api/admin/upstreams；本接口只管额度/有效期/限速。
+	body := `{"ttl_days":3,"token_quota":500000,"rate_limit_per_min":10}`
 	req, _ := http.NewRequest(http.MethodPut, srv.URL+"/api/admin/settings", bytes.NewBufferString(body))
 	req.Header.Set("Authorization", "Bearer "+tok)
 	resp, err := srv.Client().Do(req)
@@ -111,9 +120,6 @@ func TestAdminSettingsRoundTrip(t *testing.T) {
 	}
 	if app.Cfg.TTLDays != 3 || app.Cfg.TokenQuota != 500000 || app.Cfg.RateLimitPerMin != 10 {
 		t.Fatalf("cfg not updated: %+v", app.Cfg)
-	}
-	if app.Cfg.UpstreamAPIKey != "sk-test123" {
-		t.Fatalf("api key not updated: %+v", app.Cfg.UpstreamAPIKey)
 	}
 	// 无效值应被拒
 	req2, _ := http.NewRequest(http.MethodPut, srv.URL+"/api/admin/settings",

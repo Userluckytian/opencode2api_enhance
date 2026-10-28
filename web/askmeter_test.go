@@ -11,13 +11,14 @@ import (
 )
 
 // 上游密钥不能明文回传：拿到管理员会话就能直连上游，等于绕过全部 IP 策略。
+// 多上游后密钥经 /api/admin/upstreams 管理，本用例验证该接口的脱敏行为。
 func TestSettingsDoesNotLeakUpstreamKey(t *testing.T) {
 	app, srv := newAdminApp(t)
 	defer srv.Close()
 	tok := adminToken(t, srv)
 
-	req, _ := http.NewRequest(http.MethodPut, srv.URL+"/api/admin/settings",
-		bytes.NewBufferString(`{"upstream_base_url":"http://1.2.3.4:18080/v1","upstream_api_key":"sk-secret-value-1234","ttl_days":3,"token_quota":500000,"rate_limit_per_min":10}`))
+	req, _ := http.NewRequest(http.MethodPost, srv.URL+"/api/admin/upstreams",
+		bytes.NewBufferString(`{"id":"up1","base_url":"http://1.2.3.4:18080/v1","api_key":"sk-secret-value-1234","enabled":true}`))
 	req.Header.Set("Authorization", "Bearer "+tok)
 	resp, err := srv.Client().Do(req)
 	if err != nil {
@@ -25,21 +26,22 @@ func TestSettingsDoesNotLeakUpstreamKey(t *testing.T) {
 	}
 	resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("put settings code=%d", resp.StatusCode)
+		t.Fatalf("create upstream code=%d", resp.StatusCode)
 	}
 
-	code, body := e2eGet(t, srv, tok, "/api/admin/settings")
+	code, body := e2eGet(t, srv, tok, "/api/admin/upstreams")
 	if code != http.StatusOK {
-		t.Fatalf("get settings code=%d", code)
+		t.Fatalf("get upstreams code=%d", code)
 	}
 	if strings.Contains(body, "sk-secret-value-1234") {
-		t.Fatalf("GET settings 泄露了上游密钥明文: %s", body)
+		t.Fatalf("GET upstreams 泄露了上游密钥明文: %s", body)
 	}
 	if !strings.Contains(body, "****1234") {
 		t.Fatalf("未返回脱敏后的密钥: %s", body)
 	}
-	if app.Cfg.UpstreamAPIKey != "sk-secret-value-1234" {
-		t.Fatalf("上游密钥未正确保存: %s", app.Cfg.UpstreamAPIKey)
+	u, ok := FindUpstream(app.Cfg.Upstreams, "up1")
+	if !ok || u.APIKey != "sk-secret-value-1234" {
+		t.Fatalf("上游密钥未正确保存: %+v", app.Cfg.Upstreams)
 	}
 }
 
@@ -49,23 +51,27 @@ func TestSettingsBlankKeyKeepsExisting(t *testing.T) {
 	defer srv.Close()
 	tok := adminToken(t, srv)
 
-	body := `{"upstream_base_url":"http://1.2.3.4:18080/v1","upstream_api_key":"sk-keep-me","ttl_days":3,"token_quota":500000,"rate_limit_per_min":10}`
-	req, _ := http.NewRequest(http.MethodPut, srv.URL+"/api/admin/settings", bytes.NewBufferString(body))
+	body := `{"id":"up1","base_url":"http://1.2.3.4:18080/v1","api_key":"sk-keep-me","enabled":true}`
+	req, _ := http.NewRequest(http.MethodPost, srv.URL+"/api/admin/upstreams", bytes.NewBufferString(body))
 	req.Header.Set("Authorization", "Bearer "+tok)
 	resp, _ := srv.Client().Do(req)
 	resp.Body.Close()
 
-	body2 := `{"upstream_base_url":"http://5.6.7.8:18080/v1","upstream_api_key":"","ttl_days":3,"token_quota":500000,"rate_limit_per_min":10}`
-	req2, _ := http.NewRequest(http.MethodPut, srv.URL+"/api/admin/settings", bytes.NewBufferString(body2))
+	body2 := `{"base_url":"http://5.6.7.8:18080/v1","api_key":""}`
+	req2, _ := http.NewRequest(http.MethodPut, srv.URL+"/api/admin/upstreams/up1", bytes.NewBufferString(body2))
 	req2.Header.Set("Authorization", "Bearer "+tok)
 	resp2, _ := srv.Client().Do(req2)
 	resp2.Body.Close()
 
-	if app.Cfg.UpstreamAPIKey != "sk-keep-me" {
-		t.Fatalf("留空不应清空密钥: %q", app.Cfg.UpstreamAPIKey)
+	u, ok := FindUpstream(app.Cfg.Upstreams, "up1")
+	if !ok {
+		t.Fatalf("上游丢失: %+v", app.Cfg.Upstreams)
 	}
-	if app.Cfg.UpstreamBaseURL != "http://5.6.7.8:18080/v1" {
-		t.Fatalf("上游地址未更新: %q", app.Cfg.UpstreamBaseURL)
+	if u.APIKey != "sk-keep-me" {
+		t.Fatalf("留空不应清空密钥: %q", u.APIKey)
+	}
+	if u.BaseURL != "http://5.6.7.8:18080/v1" {
+		t.Fatalf("上游地址未更新: %q", u.BaseURL)
 	}
 }
 
@@ -184,7 +190,7 @@ func TestAskFallsBackToEstimatedTokens(t *testing.T) {
 	}
 }
 
-// 敏感配置修改要落审计。
+// 敏感配置修改要落审计（多上游后由 /api/admin/upstreams 记录上游变更）。
 func TestSettingsChangeIsAudited(t *testing.T) {
 	dir := t.TempDir()
 	app, srv := newAdminApp(t)
@@ -192,8 +198,8 @@ func TestSettingsChangeIsAudited(t *testing.T) {
 	app.Audit = NewAuditLog(dir)
 	tok := adminToken(t, srv)
 
-	req, _ := http.NewRequest(http.MethodPut, srv.URL+"/api/admin/settings",
-		bytes.NewBufferString(`{"upstream_base_url":"http://9.9.9.9:18080/v1","upstream_api_key":"sk-new-key-9999","ttl_days":3,"token_quota":500000,"rate_limit_per_min":10}`))
+	req, _ := http.NewRequest(http.MethodPost, srv.URL+"/api/admin/upstreams",
+		bytes.NewBufferString(`{"id":"up9","base_url":"http://9.9.9.9:18080/v1","api_key":"sk-new-key-9999","enabled":true}`))
 	req.Header.Set("Authorization", "Bearer "+tok)
 	resp, _ := srv.Client().Do(req)
 	resp.Body.Close()
@@ -202,11 +208,11 @@ func TestSettingsChangeIsAudited(t *testing.T) {
 	if len(entries) != 1 {
 		t.Fatalf("应有 1 条审计记录: %+v", entries)
 	}
-	if entries[0].Action != "update_settings" {
+	if entries[0].Action != "create_upstream" {
 		t.Fatalf("动作不对: %+v", entries[0])
 	}
 	if !strings.Contains(entries[0].Detail, "9.9.9.9") {
-		t.Fatalf("审计应记录上游地址变更: %+v", entries[0])
+		t.Fatalf("审计应记录上游地址: %+v", entries[0])
 	}
 	// 审计里不能出现明文密钥
 	if strings.Contains(entries[0].Detail, "sk-new-key-9999") {

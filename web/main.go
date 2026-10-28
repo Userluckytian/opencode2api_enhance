@@ -34,6 +34,12 @@ func buildMux(app *App) http.Handler {
 	mux.Handle("POST /api/admin/models", app.adminAuth(http.HandlerFunc(app.handleSaveModels)))
 	mux.Handle("GET /api/admin/settings", app.adminAuth(http.HandlerFunc(app.handleGetSettings)))
 	mux.Handle("PUT /api/admin/settings", app.adminAuth(http.HandlerFunc(app.handlePutSettings)))
+	// 多上游管理（2026-10-28）：上游列表独立于「参数设置」，每条 base_url 单独过 SSRF 校验。
+	mux.Handle("GET /api/admin/upstreams", app.adminAuth(http.HandlerFunc(app.handleListUpstreams)))
+	mux.Handle("POST /api/admin/upstreams", app.adminAuth(http.HandlerFunc(app.handleCreateUpstream)))
+	mux.Handle("PUT /api/admin/upstreams/{id}", app.adminAuth(http.HandlerFunc(app.handleUpdateUpstream)))
+	mux.Handle("DELETE /api/admin/upstreams/{id}", app.adminAuth(http.HandlerFunc(app.handleDeleteUpstream)))
+	mux.Handle("POST /api/admin/upstreams/{id}/test", app.adminAuth(http.HandlerFunc(app.handleTestUpstream)))
 	mux.Handle("PUT /api/admin/password", app.adminAuth(http.HandlerFunc(app.handlePutPassword)))
 	mux.Handle("GET /api/admin/keys", app.adminAuth(http.HandlerFunc(app.handleListKeys)))
 	mux.Handle("POST /api/admin/keys/{id}/quota", app.adminAuth(http.HandlerFunc(app.handleSetKeyQuota)))
@@ -98,11 +104,13 @@ func main() {
 	// 默认仅回环，兼容现网 http://127.0.0.1:18080/v1；云元数据地址永远拒绝。
 	guard := newUpstreamGuard(ResolveUpstreamAllowedHosts(cfg.UpstreamAllowedHosts))
 	log.Printf("[上游防护] 允许的上游主机: %s", strings.Join(guard.AllowedHosts(), ", "))
-	if err := ValidateUpstreamBaseURL(cfg.UpstreamBaseURL, guard); err != nil {
-		// 旧配置里可能残留指向内网/元数据的上游：不阻断启动，但每次外联都会被 dial 层拒绝，
-		// 并在日志中明确告警，提示管理员改回合法地址。
-		log.Printf("warning: 当前配置的 upstream_base_url=%q 未通过 SSRF 校验: %v；"+
-			"该上游的请求将被拒绝，请在「参数设置」中改为合法地址", cfg.UpstreamBaseURL, err)
+	// 逐条校验（多上游）：任何一条不合法都只告警不阻断启动——dial 层仍会拒绝，
+	// 且其余上游照常可用。全部不合法时 /v1 会返回 502/503，日志里有明确线索。
+	for _, u := range cfg.EffectiveUpstreams() {
+		if err := ValidateUpstreamBaseURL(u.BaseURL, guard); err != nil {
+			log.Printf("warning: 上游 %q 的 base_url=%q 未通过 SSRF 校验: %v；"+
+				"该上游的请求将被拒绝，请在「上游管理」中改为合法地址", u.ID, u.BaseURL, err)
+		}
 	}
 
 	store, err := NewStore(*dataDir)
