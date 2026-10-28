@@ -94,19 +94,17 @@ func (a *App) handleAsk(w http.ResponseWriter, r *http.Request) {
 	allowed := append([]string(nil), a.Cfg.AllowedModels...)
 	a.Mu.RUnlock()
 	model := strings.TrimSpace(req.Model)
+	// 未指定模型时回退到白名单第一个（保持旧行为）。
 	if model == "" && len(allowed) > 0 {
 		model = allowed[0]
 	}
 	if model == "" {
-		writeErr(w, http.StatusBadRequest, "没有可用模型，请先在模型管理中勾选")
+		writeErr(w, http.StatusBadRequest, "没有可用模型：请在下拉框选择模型，或先在模型管理中勾选")
 		return
 	}
-	if len(allowed) > 0 && !contains(allowed, model) {
-		writeErr(w, http.StatusBadRequest, "模型不在白名单内")
-		return
-	}
-	// 与管理面板一致：model 可能带上游前缀（如 backup/gpt-4o），
-	// 按同一套规则解析出目标上游与真实模型名。
+	// AI 问答是管理员自用，模型可来自任意已启用上游（下拉框列出的是上游实际提供的
+	// 全部模型），因此不再强制要求在白名单内——白名单只约束发给使用者的 Key。
+	// 目标上游是否可用仍由 Resolve 判定。
 	up, forwardModel, uerr := a.Resolve(model)
 	if uerr != nil {
 		writeErr(w, http.StatusServiceUnavailable, "没有可用的上游实例: "+uerr.Error())
@@ -119,83 +117,182 @@ func (a *App) handleAsk(w http.ResponseWriter, r *http.Request) {
 	// 管理员自用的 AI 问数不设额度闸门（IP 策略只管 /v1 使用者流量），
 	// 但会计量并写入业务日志，便于回看与统计消耗。
 
-	ctx := a.buildAskContext(now)
-	system := "你是 token 自助餐厅的运营分析助手。只依据下面提供的统计数据回答，不要编造数据；" +
-		"回答用中文，先给结论，再给 1-3 条可执行建议，数字用简洁格式。" +
-		"输出适合在窄栏阅读：段落不超过 3 行，避免宽表格，枚举项用短句列出。数据不足时直接说明。\n\n" + ctx
-	payload := map[string]any{
-		"model": forwardModel,
-		"messages": []map[string]string{
-			{"role": "system", "content": system},
-			{"role": "user", "content": req.Question},
-		},
-		"temperature": 0.3,
-		"stream":      false,
+	// 提示词（2026-10-28 改为工具驱动）：
+	// 不再由服务端把统计数字汇总好塞进 prompt，而是告诉模型「有哪些数据源、
+	// 各自在哪、字段是什么」，并给它一组只读查询工具，让它自己决定查什么、
+	// 查多细。这样它能下钻到状态码/模型/具体错误，而不是只会复述汇总数字。
+	system := "你是 token 自助餐厅的运营分析助手。你可以调用工具查询本服务的运行数据（全部只读）。\n" +
+		"规则：\n" +
+		"1. 先调用 list_data_sources 了解有哪些数据源、字段含义；不确定就查，不要凭猜测回答。\n" +
+		"2. 用最少必要的查询回答：先聚合（aggregate_call_logs）看分布，需要细节再查明细（query_call_logs）。\n" +
+		"3. 只依据工具返回的真实数据作答，不要编造数值；工具返回「无数据」就如实说明。\n" +
+		"4. 先给结论，再给 1-3 条可执行建议；数字用简洁格式。\n" +
+		"5. 输出适合窄栏阅读：段落不超过 3 行，避免宽表格，枚举项用短句。"
+	userMsg := req.Question
+
+	msgs := []map[string]any{
+		{"role": "system", "content": system},
+		{"role": "user", "content": userMsg},
 	}
-	body, _ := json.Marshal(payload)
-	httpReq, err := http.NewRequestWithContext(r.Context(), http.MethodPost, upstream+"/chat/completions", bytes.NewReader(body))
-	if err != nil {
-		writeErr(w, http.StatusInternalServerError, "构造请求失败")
-		return
-	}
-	httpReq.Header.Set("Content-Type", "application/json")
-	if apiKey != "" {
-		httpReq.Header.Set("Authorization", "Bearer "+apiKey)
-	}
+
+	// 工具调用循环：最多 askMaxToolRounds 轮，避免模型无限查下去。
+	// 工具调用轮次上限：一轮 = 一次上游请求。模型常见路径是
+	// 「列数据源 → 聚合 2~3 个维度 → 查明细 → 给结论」，约 5~7 轮；
+	// 留到 10 轮以容纳下钻更深的分析，同时防止失控。
+	const askMaxToolRounds = 10
 	start := time.Now()
-	resp, err := a.client().Do(httpReq)
-	if err != nil {
-		a.logAsk(r, model, req.Question, "", 0, 0, 0, time.Since(start), false, "上游不可达: "+err.Error())
-		writeErr(w, http.StatusBadGateway, "上游不可达: "+err.Error())
-		return
-	}
-	defer resp.Body.Close()
-	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 2<<20))
-	if resp.StatusCode != http.StatusOK {
-		msg := strings.TrimSpace(string(raw))
-		if len(msg) > 500 {
-			msg = msg[:500]
+	var totalPrompt, totalCompletion int
+	var answer string
+	var lastToolLog []string
+
+	for round := 0; round < askMaxToolRounds; round++ {
+		payload := map[string]any{
+			"model":       forwardModel,
+			"messages":    msgs,
+			"temperature": 0.3,
+			"stream":      false,
+			"tools":       askToolPayload(),
+			"tool_choice": "auto",
 		}
-		a.logAsk(r, model, req.Question, "", 0, 0, 0, time.Since(start), false, fmt.Sprintf("上游返回 %d", resp.StatusCode))
-		writeErr(w, http.StatusBadGateway, fmt.Sprintf("上游返回 %d: %s", resp.StatusCode, msg))
+		body, _ := json.Marshal(payload)
+		httpReq, err := http.NewRequestWithContext(r.Context(), http.MethodPost, upstream+"/chat/completions", bytes.NewReader(body))
+		if err != nil {
+			writeErr(w, http.StatusInternalServerError, "构造请求失败")
+			return
+		}
+		httpReq.Header.Set("Content-Type", "application/json")
+		if apiKey != "" {
+			httpReq.Header.Set("Authorization", "Bearer "+apiKey)
+		}
+
+		resp, err := a.client().Do(httpReq)
+		if err != nil {
+			a.logAsk(r, model, req.Question, "", 0, 0, 0, time.Since(start), false, "上游不可达: "+err.Error())
+			writeErr(w, http.StatusBadGateway, "上游不可达: "+err.Error())
+			return
+		}
+		raw, _ := io.ReadAll(io.LimitReader(resp.Body, 4<<20))
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			msg := strings.TrimSpace(string(raw))
+			if len(msg) > 500 {
+				msg = msg[:500]
+			}
+			a.logAsk(r, model, req.Question, "", 0, 0, 0, time.Since(start), false, fmt.Sprintf("上游返回 %d", resp.StatusCode))
+			writeErr(w, http.StatusBadGateway, fmt.Sprintf("上游返回 %d: %s", resp.StatusCode, msg))
+			return
+		}
+
+		var out struct {
+			Choices []struct {
+				Message struct {
+					Content   any              `json:"content"`
+					ToolCalls []askToolCallOut `json:"tool_calls"`
+				} `json:"message"`
+			} `json:"choices"`
+			Usage v1Usage `json:"usage"`
+		}
+		if err := json.Unmarshal(raw, &out); err != nil {
+			a.logAsk(r, model, req.Question, "", 0, 0, 0, time.Since(start), false, "上游响应无法解析")
+			writeErr(w, http.StatusBadGateway, "上游响应无法解析")
+			return
+		}
+		if p, c := out.Usage.hit(); p+c > 0 {
+			totalPrompt += p
+			totalCompletion += c
+		}
+		if len(out.Choices) == 0 {
+			a.logAsk(r, model, req.Question, "", totalPrompt, totalCompletion, totalPrompt+totalCompletion, time.Since(start), false, "上游未返回 choices")
+			writeErr(w, http.StatusBadGateway, "上游未返回内容")
+			return
+		}
+		choice := out.Choices[0].Message
+		text := extractAskText(choice.Content)
+
+		// 没有工具调用 = 最终回答，结束循环。
+		if len(choice.ToolCalls) == 0 {
+			answer = text
+			break
+		}
+
+		// 把模型这一轮（可能含文本 + 工具调用）追加进对话，再逐个执行工具。
+		assistantMsg := map[string]any{"role": "assistant"}
+		if text != "" {
+			assistantMsg["content"] = text
+		}
+		calls := make([]map[string]any, 0, len(choice.ToolCalls))
+		for _, tc := range choice.ToolCalls {
+			calls = append(calls, map[string]any{
+				"id":   tc.ID,
+				"type": "function",
+				"function": map[string]any{
+					"name":      tc.Function.Name,
+					"arguments": tc.Function.Arguments,
+				},
+			})
+		}
+		assistantMsg["tool_calls"] = calls
+		msgs = append(msgs, assistantMsg)
+
+		for _, tc := range choice.ToolCalls {
+			args := map[string]any{}
+			if strings.TrimSpace(tc.Function.Arguments) != "" {
+				_ = json.Unmarshal([]byte(tc.Function.Arguments), &args)
+			}
+			result, terr := a.runAskTool(tc.Function.Name, args, now)
+			if terr != nil {
+				result = "调用失败: " + terr.Error()
+			}
+			lastToolLog = append(lastToolLog, tc.Function.Name+"("+jsonArgString(args)+")")
+			msgs = append(msgs, map[string]any{
+				"role":         "tool",
+				"tool_call_id": tc.ID,
+				"name":         tc.Function.Name,
+				"content":      result,
+			})
+		}
+	}
+
+	if strings.TrimSpace(answer) == "" {
+		a.logAsk(r, model, req.Question, "", totalPrompt, totalCompletion, totalPrompt+totalCompletion, time.Since(start), false, "工具调用轮次用尽或上游未返回内容")
+		writeErr(w, http.StatusBadGateway, "分析未完成：模型在限定轮次内未给出结论，请重试或换个模型")
 		return
 	}
-	var out struct {
-		Choices []struct {
-			Message struct {
-				Content any `json:"content"`
-			} `json:"message"`
-		} `json:"choices"`
-		Usage v1Usage `json:"usage"`
-	}
-	if err := json.Unmarshal(raw, &out); err != nil {
-		a.logAsk(r, model, req.Question, "", 0, 0, 0, time.Since(start), false, "上游响应无法解析")
-		writeErr(w, http.StatusBadGateway, "上游响应无法解析")
-		return
-	}
-	answer := ""
-	if len(out.Choices) > 0 {
-		switch c := out.Choices[0].Message.Content.(type) {
-		case string:
-			answer = c
-		case []any:
-			for _, part := range c {
-				if m, ok := part.(map[string]any); ok {
-					if s, ok := m["text"].(string); ok {
-						answer += s
-					}
+	a.logAsk(r, model, req.Question, answer, totalPrompt, totalCompletion, totalPrompt+totalCompletion, time.Since(start), true, "")
+	writeJSON(w, http.StatusOK, map[string]any{
+		"answer":     answer,
+		"model":      model,
+		"tool_calls": lastToolLog,
+	})
+}
+
+// askToolCallOut 是上游返回的 tool_calls 元素。
+type askToolCallOut struct {
+	ID       string `json:"id"`
+	Type     string `json:"type"`
+	Function struct {
+		Name      string `json:"name"`
+		Arguments string `json:"arguments"`
+	} `json:"function"`
+}
+
+// extractAskText 从 content 字段提取纯文本（兼容字符串与 parts 数组）。
+func extractAskText(content any) string {
+	switch c := content.(type) {
+	case string:
+		return c
+	case []any:
+		var b strings.Builder
+		for _, part := range c {
+			if m, ok := part.(map[string]any); ok {
+				if s, ok := m["text"].(string); ok {
+					b.WriteString(s)
 				}
 			}
 		}
+		return b.String()
 	}
-	if strings.TrimSpace(answer) == "" {
-		a.logAsk(r, model, req.Question, "", 0, 0, 0, time.Since(start), false, "上游未返回内容")
-		writeErr(w, http.StatusBadGateway, "上游未返回内容")
-		return
-	}
-	promptTokens, completionTokens := out.Usage.hit()
-	a.logAsk(r, model, req.Question, answer, promptTokens, completionTokens, promptTokens+completionTokens, time.Since(start), true, "")
-	writeJSON(w, http.StatusOK, map[string]any{"answer": answer, "model": model})
+	return ""
 }
 
 // logAsk 记录一次 AI 问数：写业务日志并计入每日额度。

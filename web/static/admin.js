@@ -20,7 +20,7 @@ let keyState = { q: '', status: 'all', page: 1, pageSize: 20 };
 let revealed = new Set();
 let logState = { date: todayStr(), key: '', ip: '', mode: 'detail' };
 let ipState = { defaults: {}, overrides: [], usage: [] };
-let askState = { messages: [], busy: false };
+let askState = { messages: [], busy: false, model: '', models: [], modelOpen: false, modelQuery: '' };
 let defaultQuota = 0; // 全局默认额度（唯一来源：config.token_quota）
 let lastKnownQuota = 0; // 页面加载时的额度，用于判断本次保存是否改了额度
 
@@ -873,7 +873,9 @@ async function loadAsk() {
   // 每次进入都确保骨架存在：登录过期会让 api() 触发 logout()，DOM 可能已被重建
   if (!el('chatBox')) {
     el('ask').innerHTML =
-      '<div class="page-head"><h2>AI 问答</h2><span class="muted" style="font-size:12px">基于本服务实际统计数据回答</span></div>' +
+      '<div class="page-head"><h2>AI 问答</h2>' +
+        '<div class="ask-model" id="askModelBar"></div>' +
+        '<span class="muted" style="font-size:12px">基于本服务实际统计数据回答</span></div>' +
       '<div class="card"><div class="chat" id="chatBox"></div>' +
       '<div class="chips" id="askChips">' + ASK_SUGGESTIONS.map(s => '<button class="chip" onclick="askQuick(\'' + esc(s) + '\')">' + esc(s) + '</button>').join('') + '</div>' +
       '<div class="chat-in"><input id="chatIn" placeholder="例如：今天哪个 IP 用得最多？" onkeydown="if(event.key===\'Enter\')sendAsk()">' +
@@ -881,13 +883,88 @@ async function loadAsk() {
     el('ask').dataset.ready = '1';
     renderAsk();
   }
+  loadAskModels();
+}
+
+// loadAskModels 拉取全部已启用上游的模型，供 AI 问答选择。
+// 数据源复用「模型管理」的分组接口（每个上游实际提供的模型清单）。
+async function loadAskModels() {
+  const { ok, data } = await api('api/admin/models');
+  if (!ok) { renderAskModelBar(); return; }
+  const list = [];
+  (data.upstreams || []).forEach(g => {
+    if (!g.enabled) return;
+    (g.models || []).forEach(m => list.push((g.prefix || '') + m));
+  });
+  askState.models = list;
+  // 未选过或已失效时，回退到白名单第一个，再不行取列表第一个
+  if (!askState.model || !list.includes(askState.model)) {
+    const allowed = data.allowed || [];
+    askState.model = allowed.find(a => list.includes(a)) || list[0] || '';
+  }
+  renderAskModelBar();
+}
+
+function renderAskModelBar() {
+  const bar = el('askModelBar');
+  if (!bar) return;
+  const total = askState.models.length;
+  const q = askState.modelQuery.trim().toLowerCase();
+  const shown = q ? askState.models.filter(m => m.toLowerCase().includes(q)) : askState.models;
+  let html = '<div class="ask-model-row">' +
+    '<span class="ask-model-label">模型</span>' +
+    '<button type="button" class="ask-model-pick" onclick="toggleAskModel()">' +
+      '<span class="mono">' + esc(askState.model || '未选择') + '</span>' +
+      '<span class="ask-caret">' + (askState.modelOpen ? '▴' : '▾') + '</span>' +
+    '</button>' +
+    '<span class="muted" style="font-size:11.5px">共 ' + total + ' 个可选</span>' +
+    '</div>';
+  if (askState.modelOpen) {
+    html += '<div class="ask-model-pop">' +
+      '<input id="askModelSearch" class="ask-model-search" placeholder="搜索模型…" value="' + esc(askState.modelQuery) + '" oninput="onAskModelSearch(this.value)">' +
+      '<div class="ask-model-list">' +
+      (shown.length
+        ? shown.map(m => '<button type="button" class="ask-model-item' + (m === askState.model ? ' active' : '') + '" onclick="pickAskModel(\'' + esc(m).replace(/'/g, '&#39;') + '\')">' + esc(m) + '</button>').join('')
+        : '<div class="empty" style="padding:10px">没有匹配的模型</div>') +
+      '</div></div>';
+  }
+  bar.innerHTML = html;
+  if (askState.modelOpen) {
+    const s = el('askModelSearch');
+    if (s) { s.focus(); s.setSelectionRange(s.value.length, s.value.length); }
+  }
+}
+
+function toggleAskModel() {
+  askState.modelOpen = !askState.modelOpen;
+  askState.modelQuery = '';
+  renderAskModelBar();
+}
+
+function onAskModelSearch(v) {
+  askState.modelQuery = v || '';
+  renderAskModelBar();
+}
+
+function pickAskModel(m) {
+  askState.model = m;
+  askState.modelOpen = false;
+  askState.modelQuery = '';
+  renderAskModelBar();
 }
 function renderAsk() {
   const box = el('chatBox');
   if (!box) return;
-  box.innerHTML = askState.messages.map(m =>
-    '<div class="bubble ' + (m.role === 'me' ? 'me' : (m.role === 'err' ? 'err' : 'ai')) + '">' +
-    (m.role === 'ai' ? md(m.text) : esc(m.text)) + '</div>').join('')
+  box.innerHTML = askState.messages.map(m => {
+    let body = m.role === 'ai' ? md(m.text) : esc(m.text);
+    // AI 回答附带「查询了哪些数据」：让管理员知道结论的依据，也便于判断是否查全。
+    if (m.role === 'ai' && m.toolCalls && m.toolCalls.length) {
+      body += '<div class="ask-tools"><span class="ask-tools-label">查询 ' +
+        m.toolCalls.length + ' 次</span>' +
+        m.toolCalls.map(c => '<code class="ask-tool">' + esc(c) + '</code>').join('') + '</div>';
+    }
+    return '<div class="bubble ' + (m.role === 'me' ? 'me' : (m.role === 'err' ? 'err' : 'ai')) + '">' + body + '</div>';
+  }).join('')
     + (askState.busy ? '<div class="bubble ai"><span class="dots">正在分析</span></div>' : '');
   box.scrollTop = box.scrollHeight;
 }
@@ -953,11 +1030,15 @@ async function sendAsk() {
   askState.busy = true;
   askBusy(true);
   renderAsk();
-  const { ok, data } = await api('api/admin/ask', 'POST', { question: q });
+  const { ok, data } = await api('api/admin/ask', 'POST', { question: q, model: askState.model });
   askState.busy = false;
   askBusy(false);
   if (ok) {
-    askState.messages.push({ role: 'ai', text: data.answer || '(空回答)' });
+    askState.messages.push({
+      role: 'ai',
+      text: data.answer || '(空回答)',
+      toolCalls: Array.isArray(data.tool_calls) ? data.tool_calls : []
+    });
   } else {
     askState.messages.push({ role: 'err', text: (data && data.error) || '请求失败' });
   }

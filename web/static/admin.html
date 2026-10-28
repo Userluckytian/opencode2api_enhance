@@ -128,6 +128,26 @@ tbody tr:hover { background:#f8fafc; }
 .chat-in { display:flex; gap:8px; align-items:stretch; }
 .chat-in input { flex:1 1 auto; min-width:0; width:auto; }
 .chat-in .btn { flex:0 0 auto; white-space:nowrap; align-self:center; }
+/* AI 问答：模型选择器（可搜索，紧贴标题右侧）。
+   .page-head 是 space-between，这里用 margin-right:auto 把剩余空间全吃掉，
+   使选择器紧挨标题、而右侧说明文字仍贴到最右。 */
+.ask-model { position:relative; margin-left:2px; margin-right:auto; }
+.ask-model-row { display:flex; align-items:center; gap:8px; flex-wrap:wrap; }
+.ask-model-label { font-size:12px; color:#64748b; font-weight:600; }
+.ask-model-pick { display:flex; align-items:center; gap:8px; padding:5px 10px; border:1px solid #cbd5e1; border-radius:8px; background:#fff; cursor:pointer; font-size:12.5px; color:#0f172a; max-width:260px; }
+.ask-model-pick:hover { border-color:#0f766e; }
+.ask-model-pick .mono { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.ask-caret { color:#94a3b8; font-size:10px; }
+.ask-model-pop { position:absolute; right:0; top:calc(100% + 6px); z-index:60; width:320px; border:1px solid #e2e8f0; border-radius:10px; background:#fff; box-shadow:0 12px 32px -12px rgba(15,23,42,.25); overflow:hidden; }
+.ask-model-search { width:100%; border:none; border-bottom:1px solid #eef2f7; padding:9px 12px; font-size:13px; outline:none; box-sizing:border-box; }
+.ask-model-list { max-height:260px; overflow:auto; padding:4px; }
+.ask-model-item { display:block; width:100%; text-align:left; padding:7px 10px; border:none; background:none; border-radius:6px; cursor:pointer; font-size:12.5px; color:#334155; font-family:ui-monospace,SFMono-Regular,Menlo,monospace; }
+.ask-model-item:hover { background:#f0fdfa; color:#0f766e; }
+.ask-model-item.active { background:#ecfdf5; color:#0f766e; font-weight:600; }
+/* AI 回答下方的「查询了哪些数据」 */
+.ask-tools { margin-top:10px; padding-top:8px; border-top:1px dashed #e2e8f0; display:flex; flex-wrap:wrap; gap:5px; align-items:center; }
+.ask-tools-label { font-size:11px; color:#94a3b8; margin-right:2px; }
+.ask-tool { display:inline-block; background:#f1f5f9; color:#64748b; border-radius:5px; padding:2px 6px; font-size:10.5px; font-family:ui-monospace,SFMono-Regular,Menlo,monospace; word-break:break-all; }
 .split { display:grid; grid-template-columns:1.5fr 1fr; gap:14px; }
 @media (max-width:1100px) { .grid.c4 { grid-template-columns:repeat(2,minmax(0,1fr)); } .split { grid-template-columns:1fr; } }
 
