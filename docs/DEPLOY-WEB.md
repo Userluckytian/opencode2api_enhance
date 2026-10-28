@@ -26,9 +26,63 @@ go build -o web-server ./web
 浏览器打开 `http://<服务器IP>:23081`：
 
 1. 右上角「进入管理员入口」→ 输入初始密码登录后台；
-2. 「参数设置」填上游实例地址（如 `http://127.0.0.1:18080/v1`）并保存；
-3. 「模型管理」勾选允许分发的模型并保存；
+2. 「上游管理」新增上游（至少一个），填 ID、Base URL（如 `http://127.0.0.1:18080/v1`）与上游密钥；
+3. 「模型管理」按上游分组勾选允许分发的模型并保存；
 4. 回到领 Key 页，选模型 → 获取 Key → 把「访问地址 + Key」发给用户。
+
+## 一点六、多上游与 model 前缀路由
+
+后台支持配置多个上游，请求按 **`model` 的第一段** 路由：
+
+| 请求的 model | 转发到 | 上游实际收到的 model |
+| --- | --- | --- |
+| `backup/gpt-4o` | ID 为 `backup` 的上游 | `gpt-4o`（前缀被剥离） |
+| `gpt-4o` | 默认上游 | `gpt-4o`（原样） |
+| `or/minimax/minimax-m3.1-flash:free` | 默认上游 | 原样（`or` 不是上游 ID，不剥前缀） |
+
+关键规则：
+
+- **只有第一段精确等于某个「已启用」上游的 ID 时才剥离前缀**。模型名本身含斜杠很常见
+  （`or/minimax/...`、`vibex/openai/...`），盲切第一个 `/` 会把它们误判成上游前缀。
+- 上游被**停用**后不再参与路由：`backup/xxx` 会整体当作普通模型名走默认上游，
+  不会出现「停用备用上游导致请求全挂」。
+- 默认上游在「上游管理」里标记为「默认」；停用默认上游时自动改指第一个启用项。
+- 不允许停用或删除**最后一个启用中的上游**，也不允许直接删除默认上游（先把默认改到别处）。
+
+### config.json 结构
+
+```json
+{
+  "upstreams": [
+    {
+      "id": "main",
+      "name": "主上游",
+      "base_url": "http://127.0.0.1:18080/v1",
+      "api_key": "sk-xxx",
+      "enabled": true
+    },
+    {
+      "id": "backup",
+      "name": "备用上游",
+      "base_url": "http://10.0.0.2:18080/v1",
+      "api_key": "sk-yyy",
+      "enabled": true
+    }
+  ],
+  "default_upstream_id": "main"
+}
+```
+
+**升级兼容**：老配置只有 `upstream_base_url` / `upstream_api_key` 时无需手工改动——
+首次读取会自动视为一条 ID 为 `default` 的上游；第一次在后台改动上游列表时会把它
+落成实体条目，不会丢失。注意一旦配置了 `upstreams` 列表，环境变量
+`TOKEN_BUFFET_UPSTREAM_API_KEY` 不再生效，请改用「上游管理」逐条设置密钥。
+
+### 安全约束（不变）
+
+每个上游的 `base_url` 在写入前都要过 SSRF 校验（scheme 仅 http/https、禁止 userinfo、
+拒绝内网/云元数据地址，除非该主机在部署方下发的 `upstream_allowed_hosts` 白名单里）。
+白名单仍只由 `config.json` / 环境变量下发，**管理 API 不可写**。
 
 ## 一点五、监听面（重要：生产不得暴露后端端口）
 
@@ -154,7 +208,7 @@ sudo nginx -t && sudo systemctl reload nginx
 
 - **备份**：定期备份 `web-data/`（config.json + keys.json + logs/），恢复时整体拷贝回原路径即可；
 - **改密码**：首次登录后立即在后台「参数设置」修改管理员密码；忘记密码可删除 `web-data/config.json` 中的 `admin_password_hash` 字段后重启，重新生成初始密码（会丢失其它设置，先备份）；
-- **上游地址**：`upstream_base_url` 填你自己的 opencode2api / 兼容网关地址，Key 校验在网页版完成，**不要**把上游的 Key 泄露给用户；
+- **上游地址**：在「上游管理」逐条填写你自己的 opencode2api / 兼容网关地址，Key 校验在网页版完成，**不要**把上游的 Key 泄露给用户；多个上游按 `model` 前缀路由（见「一点六」）；
 - **防火墙**：公网只放行 80/443；23081 只允许本机（反代）访问。
 - **监听面**：web-server 默认只监听 `127.0.0.1`；**不要**用 `-listen 0.0.0.0` 把它开到外网，
   也不要对外暴露 18081 / 23099（dev 实例尤其危险：无 nginx 前置、领取口对任何来源开放）。
@@ -167,7 +221,7 @@ sudo nginx -t && sudo systemctl reload nginx
 | 现象 | 处理 |
 | --- | --- |
 | 领 Key 页模型下拉框为空 | 后台「模型管理」还没勾选并保存白名单 |
-| 调用报 `upstream unreachable` | 后台「参数设置」的上游地址填错或上游没启动 |
+| 调用报 `upstream unreachable` | 「上游管理」里的 Base URL 填错或该上游没启动 |
 | 流式输出卡顿/不实时 | nginx 反代漏了 `proxy_buffering off` |
 | 忘记管理员密码 | 见「安全清单」重置方法 |
 | 想改端口 | 改 `web-data/config.json` 的 `port` 后重启服务 |
