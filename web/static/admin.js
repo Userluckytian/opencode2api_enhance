@@ -153,7 +153,8 @@ el('logout').addEventListener('click', logout);
 /* ---------- 导航 ---------- */
 const VIEW_LOADERS = {
   overview: loadOverview, keys: loadKeys, logs: loadLogs,
-  ips: loadIPs, models: loadModels, settings: loadSettings, ask: loadAsk
+  ips: loadIPs, upstreams: loadUpstreams, models: loadModels,
+  settings: loadSettings, ask: loadAsk
 };
 function switchView(name) {
   document.querySelectorAll('aside nav button').forEach(b => b.classList.toggle('active', b.dataset.view === name));
@@ -659,22 +660,37 @@ async function deleteIPOverride(ip) {
   loadIPs();
 }
 
-/* ---------- 模型管理 ---------- */
+/* ---------- 模型管理（按上游分组） ---------- */
 async function loadModels() {
   const { ok, data } = await api('api/admin/models');
   if (!ok) return fail(data);
   let html = '<div class="page-head"><h2>模型管理</h2><button class="btn primary tiny" onclick="saveModels()">保存白名单</button></div>';
   if (data.warning) html += '<div class="card" style="border-color:#fecaca;margin-bottom:12px;color:#b91c1c">' + esc(data.warning) + '</div>';
   const allowed = data.allowed || [];
-  html += '<div class="card"><h3>上游可用模型</h3>';
-  if (!data.models || !data.models.length) {
-    html += '<div class="empty">上游暂无可用模型</div>';
-  } else {
-    html += '<div class="row" style="gap:16px">' + data.models.map(m =>
-      '<label style="display:flex;gap:6px;align-items:center;font-weight:400"><input type="checkbox" class="model-cb" value="' + esc(m) + '"' +
-      (allowed.includes(m) ? ' checked' : '') + '> ' + esc(m) + '</label>').join('') + '</div>';
+  const groups = data.upstreams || [];
+  if (!groups.length) {
+    html += '<div class="card"><div class="empty">尚未配置上游，请先到「上游管理」新增</div></div>';
+    el('models').innerHTML = html;
+    return;
   }
-  html += '</div>';
+  // 每个上游一张卡片；勾选项的 value 就是用户实际要填的 model 字符串（含前缀）。
+  groups.forEach(g => {
+    const prefix = g.prefix || '';
+    html += '<div class="card"><h3>' + esc(g.name || g.id) + ' <span class="muted" style="font-weight:400">（id: ' + esc(g.id) +
+      (prefix ? '，模型名前缀 <code>' + esc(prefix) + '</code>' : '，默认上游（无前缀）') + '）</span></h3>';
+    if (g.warning) html += '<div class="hint" style="color:#b91c1c">' + esc(g.warning) + '</div>';
+    if (!g.models || !g.models.length) {
+      html += '<div class="empty">该上游暂无可用模型</div>';
+    } else {
+      html += '<div class="row" style="gap:16px;flex-wrap:wrap">' + g.models.map(m => {
+        const full = prefix + m;
+        return '<label style="display:flex;gap:6px;align-items:center;font-weight:400">' +
+          '<input type="checkbox" class="model-cb" value="' + esc(full) + '"' +
+          (allowed.includes(full) ? ' checked' : '') + '> ' + esc(full) + '</label>';
+      }).join('') + '</div>';
+    }
+    html += '</div>';
+  });
   el('models').innerHTML = html;
 }
 async function saveModels() {
@@ -682,6 +698,110 @@ async function saveModels() {
   const { ok, data } = await api('api/admin/models', 'POST', { allowed_models: allowed });
   if (!ok) return fail(data);
   toast('模型白名单已保存', 'ok');
+}
+
+/* ---------- 上游管理 ---------- */
+let upstreamCache = [];
+async function loadUpstreams() {
+  const { ok, data } = await api('api/admin/upstreams');
+  if (!ok) return fail(data);
+  upstreamCache = data.upstreams || [];
+  const defaultID = data.default_upstream_id || '';
+  let html = '<div class="page-head"><h2>上游管理</h2>' +
+    '<button class="btn primary tiny" onclick="editUpstream(null)">新增上游</button></div>';
+  html += '<div class="card"><div class="hint">请求的 <code>model</code> 以「上游 ID/」开头时转发到该上游（前缀会被剥离）；' +
+    '不带前缀或第一段不是上游 ID 时走默认上游。默认上游：<b>' + esc(defaultID || '未设置') + '</b>。</div></div>';
+  if (!upstreamCache.length) {
+    html += '<div class="card"><div class="empty">还没有上游，点击右上角「新增上游」开始</div></div>';
+    el('upstreams').innerHTML = html;
+    return;
+  }
+  html += '<div class="card"><table><thead><tr>' +
+    '<th>ID</th><th>名称</th><th>Base URL</th><th>密钥</th><th>状态</th><th>操作</th>' +
+    '</tr></thead><tbody>';
+  upstreamCache.forEach(u => {
+    const isDefault = u.id === defaultID;
+    html += '<tr>' +
+      '<td><code>' + esc(u.id) + '</code>' + (isDefault ? ' <span class="badge ok">默认</span>' : '') + '</td>' +
+      '<td>' + esc(u.name || '') + '</td>' +
+      '<td style="word-break:break-all">' + esc(u.base_url) + '</td>' +
+      '<td>' + (u.api_key_set ? esc(u.api_key_masked) : '<span class="muted">未设置</span>') + '</td>' +
+      '<td>' + (u.enabled ? '<span class="badge ok">启用</span>' : '<span class="badge">停用</span>') + '</td>' +
+      '<td class="row" style="gap:6px">' +
+        '<button class="btn tiny" onclick="editUpstream(\'' + esc(u.id) + '\')">编辑</button>' +
+        '<button class="btn tiny" onclick="testUpstream(\'' + esc(u.id) + '\')">测试</button>' +
+        '<button class="btn tiny" onclick="toggleUpstream(\'' + esc(u.id) + '\',' + (!u.enabled) + ')">' +
+          (u.enabled ? '停用' : '启用') + '</button>' +
+        '<button class="btn tiny danger" onclick="deleteUpstream(\'' + esc(u.id) + '\')">删除</button>' +
+      '</td></tr>';
+  });
+  html += '</tbody></table></div>';
+  el('upstreams').innerHTML = html;
+}
+
+function editUpstream(id) {
+  const u = id ? upstreamCache.find(x => x.id === id) : null;
+  const isEdit = !!u;
+  openModal(
+    '<h3>' + (isEdit ? '编辑上游' : '新增上游') + '</h3>' +
+    '<label class="f">ID（仅字母数字与 - _，用作模型名前缀）</label>' +
+    '<input id="upId" value="' + esc(u ? u.id : '') + '" ' + (isEdit ? 'readonly' : '') + ' placeholder="如 backup">' +
+    '<label class="f">名称</label>' +
+    '<input id="upName" value="' + esc(u ? (u.name || '') : '') + '" placeholder="如 备用上游">' +
+    '<label class="f">Base URL</label>' +
+    '<input id="upURL" value="' + esc(u ? u.base_url : '') + '" placeholder="http://127.0.0.1:18080/v1">' +
+    '<label class="f">API Key<span class="muted" style="font-weight:400"> ' +
+      (isEdit ? '（已配置：' + esc(u.api_key_masked || '未设置') + '，留空则保持不变）' : '') + '</span></label>' +
+    '<input id="upKey" type="password" value="" placeholder="' + (isEdit ? '输入新密钥以更换' : '上游密钥') + '">' +
+    '<label class="f" style="display:flex;gap:6px;align-items:center;font-weight:400">' +
+      '<input id="upEnabled" type="checkbox" ' + ((!u || u.enabled) ? 'checked' : '') + '> 启用</label>' +
+    '<div class="actions"><button class="btn" onclick="closeModal()">取消</button>' +
+    '<button class="btn primary" onclick="saveUpstream(' + (isEdit ? 'true' : 'false') + ')">保存</button></div>'
+  );
+}
+
+async function saveUpstream(isEdit) {
+  const id = el('upId').value.trim();
+  const payload = {
+    name: el('upName').value.trim(),
+    base_url: el('upURL').value.trim(),
+    api_key: el('upKey').value.trim(),
+    enabled: el('upEnabled').checked
+  };
+  let res;
+  if (isEdit) {
+    res = await api('api/admin/upstreams/' + encodeURIComponent(id), 'PUT', payload);
+  } else {
+    payload.id = id;
+    res = await api('api/admin/upstreams', 'POST', payload);
+  }
+  if (!res.ok) return fail(res.data);
+  closeModal();
+  toast(isEdit ? '上游已更新' : '上游已新增', 'ok');
+  loadUpstreams();
+}
+
+async function toggleUpstream(id, enabled) {
+  const { ok, data } = await api('api/admin/upstreams/' + encodeURIComponent(id), 'PUT', { enabled });
+  if (!ok) return fail(data);
+  toast(enabled ? '已启用' : '已停用', 'ok');
+  loadUpstreams();
+}
+
+async function deleteUpstream(id) {
+  if (!await confirmBox('删除上游', '删除后使用「' + id + '/」前缀的请求将回落到默认上游，确认？', '删除', true)) return;
+  const { ok, data } = await api('api/admin/upstreams/' + encodeURIComponent(id), 'DELETE');
+  if (!ok) return fail(data);
+  toast('已删除', 'ok');
+  loadUpstreams();
+}
+
+async function testUpstream(id) {
+  toast('正在测试…');
+  const { ok, data } = await api('api/admin/upstreams/' + encodeURIComponent(id) + '/test', 'POST');
+  if (!ok) return fail(data);
+  if (data.ok) toast('连接正常，可用模型 ' + data.model_count + ' 个', 'ok');
+  else toast(data.warning || '连接失败', 'err');
 }
 
 /* ---------- 参数设置 ---------- */
@@ -692,11 +812,11 @@ async function loadSettings() {
   el('settings').innerHTML =
     '<div class="page-head"><h2>参数设置</h2></div>' +
     '<div class="grid c2">' +
-    '<div class="card"><h3>上游与额度</h3>' +
-    '<label class="f">上游实例地址（http://host/v1）</label><input id="upstream" value="' + esc(data.upstream_base_url || '') + '" placeholder="http://127.0.0.1:18080/v1">' +
-    '<label class="f">上游 API Key<span class="muted" style="font-weight:400"> （已配置：' + esc(data.upstream_api_key_masked || '未设置') + '，留空则保持不变）</span></label>' +
-    '<div class="row"><input id="upkey" type="password" value="" placeholder="输入新密钥以更换" style="flex:1">' +
-    '<button class="btn tiny" onclick="togglePw(\'upkey\')">显示</button></div>' +
+    '<div class="card"><h3>额度与访问</h3>' +
+    '<div class="hint">上游地址与密钥已移至「上游管理」页，可配置多个上游并按 model 前缀路由。' +
+    '当前默认上游：<b>' + esc(data.default_upstream_id || '未设置') + '</b>' +
+    '（共 ' + ((data.upstreams || []).length) + ' 个）。</div>' +
+    '<button class="btn tiny" onclick="switchView(\'upstreams\')">前往上游管理</button>' +
     '<label class="f">对外访问地址（领 Key 时下发给使用者，留空自动推断）</label>' +
     '<input id="publicBase" value="' + esc(data.public_base_url || '') + '" placeholder="如 http://192.168.1.20:23081">' +
     '<div class="hint">留空时：反代场景取 X-Forwarded-Host；本机直连会把 127.0.0.1 换成本机内网 IP（当前探测到 ' + esc(data.lan_ip || '无') + '）。</div>' +
@@ -720,21 +840,15 @@ async function loadSettings() {
     '<button class="btn" onclick="switchView(\'ips\')">前往 IP 管理</button>' +
     '</div></div>';
 }
-function togglePw(id) {
-  const i = el(id);
-  i.type = i.type === 'password' ? 'text' : 'password';
-}
 async function saveSettings() {
+  // 上游地址/密钥不再经本接口提交（已拆到「上游管理」）。
   const { ok, data } = await api('api/admin/settings', 'PUT', {
-    upstream_base_url: el('upstream').value.trim(),
-    upstream_api_key: el('upkey') ? el('upkey').value.trim() : '',
     public_base_url: el('publicBase') ? el('publicBase').value.trim() : '',
     ttl_days: Number(el('ttl').value),
     token_quota: Number(el('quota').value),
     rate_limit_per_min: Number(el('rate').value)
   });
   if (!ok) return fail(data);
-  el('upkey').value = '';
   const quotaChanged = Number(el('quota').value) !== lastKnownQuota;
   toast(quotaChanged ? '参数已保存（额度将于次日 08:00 生效）' : '参数已保存', 'ok');
   loadSettings();
