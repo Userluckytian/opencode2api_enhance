@@ -54,6 +54,8 @@ func buildMux(app *App) http.Handler {
 	mux.Handle("DELETE /api/admin/ip-policies/{ip}", app.adminAuth(http.HandlerFunc(app.handleDeleteIPOverride)))
 	mux.Handle("POST /api/admin/ip-policies/{ip}/reset", app.adminAuth(http.HandlerFunc(app.handleResetIPWindow)))
 	mux.Handle("POST /api/admin/ask", app.adminAuth(http.HandlerFunc(app.handleAsk)))
+	// AI 建议应用（方案 A）：AI 只提议，管理员确认后由此接口真正写入。
+	mux.Handle("POST /api/admin/ask/apply", app.adminAuth(http.HandlerFunc(app.handleApplyAskSuggestion)))
 	mux.Handle("GET /api/admin/ask/usage", app.adminAuth(http.HandlerFunc(app.handleAskUsage)))
 	mux.Handle("GET /api/admin/audit", app.adminAuth(http.HandlerFunc(app.handleAuditList)))
 	mux.Handle("GET /api/admin/claim-policy", app.adminAuth(http.HandlerFunc(app.handleGetClaimPolicy)))

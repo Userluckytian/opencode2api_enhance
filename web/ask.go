@@ -121,13 +121,18 @@ func (a *App) handleAsk(w http.ResponseWriter, r *http.Request) {
 	// 不再由服务端把统计数字汇总好塞进 prompt，而是告诉模型「有哪些数据源、
 	// 各自在哪、字段是什么」，并给它一组只读查询工具，让它自己决定查什么、
 	// 查多细。这样它能下钻到状态码/模型/具体错误，而不是只会复述汇总数字。
-	system := "你是 token 自助餐厅的运营分析助手。你可以调用工具查询本服务的运行数据（全部只读）。\n" +
+	system := "你是 token 自助餐厅的运营分析助手。你可以调用工具查询本服务的运行数据（只读），" +
+		"也可以在用户明确询问「该怎么配」时提议配置修改。\n" +
 		"规则：\n" +
 		"1. 先调用 list_data_sources 了解有哪些数据源、字段含义；不确定就查，不要凭猜测回答。\n" +
 		"2. 用最少必要的查询回答：先聚合（aggregate_call_logs）看分布，需要细节再查明细（query_call_logs）。\n" +
 		"3. 只依据工具返回的真实数据作答，不要编造数值；工具返回「无数据」就如实说明。\n" +
 		"4. 先给结论，再给 1-3 条可执行建议；数字用简洁格式。\n" +
-		"5. 输出适合窄栏阅读：段落不超过 3 行，避免宽表格，枚举项用短句。"
+		"5. 输出适合窄栏阅读：段落不超过 3 行，避免宽表格，枚举项用短句。\n" +
+		"6. 当用户问「建议设成多少」「帮我改」这类问题时：先用只读工具查当前值与实际用量，" +
+		"算出建议值，然后调用 propose_config_change 提议修改（可一次提议多项）。" +
+		"该工具只记录建议、不会立即生效，管理员会在界面上确认；所以你可以放心提议，" +
+		"但必须在 reason 里写明计算依据（引用你查到的数据）。不要自己在回答里假装已经改好了。"
 	userMsg := req.Question
 
 	msgs := []map[string]any{
@@ -144,6 +149,7 @@ func (a *App) handleAsk(w http.ResponseWriter, r *http.Request) {
 	var totalPrompt, totalCompletion int
 	var answer string
 	var lastToolLog []string
+	var suggestions []askSuggestion
 
 	for round := 0; round < askMaxToolRounds; round++ {
 		payload := map[string]any{
@@ -239,9 +245,23 @@ func (a *App) handleAsk(w http.ResponseWriter, r *http.Request) {
 			if strings.TrimSpace(tc.Function.Arguments) != "" {
 				_ = json.Unmarshal([]byte(tc.Function.Arguments), &args)
 			}
-			result, terr := a.runAskTool(tc.Function.Name, args, now)
-			if terr != nil {
-				result = "调用失败: " + terr.Error()
+			var result string
+			if tc.Function.Name == "propose_config_change" {
+				// 只记录建议，不写配置；写入由管理员点「应用」触发。
+				sug, serr := buildAskSuggestion(a, args)
+				if serr != nil {
+					result = "建议被拒绝: " + serr.Error()
+				} else {
+					suggestions = append(suggestions, sug)
+					result = fmt.Sprintf("已记录建议（尚未生效，需管理员确认）：%s %s → %s",
+						sug.Label, sug.Current, sug.Proposed)
+				}
+			} else {
+				var terr error
+				result, terr = a.runAskTool(tc.Function.Name, args, now)
+				if terr != nil {
+					result = "调用失败: " + terr.Error()
+				}
 			}
 			lastToolLog = append(lastToolLog, tc.Function.Name+"("+jsonArgString(args)+")")
 			msgs = append(msgs, map[string]any{
@@ -260,9 +280,10 @@ func (a *App) handleAsk(w http.ResponseWriter, r *http.Request) {
 	}
 	a.logAsk(r, model, req.Question, answer, totalPrompt, totalCompletion, totalPrompt+totalCompletion, time.Since(start), true, "")
 	writeJSON(w, http.StatusOK, map[string]any{
-		"answer":     answer,
-		"model":      model,
-		"tool_calls": lastToolLog,
+		"answer":      answer,
+		"model":       model,
+		"tool_calls":  lastToolLog,
+		"suggestions": suggestions,
 	})
 }
 

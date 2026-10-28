@@ -955,7 +955,7 @@ function pickAskModel(m) {
 function renderAsk() {
   const box = el('chatBox');
   if (!box) return;
-  box.innerHTML = askState.messages.map(m => {
+  box.innerHTML = askState.messages.map((m, mi) => {
     let body = m.role === 'ai' ? md(m.text) : esc(m.text);
     // AI 回答附带「查询了哪些数据」：让管理员知道结论的依据，也便于判断是否查全。
     if (m.role === 'ai' && m.toolCalls && m.toolCalls.length) {
@@ -963,10 +963,81 @@ function renderAsk() {
         m.toolCalls.length + ' 次</span>' +
         m.toolCalls.map(c => '<code class="ask-tool">' + esc(c) + '</code>').join('') + '</div>';
     }
+    if (m.role === 'ai' && m.suggestions && m.suggestions.length) {
+      body += renderAskSuggestions(m, mi);
+    }
     return '<div class="bubble ' + (m.role === 'me' ? 'me' : (m.role === 'err' ? 'err' : 'ai')) + '">' + body + '</div>';
   }).join('')
     + (askState.busy ? '<div class="bubble ai"><span class="dots">正在分析</span></div>' : '');
   box.scrollTop = box.scrollHeight;
+}
+
+// renderAskSuggestions 渲染 AI 提议的配置修改。
+// 关键点：这些值此时**还没有写入配置**，卡片上必须明示「待确认」，
+// 只有点「应用」才会调后端真正落盘（方案 A）。
+function renderAskSuggestions(m, mi) {
+  return '<div class="ask-sugs">' + m.suggestions.map((s, si) => {
+    const st = s.state || 'pending';
+    let html = '<div class="ask-sug' + (st === 'applied' ? ' applied' : (st === 'ignored' ? ' ignored' : '')) + '">' +
+      '<div class="ask-sug-head">' + esc(s.label || s.target) +
+      (st === 'pending' ? '<span class="ask-sug-badge">待确认</span>' : '') + '</div>' +
+      '<div class="ask-sug-diff">' +
+        '<span class="old">' + esc(s.current || '（空）') + '</span>' +
+        '<span class="arrow">→</span>' +
+        '<span class="new">' + esc(s.proposed) + '</span>' +
+      '</div>' +
+      (s.reason ? '<div class="ask-sug-reason">' + esc(s.reason) + '</div>' : '');
+    if (st === 'pending') {
+      html += '<div class="ask-sug-actions">' +
+        '<button type="button" class="btn primary" onclick="applySuggestion(' + mi + ',' + si + ')">应用</button>' +
+        '<button type="button" class="btn" onclick="ignoreSuggestion(' + mi + ',' + si + ')">忽略</button>' +
+        '</div>';
+    } else if (st === 'applied') {
+      html += '<div class="ask-sug-done">已应用，当前值：' + esc(s.appliedAs || s.proposed) + '</div>';
+    } else {
+      html += '<div class="ask-sug-done" style="color:#94a3b8">已忽略，未修改配置</div>';
+    }
+    return html + '</div>';
+  }).join('') + '</div>';
+}
+
+async function applySuggestion(mi, si) {
+  const m = askState.messages[mi];
+  const s = m && m.suggestions ? m.suggestions[si] : null;
+  if (!s || s.state === 'applied' || s.applying) return;
+  s.applying = true;
+  const { ok, data } = await api('api/admin/ask/apply', 'POST', { target: s.target, value: s.value });
+  s.applying = false;
+  if (!ok) { fail(data); return; }
+  s.state = 'applied';
+  s.current = data.before;
+  s.appliedAs = data.after;
+  toast('已应用：' + (data.label || s.label) + ' ' + data.before + ' → ' + data.after, 'ok');
+  renderAsk();
+  refreshAfterSuggestion(s.target);
+}
+
+function ignoreSuggestion(mi, si) {
+  const m = askState.messages[mi];
+  const s = m && m.suggestions ? m.suggestions[si] : null;
+  if (!s || s.state === 'applied') return;
+  s.state = 'ignored';
+  renderAsk();
+}
+
+// refreshAfterSuggestion 让其他面板显示新值，避免「问答里改了、设置页还是旧的」。
+function refreshAfterSuggestion(target) {
+  if (!target) return;
+  if (target.indexOf('ip_') === 0) {
+    if (typeof loadIPs === 'function') loadIPs();
+    return;
+  }
+  if (target === 'allowed_models') {
+    if (typeof loadModels === 'function') loadModels();
+    loadAskModels();
+    return;
+  }
+  if (typeof loadSettings === 'function') loadSettings();
 }
 
 // md 把模型返回的 Markdown 渲染成可读排版：先转义，再处理标题/表格/列表/加粗/行内码。
@@ -1037,7 +1108,8 @@ async function sendAsk() {
     askState.messages.push({
       role: 'ai',
       text: data.answer || '(空回答)',
-      toolCalls: Array.isArray(data.tool_calls) ? data.tool_calls : []
+      toolCalls: Array.isArray(data.tool_calls) ? data.tool_calls : [],
+      suggestions: Array.isArray(data.suggestions) ? data.suggestions.map(s => Object.assign({ state: 'pending' }, s)) : []
     });
   } else {
     askState.messages.push({ role: 'err', text: (data && data.error) || '请求失败' });

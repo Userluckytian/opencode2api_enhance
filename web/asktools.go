@@ -129,6 +129,9 @@ func askTools() []askToolSpec {
 // askToolPayload 把工具清单转成 OpenAI 兼容的 tools 字段。
 func askToolPayload() []map[string]any {
 	specs := askTools()
+	// propose_config_change 是唯一的「写」类工具，但它只记录建议、不落盘，
+	// 真正写入由管理员在前端点「应用」后走 handleApplyAskSuggestion。
+	specs = append(specs, proposeConfigChangeTool())
 	out := make([]map[string]any, 0, len(specs))
 	for _, s := range specs {
 		out = append(out, map[string]any{

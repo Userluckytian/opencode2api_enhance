@@ -148,6 +148,21 @@ tbody tr:hover { background:#f8fafc; }
 .ask-tools { margin-top:10px; padding-top:8px; border-top:1px dashed #e2e8f0; display:flex; flex-wrap:wrap; gap:5px; align-items:center; }
 .ask-tools-label { font-size:11px; color:#94a3b8; margin-right:2px; }
 .ask-tool { display:inline-block; background:#f1f5f9; color:#64748b; border-radius:5px; padding:2px 6px; font-size:10.5px; font-family:ui-monospace,SFMono-Regular,Menlo,monospace; word-break:break-all; }
+/* AI 提议的配置修改：只记录建议，必须管理员点「应用」才写入 */
+.ask-sugs { margin-top:10px; display:flex; flex-direction:column; gap:8px; }
+.ask-sug { border:1px solid #cbd5e1; border-radius:9px; background:#fff; padding:9px 11px; }
+.ask-sug.applied { border-color:#86efac; background:#f0fdf4; }
+.ask-sug.ignored { border-color:#e2e8f0; background:#f8fafc; opacity:.6; }
+.ask-sug-head { display:flex; align-items:center; gap:6px; font-size:12.5px; font-weight:600; color:#0f172a; }
+.ask-sug-badge { font-size:10.5px; font-weight:600; color:#b45309; background:#fef3c7; border-radius:4px; padding:1px 5px; }
+.ask-sug-diff { margin-top:6px; font-family:ui-monospace,SFMono-Regular,Menlo,monospace; font-size:12px; color:#334155; word-break:break-all; }
+.ask-sug-diff .old { color:#94a3b8; text-decoration:line-through; }
+.ask-sug-diff .arrow { color:#94a3b8; margin:0 6px; }
+.ask-sug-diff .new { color:#0f766e; font-weight:600; }
+.ask-sug-reason { margin-top:6px; font-size:12px; color:#475569; line-height:1.6; white-space:normal; }
+.ask-sug-actions { margin-top:8px; display:flex; gap:7px; }
+.ask-sug-actions .btn { padding:4px 11px; font-size:12px; }
+.ask-sug-done { margin-top:8px; font-size:12px; color:#15803d; }
 .split { display:grid; grid-template-columns:1.5fr 1fr; gap:14px; }
 @media (max-width:1100px) { .grid.c4 { grid-template-columns:repeat(2,minmax(0,1fr)); } .split { grid-template-columns:1fr; } }
 
