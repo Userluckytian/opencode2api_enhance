@@ -122,6 +122,13 @@ func main() {
 	store.RollQuota(cfg.TokenQuota, time.Now())
 	// 「Key 有效期」全局策略（ttl_days=0 表示永不过期）在启动时生效。
 	store.ApplyTTL(cfg.TTLDays, time.Now())
+	// 2026-10-28 策略变更：Key 不再绑定单个模型（可用全部白名单模型）。
+	// 存量 Key 的 Model 字段需要清空，否则老用户仍被锁在当初领的那个模型上。
+	if n, err := store.UnbindKeyModels(); err != nil {
+		log.Printf("warning: 解除存量 Key 的模型绑定失败: %v", err)
+	} else if n > 0 {
+		log.Printf("[模型授权] 已解除 %d 个存量 Key 的模型绑定（现在可用全部白名单模型）", n)
+	}
 	// 钳制存量 Key 中越界的额度（如 MaxInt64 脏值）。
 	// 不做这一步，越界额度会被 MaxIssuedQuota 当成「已发放的最大额度」，
 	// 管理员任何下调 token_quota 的操作都会被 400 拒绝（活锁）。

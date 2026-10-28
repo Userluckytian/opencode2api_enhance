@@ -205,6 +205,29 @@ func (s *Store) ApplyTTL(ttlDays int, now time.Time) bool {
 	return changed
 }
 
+// UnbindKeyModels 清空所有存量 Key 的模型绑定，返回被解除绑定的 Key 数。
+//
+// 2026-10-28 策略变更：Key 不再绑定单个模型，一个 Key 可用全部白名单模型。
+// 但存量 Key 的 Model 字段仍有具体值，若不清理，老用户会被永久锁在当初领的那个
+// 模型上——「放开」对存量 Key 不生效，而新领的 Key 却能用全部，行为不一致。
+//
+// 只清空 Model，不动额度、有效期、IP、禁用状态与用量计数。
+func (s *Store) UnbindKeyModels() (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	n := 0
+	for _, k := range s.keys {
+		if k.Model != "" {
+			k.Model = ""
+			n++
+		}
+	}
+	if n == 0 {
+		return 0, nil
+	}
+	return n, s.writeLocked()
+}
+
 // FindByIP 按 IP 查 Key。
 func (s *Store) FindByIP(ip string) (*Key, bool) {
 	s.mu.Lock()

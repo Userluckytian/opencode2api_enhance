@@ -67,12 +67,16 @@ func TestHandleCreateKey(t *testing.T) {
 	if body.Key[:3] != "sk-" {
 		t.Fatalf("key = %q", body.Key)
 	}
-	if body.Model != "glm-4" {
-		t.Fatalf("model = %q", body.Model)
+	if body.Model != "" {
+		t.Fatalf("model = %q, want 空（不再绑定单模型，可用全部白名单）", body.Model)
 	}
-	// Key 应已入库且绑定模型
-	if _, ok := app.Store.GetByKey(body.Key); !ok {
+	// Key 应已入库，且不绑定任何模型（Model 为空 = 可用全部白名单）
+	k, ok := app.Store.GetByKey(body.Key)
+	if !ok {
 		t.Fatal("key not stored")
+	}
+	if k.Model != "" {
+		t.Fatalf("存量 Key 不应绑定模型, got %q", k.Model)
 	}
 }
 

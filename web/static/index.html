@@ -142,9 +142,8 @@ body.claim footer {
 <main class="card">
   <span class="eyebrow">自助领取</span>
   <h1>领取 API Key</h1>
-  <p class="hint">选择一个模型，点击获取，即可拿到你的访问地址和 Key。</p>
-  <label for="model">选择模型</label>
-  <select id="model"></select>
+  <p class="hint">点击获取，即可拿到你的访问地址和 Key；<b>一个 Key 可用全部已开放的模型</b>。</p>
+  <div id="modelList" class="rules-box"><div class="muted" style="font-size:12px">可用模型加载中…</div></div>
   <button id="getKeyBtn" class="primary">获取 Key</button>
   <div id="rules" class="rules-box"><div class="muted" style="font-size:12px">规则加载中…</div></div>
   <div id="result" class="result hidden">

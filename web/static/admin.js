@@ -288,7 +288,7 @@ function renderKeys() {
       '<td><span class="mono">' + shown + '</span> ' +
       '<button class="icon-btn" title="显示/隐藏" onclick="toggleReveal(\'' + esc(k.id) + '\')">👁</button>' +
       '<button class="icon-btn" title="复制" onclick="copyKey(\'' + esc(k.id) + '\')">⧉</button></td>' +
-      '<td>' + esc(k.model) + '</td>' +
+      '<td>' + (k.all_models ? '<span class="badge blue">全部模型</span>' : esc(k.model)) + '</td>' +
       '<td class="mono">' + esc(k.ip || '-') + '</td>' +
       '<td><span class="badge ' + cls + '">' + txt + '</span></td>' +
       '<td style="min-width:140px"><div class="bar ' + (k.exhausted ? 'err' : (pct(k.token_used, k.quota) > 80 ? 'warn' : '')) + '"><i style="width:' + pct(k.token_used, k.quota) + '%"></i></div>' +

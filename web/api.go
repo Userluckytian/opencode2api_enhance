@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 )
@@ -68,6 +69,10 @@ func (a *App) HandleModels(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *App) HandleCreateKey(w http.ResponseWriter, r *http.Request) {
+	// 2026-10-28 变更：Key 不再绑定单个模型。
+	// 一个 Key 可使用全部已暴露（allowed_models 白名单）的模型，跨上游同样适用——
+	// 走哪个上游仍由请求的 model 前缀决定，与 Key 无关。
+	// 请求体的 model 字段保留兼容（旧客户端会发），但不再写入 Key。
 	var req struct {
 		Model string `json:"model"`
 	}
@@ -85,17 +90,24 @@ func (a *App) HandleCreateKey(w http.ResponseWriter, r *http.Request) {
 	}
 
 	a.Mu.RLock()
-	allowed := contains(a.Cfg.AllowedModels, req.Model)
+	allowed := append([]string(nil), a.Cfg.AllowedModels...)
 	ttl, quota := a.Cfg.TTLDays, a.Cfg.TokenQuota
 	a.Mu.RUnlock()
-	if !allowed {
+	// 白名单为空时不允许领取：否则发出去的 Key 什么都用不了（fail-closed）。
+	if len(allowed) == 0 {
+		writeErr(w, http.StatusServiceUnavailable, "暂无可领取的模型，请联系管理员在后台勾选")
+		return
+	}
+	// 兼容校验：客户端若仍指定 model，必须在白名单内，避免「选了不存在的模型」
+	// 却拿到一个看起来可用的 Key。该值不写入 Key。
+	if m := strings.TrimSpace(req.Model); m != "" && !contains(allowed, m) {
 		writeErr(w, http.StatusBadRequest, "model not allowed")
 		return
 	}
 
 	// 每个 IP 固定一个 Key：已存在就返回原来的（幂等），额度每日 08:00 自动重置，
-	// 使用者不需要每天重新领取。
-	k, isNew, err := a.Store.CreateOrGetForIP(ip, req.Model, ttl, quota, now)
+	// 使用者不需要每天重新领取。model 传空串 = 不绑定，可用全部白名单模型。
+	k, isNew, err := a.Store.CreateOrGetForIP(ip, "", ttl, quota, now)
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, "failed to create key")
 		return
@@ -128,7 +140,7 @@ func (a *App) HandleCreateKey(w http.ResponseWriter, r *http.Request) {
 			}
 			return k.ExpiresAt.Format(time.RFC3339)
 		}(),
-		"model":      k.Model,
+		"model":      "", // 不再绑定单模型；可用全部白名单（见 allowed_models）
 		// is_new=false 表示这是该 IP 原有的 Key（额度每日 08:00 自动重置）
 		"is_new": isNew,
 		// 不下发额度数值：额度是内部配置，页面只说「默认额度」。

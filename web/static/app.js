@@ -1,25 +1,29 @@
+// loadModels 展示可用模型清单（只读）。
+// 2026-10-28 变更：Key 不再绑定单个模型 —— 领到的 Key 可用下面列出的全部模型，
+// 因此这里不再提供下拉选择，只做说明。
 async function loadModels() {
+  const box = document.getElementById('modelList');
+  const btn = document.getElementById('getKeyBtn');
   try {
     const res = await fetch('api/models');
     const data = await res.json();
-    const sel = document.getElementById('model');
-    sel.innerHTML = '';
     if (!data.models || !data.models.length) {
-      const o = document.createElement('option');
-      o.textContent = '（暂无可领取的模型）';
-      sel.appendChild(o);
-      document.getElementById('getKeyBtn').disabled = true;
+      box.innerHTML = '<div class="muted" style="font-size:12px">暂无可领取的模型，请联系管理员</div>';
+      btn.disabled = true;
       return;
     }
-    data.models.forEach(m => {
-      const o = document.createElement('option');
-      o.value = m; o.textContent = m;
-      sel.appendChild(o);
-    });
+    box.innerHTML = '<div style="font-size:13px;color:#6b7280;margin-bottom:6px">可用模型（' +
+      data.models.length + ' 个）</div><div class="rules">' +
+      data.models.map(m => '<code style="display:inline-block;margin:2px 6px 2px 0">' + esc(m) + '</code>').join('') +
+      '</div>';
   } catch (e) {
     const err = document.getElementById('error');
     err.textContent = '加载模型失败：' + e; err.classList.remove('hidden');
   }
+}
+
+function esc(s) {
+  return String(s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 }
 
 // loadRules 拉取并展示领取规则（重置时刻、限领规则）。
@@ -44,14 +48,14 @@ async function loadRules() {
 }
 
 async function getKey() {
-  const model = document.getElementById('model').value;
+  // 不再提交 model：Key 不绑定单模型，领取后可用全部白名单模型。
   const err = document.getElementById('error');
   err.classList.add('hidden');
   try {
     const res = await fetch('api/keys', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ model })
+      body: JSON.stringify({})
     });
     const data = await res.json();
     if (!res.ok) {

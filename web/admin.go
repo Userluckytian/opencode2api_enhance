@@ -365,6 +365,9 @@ func (a *App) handleListKeys(w http.ResponseWriter, r *http.Request) {
 		ID        string `json:"id"`
 		Key       string `json:"key"`
 		Model     string `json:"model"`
+		// AllModels 为 true 表示该 Key 不绑定单模型，可用全部白名单模型
+		// （2026-10-28 起的默认行为；存量 Key 在启动时已解除绑定）。
+		AllModels bool   `json:"all_models"`
 		CreatedAt string `json:"created_at"`
 		ExpiresAt string `json:"expires_at"`
 		TokenUsed int    `json:"token_used"`
@@ -400,7 +403,7 @@ func (a *App) handleListKeys(w http.ResponseWriter, r *http.Request) {
 			expiresAt = k.ExpiresAt.Format(time.RFC3339)
 		}
 		out = append(out, outKey{
-			ID: k.ID, Key: k.Key, Model: k.Model,
+			ID: k.ID, Key: k.Key, Model: k.Model, AllModels: k.Model == "",
 			CreatedAt: k.CreatedAt.Format(time.RFC3339),
 			ExpiresAt: expiresAt,
 			TokenUsed: k.TokenUsed, Quota: k.Quota, Remaining: rem,
