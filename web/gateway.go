@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -123,9 +124,29 @@ func (a *App) HandleV1(w http.ResponseWriter, r *http.Request) {
 	a.Mu.RLock()
 	allowedModels := append([]string(nil), a.Cfg.AllowedModels...)
 	a.Mu.RUnlock()
+	// 白名单校验用**客户端原始 model**（可能带上游前缀），保持 Key 绑定语义不变。
 	if !modelAllowedForKey(k, allowedModels, model) {
 		writeErr(w, http.StatusForbidden, "model not allowed for this key")
 		return
+	}
+	// 路由：model 第一段命中已启用上游 ID 才剥离前缀，否则原样走默认上游。
+	up, forwardModel, uerr := a.Resolve(model)
+	if uerr != nil {
+		if errors.Is(uerr, errNoUpstream) {
+			writeErr(w, http.StatusServiceUnavailable, "no enabled upstream configured")
+		} else {
+			writeErr(w, http.StatusBadRequest, "invalid model: "+uerr.Error())
+		}
+		return
+	}
+	// 只在需要时改写 body 的 model 字段（精确替换，不做反序列化往返）。
+	if forwardModel != model {
+		rewritten, rerr := rewriteModelField(raw, forwardModel)
+		if rerr != nil {
+			writeErr(w, http.StatusInternalServerError, "failed to rewrite model")
+			return
+		}
+		raw = rewritten
 	}
 	if !a.RateLimiter().Allow(k.ID, now) {
 		writeErr(w, http.StatusTooManyRequests, "rate limit exceeded")
@@ -151,11 +172,9 @@ func (a *App) HandleV1(w http.ResponseWriter, r *http.Request) {
 		outputTPS = a.IPs.Policies().Effective(ip).OutputTPS
 	}
 
-	// 构造上游 URL：UpstreamBaseURL 形如 http://host/v1，请求路径 /v1/xx
-	a.Mu.RLock()
-	target := a.Cfg.UpstreamBaseURL + strings.TrimPrefix(r.URL.Path, "/v1")
-	upstreamKey := a.Cfg.UpstreamAPIKey
-	a.Mu.RUnlock()
+	// 构造上游 URL：BaseURL 形如 http://host/v1，请求路径 /v1/xx
+	target := up.BaseURL + strings.TrimPrefix(r.URL.Path, "/v1")
+	upstreamKey := up.APIKey
 	if q := r.URL.RawQuery; q != "" {
 		target += "?" + q
 	}
@@ -168,6 +187,11 @@ func (a *App) HandleV1(w http.ResponseWriter, r *http.Request) {
 	outReq.Header.Del("Authorization") // 客户端的 sk- Key 不需要转发给上游
 	if upstreamKey != "" {
 		outReq.Header.Set("Authorization", "Bearer "+upstreamKey)
+	}
+	if forwardModel != model {
+		// body 被改写后长度变化，Header 里可能残留旧 Content-Length；
+		// 交给 Transport 按实际 body 重算，避免长度不一致导致上游挂起。
+		outReq.Header.Del("Content-Length")
 	}
 
 	start := time.Now()

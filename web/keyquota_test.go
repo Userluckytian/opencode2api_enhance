@@ -14,7 +14,7 @@ func TestKeyQuotaResetsAt8AM(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	s.Consume(k.ID, 600)
+	s.ConsumeAt(k.ID, 600, now)
 	snap, _ := s.Snapshot(k.ID)
 	if snap.TokenUsed != 600 {
 		t.Fatalf("用量应累计: %+v", snap)
@@ -47,7 +47,7 @@ func TestKeyQuotaNotResetBefore8AM(t *testing.T) {
 	s := &Store{keys: map[string]*Key{}, defaultQuota: 1000, dir: t.TempDir()}
 	now := time.Date(2026, 10, 21, 10, 0, 0, 0, loc)
 	k, _, _ := s.CreateOrGetForIP("192.168.12.17", "glm-4", 1, 1000, now)
-	s.Consume(k.ID, 600)
+	s.ConsumeAt(k.ID, 600, now)
 	// 次日 07:59 —— 仍在同一额度日内
 	s.RollQuota(1000, time.Date(2026, 10, 22, 7, 59, 0, 0, loc))
 	snap, _ := s.Snapshot(k.ID)
@@ -62,7 +62,7 @@ func TestConsumeTriggersDailyReset(t *testing.T) {
 	s := &Store{keys: map[string]*Key{}, defaultQuota: 1000, dir: t.TempDir()}
 	now := time.Date(2026, 10, 21, 10, 0, 0, 0, loc)
 	k, _, _ := s.CreateOrGetForIP("192.168.12.17", "glm-4", 1, 1000, now)
-	s.Consume(k.ID, 600)
+	s.ConsumeAt(k.ID, 600, now)
 
 	// 把窗口日期改到前一天，模拟跨过 08:00
 	s.mu.Lock()
@@ -85,15 +85,15 @@ func TestKeyQuotaExhaustedThenRecoversNextDay(t *testing.T) {
 	s := &Store{keys: map[string]*Key{}, defaultQuota: 100, dir: t.TempDir()}
 	now := time.Date(2026, 10, 21, 10, 0, 0, 0, loc)
 	k, _, _ := s.CreateOrGetForIP("192.168.12.17", "glm-4", 1, 100, now)
-	if !s.Consume(k.ID, 100) {
+	if !s.ConsumeAt(k.ID, 100, now) {
 		t.Fatal("首次扣减应成功")
 	}
-	if s.Consume(k.ID, 1) {
+	if s.ConsumeAt(k.ID, 1, now) {
 		t.Fatal("超额后扣减应失败")
 	}
 	// 跨额度日
 	s.RollQuota(100, time.Date(2026, 10, 22, 8, 0, 0, 0, loc))
-	if !s.Consume(k.ID, 50) {
+	if !s.ConsumeAt(k.ID, 50, time.Date(2026, 10, 22, 8, 0, 0, 0, loc)) {
 		t.Fatal("跨日后应恢复可用")
 	}
 }

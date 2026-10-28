@@ -91,14 +91,8 @@ func (a *App) handleAsk(w http.ResponseWriter, r *http.Request) {
 	}
 
 	a.Mu.RLock()
-	upstream := strings.TrimRight(a.Cfg.UpstreamBaseURL, "/")
-	apiKey := a.Cfg.UpstreamAPIKey
 	allowed := append([]string(nil), a.Cfg.AllowedModels...)
 	a.Mu.RUnlock()
-	if upstream == "" {
-		writeErr(w, http.StatusBadRequest, "尚未配置上游实例地址")
-		return
-	}
 	model := strings.TrimSpace(req.Model)
 	if model == "" && len(allowed) > 0 {
 		model = allowed[0]
@@ -111,6 +105,15 @@ func (a *App) handleAsk(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "模型不在白名单内")
 		return
 	}
+	// 与管理面板一致：model 可能带上游前缀（如 backup/gpt-4o），
+	// 按同一套规则解析出目标上游与真实模型名。
+	up, forwardModel, uerr := a.Resolve(model)
+	if uerr != nil {
+		writeErr(w, http.StatusServiceUnavailable, "没有可用的上游实例: "+uerr.Error())
+		return
+	}
+	upstream := strings.TrimRight(up.BaseURL, "/")
+	apiKey := up.APIKey
 
 	now := time.Now()
 	// 管理员自用的 AI 问数不设额度闸门（IP 策略只管 /v1 使用者流量），
@@ -121,7 +124,7 @@ func (a *App) handleAsk(w http.ResponseWriter, r *http.Request) {
 		"回答用中文，先给结论，再给 1-3 条可执行建议，数字用简洁格式。" +
 		"输出适合在窄栏阅读：段落不超过 3 行，避免宽表格，枚举项用短句列出。数据不足时直接说明。\n\n" + ctx
 	payload := map[string]any{
-		"model": model,
+		"model": forwardModel,
 		"messages": []map[string]string{
 			{"role": "system", "content": system},
 			{"role": "user", "content": req.Question},
