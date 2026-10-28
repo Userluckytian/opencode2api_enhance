@@ -8,10 +8,32 @@ import (
 	"strings"
 )
 
+// Upstream 是一个可路由的上游网关。
+//
+// 多上游（2026-10-28）：请求的 model 第一段若精确等于某个 enabled 上游的 ID，
+// 就把该段剥离后转发到该上游；否则整体视为普通模型名，走默认上游。
+// ID 不允许含 "/"，因此前缀分隔无歧义。
+type Upstream struct {
+	ID      string `json:"id"`
+	Name    string `json:"name"`
+	BaseURL string `json:"base_url"`
+	// APIKey 是转发时注入的 Authorization。管理 API 只回 maskSecret 后的值。
+	APIKey  string `json:"api_key,omitempty"`
+	Enabled bool   `json:"enabled"`
+}
+
+// LegacyUpstreamID 是旧单上游配置迁移后使用的稳定 ID。
+const LegacyUpstreamID = "default"
+
 type Config struct {
 	AdminPasswordHash string   `json:"admin_password_hash"`
 	UpstreamBaseURL   string   `json:"upstream_base_url"`
 	UpstreamAPIKey    string   `json:"upstream_api_key"`
+	// Upstreams 是多上游列表（source of truth）。为空时回退到上面的旧单上游字段，
+	// 保证升级前只有 upstream_base_url 的配置零手工可用（见 EffectiveUpstreams）。
+	Upstreams []Upstream `json:"upstreams,omitempty"`
+	// DefaultUpstreamID 指定不带前缀的请求走哪个上游；空 = 取第一个 enabled 的。
+	DefaultUpstreamID string   `json:"default_upstream_id,omitempty"`
 	PublicBaseURL     string   `json:"public_base_url"`    // 对外访问地址（领 Key 时下发给客户端），留空则自动推断
 	TrustedProxies    []string `json:"trusted_proxies"`    // 可信反代网段，只有这些对端的转发头才被采信
 	ProxySecret       string   `json:"proxy_secret"`       // 反代共享密钥：带对才采信 X-Real-IP / X-Forwarded-For
@@ -73,7 +95,17 @@ func LoadConfig(dir string) (*Config, error) {
 	if err := json.Unmarshal(data, c); err != nil {
 		return nil, err
 	}
-	changed := resolveUpstreamAPIKey(c)
+	// 已配置 upstreams 列表时，旧单上游字段（含其密钥轮换）不再参与路由，
+	// 跳过轮换：否则会给一个被忽略的字段生成随机密钥并打出误导性的「请注入密钥」告警。
+	var changed bool
+	if len(c.Upstreams) > 0 {
+		if strings.TrimSpace(os.Getenv(EnvUpstreamAPIKey)) != "" {
+			log.Printf("[安全] 已配置 upstreams 列表，环境变量 %s 不再生效；"+
+				"请通过管理后台「上游管理」逐条设置密钥", EnvUpstreamAPIKey)
+		}
+	} else {
+		changed = resolveUpstreamAPIKey(c)
+	}
 	// 对外访问地址（public_base_url）允许由环境变量注入（部署方不落盘明文）。
 	// 优先级：config.json > 环境变量 > 空（空 = 拒绝下发 base_url，fail-closed）。
 	if env := strings.TrimSpace(os.Getenv(EnvPublicBaseURL)); env != "" {
@@ -131,4 +163,43 @@ func (c *Config) Save(dir string) error {
 		return err
 	}
 	return os.WriteFile(filepath.Join(dir, "config.json"), data, 0o644)
+}
+
+// EffectiveUpstreams 返回真正参与路由的上游列表。
+//
+// 迁移策略（不落盘改写，避免启动期写配置引入竞争）：
+//   - Upstreams 非空 → 直接用（旧单上游字段从此被忽略）；
+//   - Upstreams 为空且旧 upstream_base_url 非空 → 合成一条 id=default 的上游，
+//     使升级前的配置零手工可用；
+//   - 两者都空 → 返回 nil，调用方按「未配置上游」处理。
+func (c *Config) EffectiveUpstreams() []Upstream {
+	if len(c.Upstreams) > 0 {
+		return c.Upstreams
+	}
+	if strings.TrimSpace(c.UpstreamBaseURL) == "" {
+		return nil
+	}
+	return []Upstream{{
+		ID:      LegacyUpstreamID,
+		Name:    "默认上游",
+		BaseURL: c.UpstreamBaseURL,
+		APIKey:  c.UpstreamAPIKey,
+		Enabled: true,
+	}}
+}
+
+// EnsureUpstreamsMaterialized 把旧单上游字段落成 Upstreams 里的实体条目。
+// 管理 API 第一次改动上游列表时调用：否则写进 Upstreams 后旧字段被忽略，
+// 原来那条上游就凭空消失了。
+func (c *Config) EnsureUpstreamsMaterialized() bool {
+	if len(c.Upstreams) > 0 {
+		return false
+	}
+	eff := c.EffectiveUpstreams()
+	if len(eff) == 0 {
+		return false
+	}
+	c.Upstreams = eff
+	c.DefaultUpstreamID = eff[0].ID
+	return true
 }
