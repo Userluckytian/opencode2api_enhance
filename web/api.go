@@ -105,9 +105,23 @@ func (a *App) HandleCreateKey(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 每个 IP 固定一个 Key：已存在就返回原来的（幂等），额度每日 08:00 自动重置，
-	// 使用者不需要每天重新领取。model 传空串 = 不绑定，可用全部白名单模型。
-	k, isNew, err := a.Store.CreateOrGetForIP(ip, "", ttl, quota, now)
+	// 领取策略（ClaimRule.OneKeyPerIP）：
+	//   true  → 每个 IP 固定一个 Key，重复领取拿回同一个（幂等）；
+	//   false → 每次领取都新建一个 Key，同一 IP 可持多个。
+	// 额度每日 08:00 自动重置。model 传空串 = 不绑定，可用全部白名单模型。
+	oneKeyPerIP := true
+	if a.Claims != nil {
+		oneKeyPerIP = a.Claims.Rule().OneKeyPerIP
+	}
+	var k *Key
+	var isNew bool
+	var err error
+	if oneKeyPerIP {
+		k, isNew, err = a.Store.CreateOrGetForIP(ip, "", ttl, quota, now)
+	} else {
+		k, err = a.Store.CreateKeyForIP(ip, "", ttl, quota, now)
+		isNew = err == nil
+	}
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, "failed to create key")
 		return

@@ -125,6 +125,7 @@ func (s *Store) CreateKey(model string, ttlDays, quota int, now time.Time) (*Key
 //
 // 语义：每个 IP 固定一个 Key，额度每日 08:00 自动重置，**用户无需重复领取**。
 // 重复点击「获取 Key」拿到的是同一个 Key，不会报错、不会多占额度。
+// 仅在 ClaimRule.OneKeyPerIP 为 true 时使用；否则用 CreateKeyForIP 每次新建。
 func (s *Store) CreateOrGetForIP(ip, model string, ttlDays, quota int, now time.Time) (*Key, bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -136,7 +137,26 @@ func (s *Store) CreateOrGetForIP(ip, model string, ttlDays, quota int, now time.
 			return k, false, s.writeLocked()
 		}
 	}
-	k := &Key{
+	k := s.newKeyLocked(ip, model, ttlDays, quota, now)
+	s.keys[k.ID] = k
+	return k, true, s.writeLocked()
+}
+
+// CreateKeyForIP 总是新建一个 Key（不做 IP 幂等）。
+//
+// 用于 ClaimRule.OneKeyPerIP == false 的场景：同一 IP 可以领取多个 Key。
+// 每次调用都会产生新的 Key 与新的额度，额度日重置逻辑与 CreateOrGetForIP 一致。
+func (s *Store) CreateKeyForIP(ip, model string, ttlDays, quota int, now time.Time) (*Key, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	k := s.newKeyLocked(normalizeIP(ip), model, ttlDays, quota, now)
+	s.keys[k.ID] = k
+	return k, s.writeLocked()
+}
+
+// newKeyLocked 构造一个新 Key（调用方必须持有 s.mu）。
+func (s *Store) newKeyLocked(ip, model string, ttlDays, quota int, now time.Time) *Key {
+	return &Key{
 		ID:        GenerateKey(),
 		Key:       GenerateKey(),
 		Model:     model,
@@ -148,8 +168,6 @@ func (s *Store) CreateOrGetForIP(ip, model string, ttlDays, quota int, now time.
 		IP:        ip,
 		QuotaDate: dailyResetDate(now),
 	}
-	s.keys[k.ID] = k
-	return k, true, s.writeLocked()
 }
 
 // rollQuotaLocked 跨额度日时把用量归零、额度恢复默认。

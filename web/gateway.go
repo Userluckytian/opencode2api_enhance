@@ -165,7 +165,7 @@ func (a *App) HandleV1(w http.ResponseWriter, r *http.Request) {
 				}
 				w.Header().Set("Retry-After", strconv.Itoa(secs))
 			}
-			a.logBlocked(ip, k.ID, k.Model, reason, http.StatusTooManyRequests)
+			a.logBlocked(ip, k.ID, model, reason, http.StatusTooManyRequests)
 			writeErr(w, http.StatusTooManyRequests, reason)
 			return
 		}
@@ -212,10 +212,13 @@ func (a *App) HandleV1(w http.ResponseWriter, r *http.Request) {
 		a.IPs.Record(ip, prompt+completion, time.Since(start), time.Now())
 	}
 	_ = a.Logger.Write(LogEntry{
-		Time:             time.Now().Format(time.RFC3339),
-		IP:               ip,
-		KeyID:            k.ID,
-		Model:            k.Model,
+		Time:  time.Now().Format(time.RFC3339),
+		IP:    ip,
+		KeyID: k.ID,
+		// 记录客户端请求的原始 model（含上游前缀）。
+		// 不能用 k.Model：2026-10-28 起 Key 不再绑定单模型，该字段恒为空，
+		// 曾导致日志里所有调用的 model 都是空串，无法按模型排查。
+		Model:            model,
 		PromptTokens:     prompt,
 		CompletionTokens: completion,
 		Total:            prompt + completion,

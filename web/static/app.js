@@ -12,9 +12,9 @@ async function loadModels() {
       btn.disabled = true;
       return;
     }
-    box.innerHTML = '<div style="font-size:13px;color:#6b7280;margin-bottom:6px">可用模型（' +
-      data.models.length + ' 个）</div><div class="rules">' +
-      data.models.map(m => '<code style="display:inline-block;margin:2px 6px 2px 0">' + esc(m) + '</code>').join('') +
+    box.innerHTML = '<div class="model-head">可用模型 ' + data.models.length + ' 个</div>' +
+      '<div class="model-tags">' +
+      data.models.map(m => '<span class="model-tag">' + esc(m) + '</span>').join('') +
       '</div>';
   } catch (e) {
     const err = document.getElementById('error');

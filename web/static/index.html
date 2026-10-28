@@ -75,6 +75,24 @@ body.claim .rules-box {
   margin-top:16px; padding:13px 15px; border-radius:12px;
   background:#f0fdfa; border:1px solid #a7f3d0;
 }
+/* 可用模型：紧凑标签云。不用外框/绿色，避免与下方「领取规则」绿框视觉重复；
+   模型名做成白底细边框胶囊，自动换行，长名字可换行不断词。 */
+body.claim .model-box {
+  margin:0 0 14px; padding:0;
+}
+body.claim .model-box .model-head {
+  font-size:12px; color:#94a3b8; margin-bottom:7px; letter-spacing:.02em;
+}
+body.claim .model-box .model-tags {
+  display:flex; flex-wrap:wrap; gap:6px;
+}
+body.claim .model-box .model-tag {
+  display:inline-block; padding:3px 9px; border-radius:7px;
+  background:#fff; border:1px solid #e2e8f0;
+  color:#475569; font-size:11.5px; line-height:1.5;
+  font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+  word-break:break-all;
+}
 body.claim .rules-box .rules { margin:0; padding-left:18px; }
 body.claim .rules-box .rules li { font-size:12.5px; color:#134e4a; line-height:1.8; }
 body.claim .rules-box .rules li b { color:#0f766e; }
@@ -143,7 +161,7 @@ body.claim footer {
   <span class="eyebrow">自助领取</span>
   <h1>领取 API Key</h1>
   <p class="hint">点击获取，即可拿到你的访问地址和 Key；<b>一个 Key 可用全部已开放的模型</b>。</p>
-  <div id="modelList" class="rules-box"><div class="muted" style="font-size:12px">可用模型加载中…</div></div>
+  <div id="modelList" class="model-box"><div class="muted" style="font-size:12px">可用模型加载中…</div></div>
   <button id="getKeyBtn" class="primary">获取 Key</button>
   <div id="rules" class="rules-box"><div class="muted" style="font-size:12px">规则加载中…</div></div>
   <div id="result" class="result hidden">
