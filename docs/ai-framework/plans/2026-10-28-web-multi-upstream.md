@@ -1,6 +1,6 @@
 # 阶段 Z：web 自助服务多上游（上游 ID 作为 model 前缀路由）
 
-> **状态：** 计划已就绪
+> **状态：** 已完成（2026-10-28）
 > **For agentic workers:** 按 Task 顺序执行；每 Task 测完再进下一 Task。
 > **交接提示词**见文末「给接手 AI 的完整提示词」。
 > **元规范:** `docs/ai-framework/phased-plan-driven.md`
@@ -66,6 +66,7 @@
 | 跳过项 | 原因 | 待补做 |
 |--------|------|--------|
 | 真实上游多实例端到端（需两台可达上游） | 本机只有单个上游可测 | ⬜ 待用户确认补做 |
+| 阶段级代码审查（验收表 #8） | 本阶段未启用独立审查角色 | ⬜ 待用户确认补做 |
 
 ---
 
@@ -357,18 +358,21 @@
 
 ## 验收标准总表
 
-| # | 标准 | 通过条件 | 验证责任人 |
-|---|------|----------|----------|
-| 1 | 旧配置零改动可用 | 只有 `upstream_base_url` 的 config.json 启动后自动迁移，`/v1` 请求正常 | 自动化 |
-| 2 | 前缀路由正确 | `backup/gpt-4o` → backup 上游且上游收到 `gpt-4o` | 自动化 |
-| 3 | 存量模型名不受影响 | `or/minimax/minimax-m3.1-flash:free` 原样走默认上游 | 自动化 |
-| 4 | 禁用上游不参与路由 | 禁用 `backup` 后 `backup/x` 走默认上游且不剥前缀 | 自动化 |
-| 5 | SSRF 不可绕过 | 新增指向 `169.254.169.254` 的上游 → 400 且不落盘 | 自动化 |
-| 6 | 密钥不回明文 | `GET /api/admin/upstreams` 无明文 key | 自动化 |
-| 7 | 构建与测试 | `go build ./...`、`go vet ./web/`、`go test ./web/ -race` 全绿 | 自动化 |
-| 8 | 代码审查 | 审查结论 ✅ 或 ⚠️（问题已登记） | 独立角色 |
-| 9 | 红线 | 无禁止项；密钥未入库 | 自动化 |
-| 10 | 前端可用 | 上游增删改查与模型分组展示正常 | 端到端（需人工过目） |
+> **执行结果（2026-10-28，分支 `feature/web-self-service`）：** 1–7、9、10 全部通过；
+> 8（代码审查）见下方「代码审查」节，标记为未执行（本阶段未启用独立审查角色）。
+
+| # | 标准 | 通过条件 | 验证责任人 | 结果 |
+|---|------|----------|----------|------|
+| 1 | 旧配置零改动可用 | 只有 `upstream_base_url` 的 config.json 启动后自动迁移，`/v1` 请求正常 | 自动化 | ✅ `TestEffectiveUpstreamsMigratesLegacy`、`TestAdminCreateMaterializesLegacy`；e2e 实测旧配置自动生成 `default` 条目 |
+| 2 | 前缀路由正确 | `backup/gpt-4o` → backup 上游且上游收到 `gpt-4o` | 自动化 | ✅ `TestGatewayRoutesByPrefix`（断言上游收到 `model:"gpt-4o"` 且 auth 为 backup 的 key） |
+| 3 | 存量模型名不受影响 | `or/minimax/minimax-m3.1-flash:free` 原样走默认上游 | 自动化 | ✅ `TestGatewayKeepsSlashyModelOnDefault`、`TestResolveUpstreamPrefix/真实模型名含斜杠不误剥` |
+| 4 | 禁用上游不参与路由 | 禁用 `backup` 后 `backup/x` 走默认上游且不剥前缀 | 自动化 | ✅ `TestGatewayDisabledUpstreamFallsBack` |
+| 5 | SSRF 不可绕过 | 新增指向 `169.254.169.254` 的上游 → 400 且不落盘 | 自动化 | ✅ `TestPutSettingsRejectsSSRF`（含内网域名 DNS 解析分支） |
+| 6 | 密钥不回明文 | `GET /api/admin/upstreams` 无明文 key | 自动化 | ✅ `TestSettingsDoesNotLeakUpstreamKey`、`TestAdminCreateUpstream`；e2e 实测返回 `****9999` |
+| 7 | 构建与测试 | `go build ./...`、`go vet ./web/`、`go test ./web/ -race` 全绿 | 自动化 | ✅ BUILD_EXIT=0、VET_EXIT=0、`ok ... 3.528s`（race 通过） |
+| 8 | 代码审查 | 审查结论 ✅ 或 ⚠️（问题已登记） | 独立角色 | ⬜ 未执行（见「跳过项」） |
+| 9 | 红线 | 无禁止项；密钥未入库 | 自动化 | ✅ `git ls-files web/` 无 config.json/keys.json/secret |
+| 10 | 前端可用 | 上游增删改查与模型分组展示正常 | 端到端（需人工过目） | ✅ e2e 实测：新增返回 `{"id":"backup","ok":true}`；模型分组返回 `prefix:""` 与 `prefix:"backup/"` 各自独立 warning；删除默认上游 400；停用默认上游后 `default_upstream_id` 自动改指 backup；停用/删除最后一个启用上游均 400 |
 
 ---
 
