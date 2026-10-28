@@ -304,13 +304,23 @@ func (v *Vendor) call(ctx context.Context, msg *contract.Message, streaming bool
 	var lastHeader http.Header
 	var lastProxyAddr string
 	var lastErr error
+	var lastRetryAfterMS int64
 	var retryCount, retry401Count, retry429Count int
+	// rotatedSession 保证一次调用里最多换一次会话（换会话只对长会话累积用尽有效）。
+	rotatedSession := false
 	var decision contract.Decision
 	// strippedParams 记录因上游明确报“不支持该参数”而剥离的字段，避免同一参数反复重试。
 	strippedParams := map[string]bool{}
 	attemptsLog := &attemptLog{}
 
 	for retryCount <= maxRetries {
+		// 免费层最小请求间隔：上游对连续请求有 burst 限流，重试同样算一次请求。
+		// 探针请求不等待（扫描需要快速拿到真实状态码），ctx 取消立即返回。
+		if a.mode == authPublic {
+			if err := v.waitRateLimitInterval(ctx, probe); err != nil {
+				return nil, err
+			}
+		}
 		var up *http.Request
 		var err error
 		if useResponses {
@@ -458,6 +468,14 @@ func (v *Vendor) call(ctx context.Context, msg *contract.Message, streaming bool
 		// 本候选（单发 / 竞速全败返回的首个失败）由 call 统一上报与记录；
 		// 竞速其余落选候选已在 raceDo 内部逐个上报（G6），不在这里重复。
 		class, code, _ := contract.ClassifyUpstreamError(resp.StatusCode, errBody)
+		// 免费层 429：先换会话再重试一次。上游按会话记账，长期复用的会话累积用尽后
+		// 换新会话可能直接恢复（社区实测）；它救不了门禁/指纹类拒绝，故每次调用只试一次。
+		rotateSessionNow := resp.StatusCode == http.StatusTooManyRequests &&
+			a.mode == authPublic && !rotatedSession && retryCount < maxRetries
+		if rotateSessionNow {
+			rotatedSession = true
+			v.rotateSession()
+		}
 		// 400 unsupported_parameter：部分免费模型不支持 thinking/reasoning_effort。
 		// 客户端显式带了这些字段时，上游会直接 400；这里按 param 剥离后重试一次，
 		// 而不是把「模型不支持」变成整次请求失败（线上 beam-free 16 次）。
@@ -476,9 +494,13 @@ func (v *Vendor) call(ctx context.Context, msg *contract.Message, streaming bool
 				}
 			}
 		}
+		attemptReason := "upstream_error"
+		if rotateSessionNow {
+			attemptReason = "session_rotated"
+		}
 		attemptsLog.add(contract.Attempt{
 			Node: proxyAddr, Status: resp.StatusCode, ErrorClass: class, ErrorCode: code,
-			DurationMS: elapsedMS, RetryAfterMS: retryAfter, Reason: "upstream_error",
+			DurationMS: elapsedMS, RetryAfterMS: retryAfter, Reason: attemptReason,
 		})
 		// 429/400 是预期内的客户端/限流错误，按 WARN 记录，避免把日志刷成 ERROR 海；
 		// 5xx/401/403 仍按 ERROR 保留，便于快速定位真实服务或鉴权故障。
@@ -492,6 +514,9 @@ func (v *Vendor) call(ctx context.Context, msg *contract.Message, streaming bool
 		lastHeader = resp.Header
 		lastProxyAddr = proxyAddr
 		lastErr = fmt.Errorf("upstream error")
+		if resp.StatusCode == http.StatusTooManyRequests {
+			lastRetryAfterMS = retryAfter
+		}
 		if v.isRetryable(resp.StatusCode) {
 			if client != nil {
 				client.CloseIdleConnections()
@@ -526,14 +551,15 @@ func (v *Vendor) call(ctx context.Context, msg *contract.Message, streaming bool
 		}
 		if streaming {
 			// 非可重试状态：把错误体包装成流返回（上游错误透传，不重试）。
-			return &callResult{stream: io.NopCloser(bytes.NewReader(lastBody)), status: lastStatus, nodeAddr: lastProxyAddr, decision: decision, attempts: attemptsLog.snapshot()}, nil
+			return &callResult{stream: io.NopCloser(bytes.NewReader(lastBody)), status: lastStatus, headers: lastHeader, nodeAddr: lastProxyAddr, decision: decision, attempts: attemptsLog.snapshot()}, nil
 		}
 		break
 	}
-	// S2 可见报错：429 最终失败用中文文案替换上游原始错误体，status 保持 429 透传
-	// （客户端按状态码识别限流，正文明确"免费额度已用尽"）。
+	// S2 可见报错：429 最终失败保留上游原始错误体（error.type/code 与 Retry-After），
+	// 只补中文可见文案。上游用同一个 429 表示「门禁拒绝 / 会话额度 / 共享日额度」三种
+	// 情况，整包替换会丢掉唯一能区分它们的信息。
 	if lastStatus == http.StatusTooManyRequests {
-		lastBody = rateLimitErrorBody()
+		lastBody = rateLimitErrorBody(lastBody, lastRetryAfterMS)
 	}
 	// 传输层全败且没有合成状态（非池空、非取消）：合成 502，避免把「状态 0 +
 	// all models failed」这种不可诊断的错误面透给客户端。真实节点与尝试链已保留。
@@ -546,7 +572,7 @@ func (v *Vendor) call(ctx context.Context, msg *contract.Message, streaming bool
 		if errors.Is(lastErr, context.Canceled) {
 			return nil, lastErr
 		}
-		return &callResult{stream: io.NopCloser(bytes.NewReader(lastBody)), status: lastStatus, nodeAddr: lastProxyAddr, decision: decision, attempts: attemptsLog.snapshot()}, nil
+		return &callResult{stream: io.NopCloser(bytes.NewReader(lastBody)), status: lastStatus, headers: lastHeader, nodeAddr: lastProxyAddr, decision: decision, attempts: attemptsLog.snapshot()}, nil
 	}
 	return &callResult{body: lastBody, status: lastStatus, headers: lastHeader, nodeAddr: lastProxyAddr, decision: decision, attempts: attemptsLog.snapshot()}, lastErr
 }
@@ -664,19 +690,81 @@ func (v *Vendor) raceBudget() time.Duration {
 
 // ---------------------------------------------------------------- 429 感知（S2）
 
-// rateLimitExceededMsg 429 最终失败的可见文案（S2）：替换上游原始错误体，status 保持 429。
+// rateLimitExceededMsg 429 最终失败的可见文案（S2）：保留中文说明，同时保留上游原始
+// error.type/code 与 Retry-After，便于区分「门禁拒绝 / 会话额度 / 共享日额度」。
 const rateLimitExceededMsg = "免费额度已用尽（Rate limit exceeded），请稍后重试"
 
-// rateLimitErrorBody 返回 429 最终失败的内层错误体（OpenAI 兼容形态，客户端按状态码识别限流）。
-func rateLimitErrorBody() []byte {
-	b, _ := json.Marshal(map[string]any{
-		"error": map[string]any{
-			"message": rateLimitExceededMsg,
-			"type":    "rate_limit_error",
-			"code":    "rate_limit_exceeded",
-		},
-	})
+// rateLimitErrorBody 构造 429 最终失败的错误体：中文可见文案 + 上游原始错误对象。
+// upstream 非空时原样嵌入（JSON 放 error.upstream，非 JSON 放 error.upstream_raw），
+// retryAfterMS > 0 时写入 retry_after_ms。不再整包替换——上游三种 429 的唯一区别
+// 就在原始 code 与 Retry-After 里，丢掉它们会让事后排查无法定位。
+func rateLimitErrorBody(upstream []byte, retryAfterMS int64) []byte {
+	errObj := map[string]any{
+		"message": rateLimitExceededMsg,
+		"type":    "rate_limit_error",
+		"code":    "rate_limit_exceeded",
+	}
+	if len(upstream) > 0 {
+		var root map[string]any
+		if json.Unmarshal(upstream, &root) == nil && len(root) > 0 {
+			if up, ok := root["error"].(map[string]any); ok && len(up) > 0 {
+				errObj["upstream"] = up
+			} else {
+				errObj["upstream"] = root
+			}
+		} else {
+			raw := string(upstream)
+			if len(raw) > 800 {
+				raw = raw[:800] + "…"
+			}
+			errObj["upstream_raw"] = raw
+		}
+	}
+	if retryAfterMS > 0 {
+		errObj["retry_after_ms"] = retryAfterMS
+	}
+	errObj["hint"] = "上游 429 可能表示客户端门禁、会话额度或共享日额度；用官方 CLI 对照（opencode run -m <model> \"reply with exactly: PONG\"）可判断是否为服务端共享窗口。"
+	b, _ := json.Marshal(map[string]any{"error": errObj})
 	return b
+}
+
+// defaultRateLimitMinIntervalMS 免费层默认最小请求间隔（毫秒）。
+// 依据社区实测：连续请求会触发 burst 限流，约 1.5s 间隔可避开。
+const defaultRateLimitMinIntervalMS = 1500
+
+// waitRateLimitInterval 在免费层相邻两次上游请求之间保持最小间隔。
+// 只作用于免费层且非探针请求；并发请求按到达顺序排队占位（先到先发），
+// ctx 取消立即返回，不硬等。
+func (v *Vendor) waitRateLimitInterval(ctx context.Context, probe bool) error {
+	if probe {
+		return nil
+	}
+	intervalMS := v.cfg.RateLimitMinIntervalMS
+	if intervalMS == 0 {
+		intervalMS = defaultRateLimitMinIntervalMS
+	}
+	if intervalMS < 0 {
+		return nil
+	}
+	interval := time.Duration(intervalMS) * time.Millisecond
+	v.rlMu.Lock()
+	now := time.Now()
+	start := now
+	if v.rlNext.After(start) {
+		start = v.rlNext
+	}
+	v.rlNext = start.Add(interval)
+	wait := start.Sub(now)
+	v.rlMu.Unlock()
+	if wait <= 0 {
+		return nil
+	}
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-time.After(wait):
+		return nil
+	}
 }
 
 // inRateLimitCooldown 距最近一次 429 是否仍在冷却期（rate_limit_cooldown_sec，默认 30s）。
@@ -984,7 +1072,7 @@ func (v *Vendor) ChatStream(ctx context.Context, msg *contract.Message) (*contra
 		return nil, err
 	}
 	emitInstrument(ctx, res)
-	return &contract.Stream{ReadCloser: res.stream, Status: res.status, NodeAddr: res.nodeAddr, Attempts: res.attempts, Decision: &res.decision}, nil
+	return &contract.Stream{ReadCloser: res.stream, Status: res.status, Headers: res.headers, NodeAddr: res.nodeAddr, Attempts: res.attempts, Decision: &res.decision}, nil
 }
 
 // emitInstrument 把本次决策与尝试链回写到 ctx 上的 sink（若有），供 main 侧 recordCall 读取。

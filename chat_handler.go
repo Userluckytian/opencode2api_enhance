@@ -139,6 +139,7 @@ func chatCompletionsHandler(w http.ResponseWriter, r *http.Request) {
 				recordModelFeedback(req.Model, proxyAddr, false, callRec.DurationMS)
 			}
 			recordCall(callRec)
+			copyUpstreamErrorHeaders(w, hdr)
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(httpStatusOr(status))
 			if len(errBody) > 0 {
@@ -199,6 +200,7 @@ func chatCompletionsHandler(w http.ResponseWriter, r *http.Request) {
 			recordModelFeedback(req.Model, proxyAddr, false, callRec.DurationMS)
 		}
 		recordCall(callRec)
+		copyUpstreamErrorHeaders(w, hdr)
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(httpStatusOr(status))
 		if len(respBody) > 0 {
@@ -245,6 +247,20 @@ func chatCompletionsHandler(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	w.Write(outBody)
+}
+
+// copyUpstreamErrorHeaders 把上游错误响应里的限流/配额头透传给客户端。
+// Retry-After 让客户端按上游节奏退避；X-RateLimit-* 便于判断是真额度还是门禁拒绝。
+// 上游免费层三种 429 共用同一个状态码，头信息是少数能保留的区分线索。
+func copyUpstreamErrorHeaders(w http.ResponseWriter, hdr http.Header) {
+	if hdr == nil {
+		return
+	}
+	for k := range hdr {
+		if strings.EqualFold(k, "Retry-After") || safeResponseHeaders[k] {
+			w.Header().Set(k, hdr.Get(k))
+		}
+	}
 }
 
 // ======================== Models Handler ========================

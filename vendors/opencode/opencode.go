@@ -119,6 +119,10 @@ type Config struct {
 	// 429 重试前 sleep min(base*2^n, cap)（0 = 默认 1000 / 30000）。
 	RateLimitBackoffBaseMS int
 	RateLimitBackoffCapMS  int
+	// RateLimitMinIntervalMS 免费层相邻两次上游请求的最小间隔（毫秒，防突发限流）：
+	// 上游对连续请求有 burst 限制，社区实测约 1.5s 间隔可避开。
+	// 0 = 默认 1500；<0 = 关闭。仅免费层（public）且非探针请求生效。
+	RateLimitMinIntervalMS int
 	// ClientVersion 覆盖免费通道上报给上游的客户端版本（User-Agent: opencode/<值>）。
 	// 空 = 默认行为：启动时探测 npm 最新版本，探测失败回落 versionDef。
 	// 用户可配（providers[].params.client_version）：上游抬高免费通道下限时，
@@ -139,7 +143,12 @@ type Vendor struct {
 	// last429 最近一次 429 的 UnixNano 时间戳（S2）：冷却期内跳过竞速。0 = 从未 429。
 	last429 atomic.Int64
 
+	// rlMu / rlNext 免费层请求最小间隔（burst 限流）：rlNext 是下一次允许发出的时刻。
+	rlMu   sync.Mutex
+	rlNext time.Time
+
 	// 会话状态（原全局 ocSession* 收敛为实例字段）
+	sessionMu   sync.RWMutex
 	ocSessionID string
 	ocProjectID string
 	ocClientVer string
@@ -185,21 +194,47 @@ func (v *Vendor) transport() contract.Transport { return v.tr }
 
 // sessionID 保证会话已初始化并返回当前 session id。
 func (v *Vendor) sessionID() string {
+	v.sessionMu.RLock()
+	id := v.ocSessionID
+	v.sessionMu.RUnlock()
+	if id != "" {
+		return id
+	}
 	v.ocOnce.Do(func() {
-		v.ocClientVer = v.fetchOCVersion()
-		v.ocSessionID = "ses_" + sessionIDString()
-		v.ocProjectID = randomHex(40)
-		slog.Info("opencode session initialized", "version", v.ocClientVer, "session_id", v.ocSessionID)
+		ver := v.fetchOCVersion()
+		sid := "ses_" + sessionIDString()
+		pid := randomHex(40)
+		v.sessionMu.Lock()
+		v.ocClientVer, v.ocSessionID, v.ocProjectID = ver, sid, pid
+		v.sessionMu.Unlock()
+		slog.Info("opencode session initialized", "version", ver, "session_id", sid)
 	})
-	return v.ocSessionID
+	v.sessionMu.RLock()
+	id = v.ocSessionID
+	v.sessionMu.RUnlock()
+	return id
+}
+
+// rotateSession 只重铸会话身份，不重新探测客户端版本。
+// 429 重试路径不能额外打一次版本探测请求（那会再消耗一次上游额度）。
+func (v *Vendor) rotateSession() string {
+	sid := "ses_" + sessionIDString()
+	v.sessionMu.Lock()
+	v.ocSessionID = sid
+	v.sessionMu.Unlock()
+	slog.Info("opencode session rotated after 429", "session_id", sid)
+	return sid
 }
 
 // refreshOCSession 强制刷新会话（供管理端/401 恢复调用）。
 func (v *Vendor) refreshOCSession() {
-	v.ocClientVer = v.fetchOCVersion()
-	v.ocSessionID = "ses_" + sessionIDString()
-	v.ocProjectID = randomHex(40)
-	slog.Info("opencode session refreshed", "version", v.ocClientVer, "session_id", v.ocSessionID)
+	ver := v.fetchOCVersion()
+	sid := "ses_" + sessionIDString()
+	pid := randomHex(40)
+	v.sessionMu.Lock()
+	v.ocClientVer, v.ocSessionID, v.ocProjectID = ver, sid, pid
+	v.sessionMu.Unlock()
+	slog.Info("opencode session refreshed", "version", ver, "session_id", sid)
 	v.ocOnce = sync.Once{}
 }
 
@@ -217,7 +252,9 @@ func (v *Vendor) SessionID() string {
 // 上游只接受这一形态（旧版 "opencode/1.19.0" 或缺少 channel/client 段的串均 403）；
 // 探测值达不到 v2 线时回落 versionDef。
 func (v *Vendor) freeTierUserAgent() string {
+	v.sessionMu.RLock()
 	ver := v.ocClientVer
+	v.sessionMu.RUnlock()
 	if ver == "" || !versionAtLeast(ver, minV2Version) {
 		ver = versionDef
 	}
@@ -437,9 +474,11 @@ func (v *Vendor) Auth(r *http.Request) string {
 
 // SetSession 预置会话并消费 once（跳过版本探测）。core 装配/测试时使用。
 func (v *Vendor) SetSession(ver, sid, pid string) {
+	v.sessionMu.Lock()
 	v.ocClientVer = ver
 	v.ocSessionID = sid
 	v.ocProjectID = pid
+	v.sessionMu.Unlock()
 	v.ocOnce.Do(func() {})
 }
 

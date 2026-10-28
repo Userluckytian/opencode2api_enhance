@@ -76,6 +76,12 @@ type AppConfig struct {
 	RateLimitCooldownSec   int `json:"rate_limit_cooldown_sec,omitempty"`
 	RateLimitBackoffBaseMS int `json:"rate_limit_backoff_base_ms,omitempty"`
 	RateLimitBackoffCapMS  int `json:"rate_limit_backoff_cap_ms,omitempty"`
+	// RateLimitMinIntervalMS 免费层相邻两次上游请求的最小间隔（毫秒，默认 1500，<0 关闭）：
+	// 上游对连续请求有 burst 限流，间隔开可减少无谓 429。
+	RateLimitMinIntervalMS int `json:"rate_limit_min_interval_ms,omitempty"`
+	// FingerprintBadCooldownSec 免费层 429 连续拒绝后按出口长冷却的秒数（默认 300，30~900）：
+	// 到期放行 1 个探针，仍拒绝则翻倍，避免短冷却反复空烧请求。
+	FingerprintBadCooldownSec int `json:"fingerprint_bad_cooldown_sec,omitempty"`
 	// ShowNodePrefix 是否在对话流首段展示「🤖 节点 · 模型」前缀（默认关闭）
 	ShowNodePrefix *bool `json:"show_node_prefix,omitempty"`
 

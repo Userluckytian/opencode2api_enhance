@@ -110,12 +110,15 @@ var (
 	rateLimitCooldownSec   atomic.Int64
 	rateLimitBackoffBaseMS atomic.Int64
 	rateLimitBackoffCapMS  atomic.Int64
+	// rateLimitMinIntervalMS 免费层请求最小间隔（毫秒；默认 1500，<0 关闭）。
+	rateLimitMinIntervalMS atomic.Int64
 )
 
 func init() {
 	rateLimitCooldownSec.Store(30)
 	rateLimitBackoffBaseMS.Store(1000)
 	rateLimitBackoffCapMS.Store(30000)
+	rateLimitMinIntervalMS.Store(1500)
 }
 
 func applyConfig(cfg AppConfig) {
@@ -220,6 +223,21 @@ func applyConfig(cfg AppConfig) {
 	}
 	if cfg.RateLimitBackoffCapMS > 0 {
 		rateLimitBackoffCapMS.Store(int64(cfg.RateLimitBackoffCapMS))
+	}
+	// 免费层最小请求间隔：0 = 保持默认 1500ms，<0 = 显式关闭。
+	if cfg.RateLimitMinIntervalMS != 0 {
+		rateLimitMinIntervalMS.Store(int64(cfg.RateLimitMinIntervalMS))
+	}
+	// 免费层 429 连续拒绝后的出口长冷却（钳制在 30~900s）。
+	if cfg.FingerprintBadCooldownSec > 0 {
+		v := cfg.FingerprintBadCooldownSec
+		if v < 30 {
+			v = 30
+		}
+		if v > fingerprintBadCooldownMaxSec {
+			v = fingerprintBadCooldownMaxSec
+		}
+		fingerprintBadCooldownSec.Store(int64(v))
 	}
 
 	socks5Mu.Lock()

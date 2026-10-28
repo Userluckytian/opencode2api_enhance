@@ -94,6 +94,7 @@ type Reply struct {
 type Stream struct {
 	io.ReadCloser
 	Status   int
+	Headers  http.Header // 上游响应头（错误路径用于透传 Retry-After；成功路径可为空）
 	NodeAddr string
 	Attempts []Attempt // 本次请求的结构化尝试链（可为空）
 	Decision *Decision // 选路决策快照（可为空）

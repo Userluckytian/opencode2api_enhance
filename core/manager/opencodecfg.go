@@ -186,6 +186,12 @@ func (m *Manager) buildRouterCfg(singboxPorts []uint16, portNames map[uint16]str
 	applyIf("rate_limit_cooldown_sec", int64(appCfg.RateLimitCooldownSec))
 	applyIf("rate_limit_backoff_base_ms", int64(appCfg.RateLimitBackoffBaseMS))
 	applyIf("rate_limit_backoff_cap_ms", int64(appCfg.RateLimitBackoffCapMS))
+	// 免费层最小请求间隔：负值是「显式关闭」，不能用 applyIf（它只写 >0）。
+	if appCfg.RateLimitMinIntervalMS != 0 {
+		cfg["rate_limit_min_interval_ms"] = appCfg.RateLimitMinIntervalMS
+	}
+	// 免费层 429 连续拒绝后的出口长冷却秒数（>0 才写，默认 300）。
+	applyIf("fingerprint_bad_cooldown_sec", int64(appCfg.FingerprintBadCooldownSec))
 	// 透传厂商注册表 + 路由：网关子进程与核心一致，能注册多厂商（如 custom）
 	cfg = injectVendorConfig(cfg, appCfg)
 	// auto 虚拟模型配置透传：网关子进程在「实例×模型」矩阵上做加权选择。

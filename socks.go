@@ -255,11 +255,26 @@ const rateLimitBadThreshold = 5
 // 尊重上游退避指示，但异常大的头不至于把节点锁死过久（比坏池 reset 上限同量级）。
 const rateLimitRetryAfterCapSec = 600 * time.Second
 
+// fingerprintBadCooldownSec 免费层 429（FreeUsageLimitError）连续拒绝后按出口长冷却的秒数
+// （默认 300，允许 30~900）。上游用同一个 429 表示门禁/会话/共享额度，连续拒绝说明该出口
+// 已被上游记住；只做 15s 短冷却会持续空烧请求。长冷却到期放行 1 个探针，仍拒绝则翻倍。
+var fingerprintBadCooldownSec atomic.Int64
+
+const (
+	// fingerprintBadThreshold 同一出口在窗口内连续多少次免费层 429 后进入长冷却。
+	fingerprintBadThreshold = 3
+	// fingerprintBadWindow 连续拒绝的统计窗口；超过窗口未再拒绝则重新计数。
+	fingerprintBadWindow = 10 * time.Minute
+	// fingerprintBadCooldownMaxSec 长冷却翻倍上限。
+	fingerprintBadCooldownMaxSec = 900
+)
+
 func init() {
 	routeMode.Store("smart")
 	badPoolResetSec.Store(300)
 	quotaBadPoolResetSec.Store(60)
 	rateLimitNodeCooldownSec.Store(15)
+	fingerprintBadCooldownSec.Store(300)
 }
 
 // badPoolProbeLease 探针配额租约：探针放行后若在该时长内没有结果回写
@@ -293,6 +308,10 @@ type socks5HealthState struct {
 	badSince time.Time
 	// badExtendCount 进入坏池后已续期次数；达到 badPoolMaxExtensions 后冻结 badUntil。
 	badExtendCount int
+	// fpCount / fpSince 免费层 429（FreeUsageLimitError）连续拒绝计数与窗口起点：
+	// 达到 fingerprintBadThreshold 后升级为出口长冷却（badClass=quota）。
+	fpCount int
+	fpSince time.Time
 }
 
 // badPoolClass 坏池分类：
@@ -579,16 +598,26 @@ func markSocks5Result(addr string, status int, requestErr error) {
 	markSocks5ResultWithRetry(addr, status, requestErr, 0)
 }
 
-// markFingerprintResult 记录「上游免费层客户端指纹拒绝」（429 FreeUsageLimitError）。
-// 这不是节点故障：不增加 badCount、不设置 badReason/badClass，只做短冷却。
-// 否则单节点池会被一个与节点无关的客户端指纹问题永久隔离，后续请求全部 503。
+// markFingerprintResult 记录「上游免费层 429」（429 FreeUsageLimitError）。
+// 单次拒绝不是节点故障：只做短冷却，不增加 badCount/不设置 badReason——否则单节点池
+// 会被一个与节点无关的客户端指纹问题永久隔离。
+// 但同一出口在窗口内连续拒绝（fingerprintBadThreshold）说明它已被上游记住：
+// 此时升级为出口长冷却（badClass=quota，到期放行 1 个探针，仍拒绝则翻倍，上限 900s），
+// 避免每 15s 反复空烧请求。成功请求会清空状态，计数随之归零。
 func markFingerprintResult(addr string, retryAfterMS int64) {
 	if addr == "" {
 		return
 	}
 	socks5HealthMu.Lock()
 	state := socks5Health[addr]
+	now := time.Now()
 	state.failures++
+	if state.fpSince.IsZero() || now.Sub(state.fpSince) > fingerprintBadWindow {
+		state.fpSince = now
+		state.fpCount = 0
+	}
+	state.fpCount++
+
 	cooldown := 15 * time.Second
 	if s := rateLimitNodeCooldownSec.Load(); s > 0 {
 		cooldown = time.Duration(s) * time.Second
@@ -602,7 +631,45 @@ func markFingerprintResult(addr string, retryAfterMS int64) {
 			cooldown = ra
 		}
 	}
-	state.until = time.Now().Add(cooldown)
+
+	if state.fpCount >= fingerprintBadThreshold {
+		// 冷却到期放行的探针仍被拒绝：翻倍退避，避免探针本身变成新的空烧。
+		if state.badProbeUsed {
+			state.badProbeUsed = false
+			if state.badExtendCount < 3 {
+				state.badExtendCount++
+			}
+		}
+		base := fingerprintBadCooldownSec.Load()
+		if base <= 0 {
+			base = 300
+		}
+		d := time.Duration(base) * time.Second
+		for i := 0; i < state.badExtendCount && d < fingerprintBadCooldownMaxSec*time.Second; i++ {
+			d *= 2
+		}
+		if d > fingerprintBadCooldownMaxSec*time.Second {
+			d = fingerprintBadCooldownMaxSec * time.Second
+		}
+		state.badReason = "429：免费层拒绝（门禁/会话/额度）"
+		state.badClass = "quota"
+		if state.badSince.IsZero() {
+			state.badSince = now
+		}
+		state.badCount = rateLimitBadThreshold
+		state.badUntil = now.Add(d)
+		state.badProbeUsed = false
+		state.badProbeAt = time.Time{}
+		state.until = state.badUntil
+		socks5Health[addr] = state
+		socks5HealthMu.Unlock()
+		slog.Warn("free-tier 429 escalated to egress cooldown",
+			"addr", addr, "consecutive", state.fpCount, "cooldown", d.String(),
+			"retry_after_ms", retryAfterMS)
+		return
+	}
+
+	state.until = now.Add(cooldown)
 	// 指纹拒绝不是节点故障：归还恢复探针配额，让短冷却后能立即重试/恢复，
 	// 避免节点已过期仍卡在「探针已用」的假死状态。
 	state.badProbeUsed = false
@@ -610,7 +677,8 @@ func markFingerprintResult(addr string, retryAfterMS int64) {
 	socks5Health[addr] = state
 	socks5HealthMu.Unlock()
 	slog.Warn("upstream fingerprint rejected; node short cooldown only",
-		"addr", addr, "cooldown", cooldown.String(), "retry_after_ms", retryAfterMS)
+		"addr", addr, "cooldown", cooldown.String(), "retry_after_ms", retryAfterMS,
+		"consecutive", state.fpCount)
 }
 
 // markSocks5ResultWithRetry 与 markSocks5Result 同，但 429 时尊重上游 Retry-After：

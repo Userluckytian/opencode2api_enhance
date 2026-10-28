@@ -85,6 +85,10 @@ type Config struct {
 	RateLimitCooldownSec   int `json:"rate_limit_cooldown_sec,omitempty"`
 	RateLimitBackoffBaseMS int `json:"rate_limit_backoff_base_ms,omitempty"`
 	RateLimitBackoffCapMS  int `json:"rate_limit_backoff_cap_ms,omitempty"`
+	// RateLimitMinIntervalMS 免费层相邻两次上游请求的最小间隔（毫秒，默认 1500，<0 关闭）。
+	RateLimitMinIntervalMS int `json:"rate_limit_min_interval_ms,omitempty"`
+	// FingerprintBadCooldownSec 免费层 429 连续拒绝后按出口长冷却的秒数（默认 300，30~900）。
+	FingerprintBadCooldownSec int `json:"fingerprint_bad_cooldown_sec,omitempty"`
 
 	// 并发设置（D3）：扫描 / 批量启停与释放 / 一键测试 / 池链路探活 的 worker 上限（<=0 用默认）。
 	ScanConcurrency      int `json:"scan_concurrency,omitempty"`
@@ -416,6 +420,10 @@ func (m *Manager) ConfigGet(key string) (string, error) {
 		return strconv.Itoa(cfg.RateLimitBackoffBaseMS), nil
 	case "rate_limit_backoff_cap_ms":
 		return strconv.Itoa(cfg.RateLimitBackoffCapMS), nil
+	case "rate_limit_min_interval_ms":
+		return strconv.Itoa(cfg.RateLimitMinIntervalMS), nil
+	case "fingerprint_bad_cooldown_sec":
+		return strconv.Itoa(cfg.FingerprintBadCooldownSec), nil
 	case "scan_concurrency":
 		return strconv.Itoa(cfg.ScanConcurrency), nil
 	case "stop_scan_concurrency":
@@ -733,6 +741,25 @@ func (m *Manager) ConfigSet(key, value string) error {
 			return errors.New("rate_limit_backoff_cap_ms 需 >= 0")
 		}
 		cfg.RateLimitBackoffCapMS = int(v)
+	case "rate_limit_min_interval_ms":
+		v, err := parseInt()
+		if err != nil {
+			return err
+		}
+		// 负值 = 关闭最小间隔（显式允许）；正值上限 30s，避免误配成分钟级拖死请求。
+		if v > 30000 {
+			return errors.New("rate_limit_min_interval_ms 需在 -1~30000 之间")
+		}
+		cfg.RateLimitMinIntervalMS = int(v)
+	case "fingerprint_bad_cooldown_sec":
+		v, err := parseInt()
+		if err != nil {
+			return err
+		}
+		if v < 30 || v > 900 {
+			return errors.New("fingerprint_bad_cooldown_sec 需在 30~900 之间")
+		}
+		cfg.FingerprintBadCooldownSec = int(v)
 	case "scan_concurrency":
 		v, err := parseInt()
 		if err != nil {
@@ -929,37 +956,39 @@ type ConfigView struct {
 	CallLogMax             int64  `json:"call_log_max"`
 	ShowNodePrefix         bool   `json:"show_node_prefix"`
 	// OpencodeClientVersion 免费通道上报的客户端版本（空 = 自动探测）
-	OpencodeClientVersion   string  `json:"opencode_client_version"`
-	UiPollIntervalSec       int     `json:"ui_poll_interval_sec"`
-	UpstreamProxy           string  `json:"upstream_proxy"`
-	SubscribeURL            string  `json:"subscribe_url"`
-	SubscribeIntervalMin    int     `json:"subscribe_interval_min"`
-	HealthCheckIntervalSec  int     `json:"health_check_interval_sec"`
-	HealthRestartThreshold  int     `json:"health_restart_threshold"`
-	PoolProbeIntervalSec    int     `json:"pool_probe_interval_sec"`
-	PoolProbeTimeoutSec     int     `json:"pool_probe_timeout_sec"`
-	PoolQualityWindowMin    int     `json:"pool_quality_window_min"`
-	PoolProbeEnabled        bool    `json:"pool_probe_enabled"`
-	ProbeSoloEnabled        bool    `json:"probe_solo_enabled"`
-	PoolBreakerThreshold    int     `json:"pool_breaker_threshold"`
-	PoolHalfOpenIntervalSec int     `json:"pool_halfopen_interval_sec"`
-	BadPoolResetSec         int     `json:"bad_pool_reset_sec"`
-	QuotaBadPoolResetSec    int     `json:"quota_bad_pool_reset_sec"`
-	PoolPerformanceMode     bool    `json:"pool_performance_mode"`
-	PoolRaceCopies          int     `json:"pool_race_copies"`
-	RaceBudgetMS            int     `json:"race_budget_ms"`
-	PoolRacePressureLow     float64 `json:"pool_race_pressure_low"`
-	PoolRacePressureHigh    float64 `json:"pool_race_pressure_high"`
-	RateLimitCooldownSec    int     `json:"rate_limit_cooldown_sec"`
-	RateLimitBackoffBaseMS  int     `json:"rate_limit_backoff_base_ms"`
-	RateLimitBackoffCapMS   int     `json:"rate_limit_backoff_cap_ms"`
-	ScanConcurrency         int     `json:"scan_concurrency"`
-	StopScanConcurrency     int     `json:"stop_scan_concurrency"`
-	BatchConcurrency        int     `json:"batch_concurrency"`
-	TestConcurrency         int     `json:"test_concurrency"`
-	PoolProbeConcurrency    int     `json:"pool_probe_concurrency"`
-	HasGatewayKey           bool    `json:"has_gateway_key"`
-	GatewayKey              string  `json:"gateway_key"`
+	OpencodeClientVersion     string  `json:"opencode_client_version"`
+	UiPollIntervalSec         int     `json:"ui_poll_interval_sec"`
+	UpstreamProxy             string  `json:"upstream_proxy"`
+	SubscribeURL              string  `json:"subscribe_url"`
+	SubscribeIntervalMin      int     `json:"subscribe_interval_min"`
+	HealthCheckIntervalSec    int     `json:"health_check_interval_sec"`
+	HealthRestartThreshold    int     `json:"health_restart_threshold"`
+	PoolProbeIntervalSec      int     `json:"pool_probe_interval_sec"`
+	PoolProbeTimeoutSec       int     `json:"pool_probe_timeout_sec"`
+	PoolQualityWindowMin      int     `json:"pool_quality_window_min"`
+	PoolProbeEnabled          bool    `json:"pool_probe_enabled"`
+	ProbeSoloEnabled          bool    `json:"probe_solo_enabled"`
+	PoolBreakerThreshold      int     `json:"pool_breaker_threshold"`
+	PoolHalfOpenIntervalSec   int     `json:"pool_halfopen_interval_sec"`
+	BadPoolResetSec           int     `json:"bad_pool_reset_sec"`
+	QuotaBadPoolResetSec      int     `json:"quota_bad_pool_reset_sec"`
+	PoolPerformanceMode       bool    `json:"pool_performance_mode"`
+	PoolRaceCopies            int     `json:"pool_race_copies"`
+	RaceBudgetMS              int     `json:"race_budget_ms"`
+	PoolRacePressureLow       float64 `json:"pool_race_pressure_low"`
+	PoolRacePressureHigh      float64 `json:"pool_race_pressure_high"`
+	RateLimitCooldownSec      int     `json:"rate_limit_cooldown_sec"`
+	RateLimitBackoffBaseMS    int     `json:"rate_limit_backoff_base_ms"`
+	RateLimitBackoffCapMS     int     `json:"rate_limit_backoff_cap_ms"`
+	RateLimitMinIntervalMS    int     `json:"rate_limit_min_interval_ms"`
+	FingerprintBadCooldownSec int     `json:"fingerprint_bad_cooldown_sec"`
+	ScanConcurrency           int     `json:"scan_concurrency"`
+	StopScanConcurrency       int     `json:"stop_scan_concurrency"`
+	BatchConcurrency          int     `json:"batch_concurrency"`
+	TestConcurrency           int     `json:"test_concurrency"`
+	PoolProbeConcurrency      int     `json:"pool_probe_concurrency"`
+	HasGatewayKey             bool    `json:"has_gateway_key"`
+	GatewayKey                string  `json:"gateway_key"`
 	// 免费层 Bun sidecar
 	FreeSidecarPort    int  `json:"free_sidecar_port"`
 	FreeSidecarEnabled bool `json:"free_sidecar_enabled"`
@@ -987,62 +1016,64 @@ func (m *Manager) ConfigViewOf() ConfigView {
 		return v
 	}
 	return ConfigView{
-		BaseURL:                 cfg.BaseURL,
-		DefaultPassword:         maskSecret(cfg.DefaultPassword),
-		HasPassword:             cfg.DefaultPassword != "",
-		ClashExternalURL:        cfg.ClashExternalURL,
-		HasClashToken:           cfg.ClashAuthToken != "",
-		TimeoutTTFTMinMS:        def(cfg.TimeoutTTFTMinMS, 10000),
-		TimeoutTTFTMaxMS:        def(cfg.TimeoutTTFTMaxMS, 10000),
-		TimeoutSilenceMinMS:     def(cfg.TimeoutSilenceMinMS, 5000),
-		TimeoutSilenceMaxMS:     def(cfg.TimeoutSilenceMaxMS, 5000),
-		PreContentSilenceMinMS:  def(cfg.PreContentSilenceMinMS, 30000),
-		PreContentSilenceMaxMS:  def(cfg.PreContentSilenceMaxMS, 30000),
-		FailoverProbeMin:        def(cfg.FailoverProbeMin, 2),
-		FailoverProbeMax:        def(cfg.FailoverProbeMax, 3),
-		CallLogMax:              def(cfg.CallLogMax, 5000),
-		ShowNodePrefix:          cfg.ShowNodePrefix,
-		OpencodeClientVersion:   OpencodeClientVersionOf(cfg),
-		UiPollIntervalSec:       uiPollIntervalSecOf(cfg),
-		UpstreamProxy:           cfg.UpstreamProxy,
-		SubscribeURL:            cfg.SubscribeURL,
-		SubscribeIntervalMin:    cfg.SubscribeIntervalMin,
-		HealthCheckIntervalSec:  cfg.HealthCheckIntervalSec,
-		HealthRestartThreshold:  cfg.HealthRestartThreshold,
-		PoolProbeIntervalSec:    poolProbeInterval(cfg),
-		PoolProbeTimeoutSec:     int(poolProbeTimeout(cfg).Seconds()),
-		PoolQualityWindowMin:    int(poolQualityWindowSec(cfg) / 60),
-		PoolProbeEnabled:        poolProbeEnabled(cfg),
-		ProbeSoloEnabled:        probeSoloEnabled(cfg),
-		PoolBreakerThreshold:    poolBreakerThresholdOf(cfg),
-		PoolHalfOpenIntervalSec: poolHalfOpenIntervalOf(cfg),
-		BadPoolResetSec:         badPoolResetSecOf(cfg),
-		QuotaBadPoolResetSec:    quotaBadPoolResetSecOf(cfg),
-		PoolPerformanceMode:     poolPerfModeEnabled(cfg),
-		PoolRaceCopies:          poolRaceCopiesOf(cfg),
-		RaceBudgetMS:            poolRaceBudgetMSOf(cfg),
-		PoolRacePressureLow:     poolRacePressureLowOf(cfg),
-		PoolRacePressureHigh:    poolRacePressureHighOf(cfg),
-		RateLimitCooldownSec:    rateLimitCooldownSecOf(cfg),
-		RateLimitBackoffBaseMS:  rateLimitBackoffBaseMSOf(cfg),
-		RateLimitBackoffCapMS:   rateLimitBackoffCapMSOf(cfg),
-		ScanConcurrency:         scanConcurrencyOf(cfg),
-		StopScanConcurrency:     stopScanConcurrencyOf(cfg),
-		BatchConcurrency:        batchConcurrencyOf(cfg),
-		TestConcurrency:         testConcurrencyOf(cfg),
-		PoolProbeConcurrency:    poolProbeConcurrencyOf(cfg),
-		HasGatewayKey:           cfg.GatewayKey != "",
-		GatewayKey:              maskSecret(cfg.GatewayKey),
-		FreeSidecarPort:         m.freeSidecarPort(),
-		FreeSidecarEnabled:      freeSidecarEnabled(cfg),
-		ChainEnabled:            chainEnabled(cfg),
-		ChainGroups:             cfg.ChainGroups,
-		ChainNodes:              cfg.ChainNodes,
-		FrontCandidates:         cfg.FrontCandidates,
-		FrontGroup:              cfg.FrontGroup,
-		FrontNode:               cfg.FrontNode,
-		ChainAutoDetect:         chainAutoDetect(cfg),
-		GatewayPort:             cfg.GatewayPort,
+		BaseURL:                   cfg.BaseURL,
+		DefaultPassword:           maskSecret(cfg.DefaultPassword),
+		HasPassword:               cfg.DefaultPassword != "",
+		ClashExternalURL:          cfg.ClashExternalURL,
+		HasClashToken:             cfg.ClashAuthToken != "",
+		TimeoutTTFTMinMS:          def(cfg.TimeoutTTFTMinMS, 10000),
+		TimeoutTTFTMaxMS:          def(cfg.TimeoutTTFTMaxMS, 10000),
+		TimeoutSilenceMinMS:       def(cfg.TimeoutSilenceMinMS, 5000),
+		TimeoutSilenceMaxMS:       def(cfg.TimeoutSilenceMaxMS, 5000),
+		PreContentSilenceMinMS:    def(cfg.PreContentSilenceMinMS, 30000),
+		PreContentSilenceMaxMS:    def(cfg.PreContentSilenceMaxMS, 30000),
+		FailoverProbeMin:          def(cfg.FailoverProbeMin, 2),
+		FailoverProbeMax:          def(cfg.FailoverProbeMax, 3),
+		CallLogMax:                def(cfg.CallLogMax, 5000),
+		ShowNodePrefix:            cfg.ShowNodePrefix,
+		OpencodeClientVersion:     OpencodeClientVersionOf(cfg),
+		UiPollIntervalSec:         uiPollIntervalSecOf(cfg),
+		UpstreamProxy:             cfg.UpstreamProxy,
+		SubscribeURL:              cfg.SubscribeURL,
+		SubscribeIntervalMin:      cfg.SubscribeIntervalMin,
+		HealthCheckIntervalSec:    cfg.HealthCheckIntervalSec,
+		HealthRestartThreshold:    cfg.HealthRestartThreshold,
+		PoolProbeIntervalSec:      poolProbeInterval(cfg),
+		PoolProbeTimeoutSec:       int(poolProbeTimeout(cfg).Seconds()),
+		PoolQualityWindowMin:      int(poolQualityWindowSec(cfg) / 60),
+		PoolProbeEnabled:          poolProbeEnabled(cfg),
+		ProbeSoloEnabled:          probeSoloEnabled(cfg),
+		PoolBreakerThreshold:      poolBreakerThresholdOf(cfg),
+		PoolHalfOpenIntervalSec:   poolHalfOpenIntervalOf(cfg),
+		BadPoolResetSec:           badPoolResetSecOf(cfg),
+		QuotaBadPoolResetSec:      quotaBadPoolResetSecOf(cfg),
+		PoolPerformanceMode:       poolPerfModeEnabled(cfg),
+		PoolRaceCopies:            poolRaceCopiesOf(cfg),
+		RaceBudgetMS:              poolRaceBudgetMSOf(cfg),
+		PoolRacePressureLow:       poolRacePressureLowOf(cfg),
+		PoolRacePressureHigh:      poolRacePressureHighOf(cfg),
+		RateLimitCooldownSec:      rateLimitCooldownSecOf(cfg),
+		RateLimitBackoffBaseMS:    rateLimitBackoffBaseMSOf(cfg),
+		RateLimitBackoffCapMS:     rateLimitBackoffCapMSOf(cfg),
+		RateLimitMinIntervalMS:    cfg.RateLimitMinIntervalMS,
+		FingerprintBadCooldownSec: cfg.FingerprintBadCooldownSec,
+		ScanConcurrency:           scanConcurrencyOf(cfg),
+		StopScanConcurrency:       stopScanConcurrencyOf(cfg),
+		BatchConcurrency:          batchConcurrencyOf(cfg),
+		TestConcurrency:           testConcurrencyOf(cfg),
+		PoolProbeConcurrency:      poolProbeConcurrencyOf(cfg),
+		HasGatewayKey:             cfg.GatewayKey != "",
+		GatewayKey:                maskSecret(cfg.GatewayKey),
+		FreeSidecarPort:           m.freeSidecarPort(),
+		FreeSidecarEnabled:        freeSidecarEnabled(cfg),
+		ChainEnabled:              chainEnabled(cfg),
+		ChainGroups:               cfg.ChainGroups,
+		ChainNodes:                cfg.ChainNodes,
+		FrontCandidates:           cfg.FrontCandidates,
+		FrontGroup:                cfg.FrontGroup,
+		FrontNode:                 cfg.FrontNode,
+		ChainAutoDetect:           chainAutoDetect(cfg),
+		GatewayPort:               cfg.GatewayPort,
 	}
 }
 

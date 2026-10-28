@@ -293,6 +293,7 @@ func vendorParams(t string) map[string]any {
 			opencode.ParamRateLimitCooldownSec:   int(rateLimitCooldownSec.Load()),
 			opencode.ParamRateLimitBackoffBaseMS: int(rateLimitBackoffBaseMS.Load()),
 			opencode.ParamRateLimitBackoffCapMS:  int(rateLimitBackoffCapMS.Load()),
+			opencode.ParamRateLimitMinIntervalMS: int(rateLimitMinIntervalMS.Load()),
 		}
 	case "custom":
 		// 自定义模型源：只需传输注入（出站经统一网关，直连或代理池由 via_proxy 决定）。

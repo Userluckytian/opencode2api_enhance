@@ -439,7 +439,7 @@ func callOpenCodeAPIStreamOnce(ctx context.Context, upstreamBody []byte, modelID
 	for i, v := range cands {
 		stream, err := chatViaVendorStream(ctx, v, upstreamBody, modelID, auth)
 		if err == nil && stream != nil && stream.Status >= 200 && stream.Status < 300 {
-			return stream.ReadCloser, stream.Status, nil, stream.NodeAddr, nil
+			return stream.ReadCloser, stream.Status, stream.Headers, stream.NodeAddr, nil
 		}
 		lastStream, lastErr = stream, err
 		if i == len(cands)-1 {
@@ -456,7 +456,7 @@ func callOpenCodeAPIStreamOnce(ctx context.Context, upstreamBody []byte, modelID
 	if lastStream == nil {
 		return nil, 0, nil, "", lastErr
 	}
-	return lastStream.ReadCloser, lastStream.Status, nil, lastStream.NodeAddr, lastErr
+	return lastStream.ReadCloser, lastStream.Status, lastStream.Headers, lastStream.NodeAddr, lastErr
 }
 
 // ======================== 安全响应头过滤 ========================
