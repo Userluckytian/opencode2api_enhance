@@ -2,11 +2,14 @@
 config.json
 stats.json
 config_history.jsonl
+call_log.jsonl
 postmortem/
 *.log
 
 # Build output
 dist/
+# 构建产物误写到仓库根（正常应进 dist/）；index.html 被覆盖时勿提交
+/assets/
 bin/
 opencode2api
 opencode2api.exe
