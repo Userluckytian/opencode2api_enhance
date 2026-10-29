@@ -560,7 +560,18 @@ export default function CustomModelsPage({ toast }: { toast: (msg: string, ok?: 
     } catch {
       // 密钥获取失败不阻断：面板照常打开，接入信息区显示占位与指引
     }
-    const params = new URLSearchParams({ gateway: `${window.location.origin}/v1`, plugin: p.id })
+    // gateway 参数 = 「全链路测试」该打的模型入口。2026-10 拆分后插件/自定义源的
+    // 模型入口在**供应商服务**（默认 127.0.0.1:50080/v1），不再是管理面板同源的
+    // /v1（40000 不路由插件模型，经它测必报 400 Model is unavailable）。
+    // 优先用运行时的 provider-service 状态地址；拿不到才回退本页 origin（旧形态）。
+    let gw = `${window.location.origin}/v1`
+    try {
+      const svc = await api.providerServiceStatus()
+      if (svc?.address) gw = svc.address
+    } catch {
+      // 状态获取失败不阻断：回退旧地址，面板侧还有 normalizeGateway 探测兜底
+    }
+    const params = new URLSearchParams({ gateway: gw, plugin: p.id })
     if (key) params.set('key', key)
     if (models.length) params.set('models', models.join(','))
     const panelUrl = `${target}/?${params.toString()}`
