@@ -84,16 +84,17 @@ func seedVendorCatalog(v contract.Vendor) {
 }
 
 // chatCandidates 返回可服务 modelID 的厂商（failover 顺序）。
+//
+// v2.0.0：解析为空时**不再**兜底「全部厂商」。旧实现会把未匹配的模型发给
+// 每一个厂商，换来的是一串误导性上游错误——例如插件模型被兜底到某个需要
+// 出口代理的厂商，就报 "no healthy proxy node"（含 opencode.ai 地址），
+// 让用户以为是插件自己的问题。现在返回空候选，由上层明确报「找不到可服务
+// 该模型的厂商」。
 func chatCandidates(modelID string) []contract.Vendor {
-	if chatRouterVar != nil {
-		if cs := chatRouterVar.Candidates(modelID); len(cs) > 0 {
-			return cs
-		}
-	}
-	if globalAgg == nil {
+	if chatRouterVar == nil {
 		return nil
 	}
-	return globalAgg.Vendors()
+	return chatRouterVar.Candidates(modelID)
 }
 
 // vendorOfModel 返回模型的首选厂商 ID（供调用日志归类/错误分析过滤）。
@@ -246,7 +247,7 @@ func callOpenCodeAPIOnce(ctx context.Context, upstreamBody []byte, modelID strin
 	cands := chatCandidates(modelID)
 	if len(cands) == 0 {
 		return nil, http.StatusServiceUnavailable, nil, "",
-			fmt.Errorf("没有可服务模型 %s 的供应商（其厂商未注册或已停用）", modelID)
+			unknownModelError(modelID)
 	}
 
 	var lastReply *contract.Reply
@@ -300,7 +301,7 @@ func callOpenCodeAPIStreamOnce(ctx context.Context, upstreamBody []byte, modelID
 	cands := chatCandidates(modelID)
 	if len(cands) == 0 {
 		return nil, http.StatusServiceUnavailable, nil, "",
-			fmt.Errorf("没有可服务模型 %s 的供应商（其厂商未注册或已停用）", modelID)
+			unknownModelError(modelID)
 	}
 
 	var lastStream *contract.Stream
@@ -359,4 +360,30 @@ func httpStatusOr(status int) int {
 		return http.StatusBadGateway
 	}
 	return status
+}
+
+// unknownModelError 模型无法归属任何厂商时的错误（含可用厂商，便于用户纠正）。
+//
+// 典型场景：客户端漏写厂商前缀（"MiniMax-M3.1-Flash" 而非
+// "mmxproxy/MiniMax-M3.1-Flash"），或厂商被停用/插件未启动。
+func unknownModelError(modelID string) error {
+	var ids []string
+	if chatRouterVar != nil {
+		ids = chatRouterVar.ProviderList()
+	}
+	if len(ids) == 0 {
+		return fmt.Errorf("找不到可服务模型 %s 的供应商：当前没有已注册的供应商（检查供应商/插件是否已启用）", modelID)
+	}
+	shown := ids
+	if len(shown) > 12 {
+		shown = shown[:12]
+	}
+	hint := ""
+	if prefix, _, ok := strings.Cut(modelID, "/"); !ok || prefix == "" {
+		hint = "；该模型缺少厂商前缀，请改用「供应商/模型」形式，例如 " + shown[0] + "/" + modelID
+	} else {
+		hint = "；前缀 " + prefix + " 未注册或已停用"
+	}
+	return fmt.Errorf("找不到可服务模型 %s 的供应商%s。当前可用供应商：%s",
+		modelID, hint, strings.Join(shown, ", "))
 }

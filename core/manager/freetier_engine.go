@@ -45,13 +45,13 @@ type FreeTierEngineStatus struct {
 	// APIKey 客户端应使用的统一密钥。
 	APIKey string `json:"api_key"`
 	// Version / Models / Warp 来自引擎 /healthz。
-	Version    string `json:"version,omitempty"`
-	ModelTotal int    `json:"model_total"`
-	ModelShown int    `json:"model_shown"`
-	WarpStatus string `json:"warp_status,omitempty"`
-	WarpStack  string `json:"warp_stack,omitempty"`
-	WarpActive int    `json:"warp_active"`
-	WarpCooling int   `json:"warp_cooling"`
+	Version     string `json:"version,omitempty"`
+	ModelTotal  int    `json:"model_total"`
+	ModelShown  int    `json:"model_shown"`
+	WarpStatus  string `json:"warp_status,omitempty"`
+	WarpStack   string `json:"warp_stack,omitempty"`
+	WarpActive  int    `json:"warp_active"`
+	WarpCooling int    `json:"warp_cooling"`
 	// BinPath / BinExists 引擎二进制位置与是否已安装。
 	BinPath   string `json:"bin_path"`
 	BinExists bool   `json:"bin_exists"`
@@ -61,10 +61,10 @@ type FreeTierEngineStatus struct {
 
 // freeTierEngine 引擎托管状态。
 type freeTierEngine struct {
-	mu      sync.Mutex
-	pid     int
-	state   string
-	lastErr string
+	mu          sync.Mutex
+	pid         int
+	state       string
+	lastErr     string
 	warpCooling int
 }
 
@@ -106,21 +106,21 @@ func (m *Manager) EngineBinPath() string {
 // engineConfig 引擎 config.json 的生成结构（只声明我们写入的字段；
 // 引擎的 DisallowUnknownFields 要求不能出现它不认识的键）。
 type engineConfig struct {
-	Listen      string             `json:"listen"`
-	ServerKeys  []string           `json:"server_keys"`
-	ZenKeys     []string           `json:"zen_keys,omitempty"`
-	GoKeys      []string           `json:"go_keys,omitempty"`
-	Anonymous   bool               `json:"anonymous"`
-	Warp        engineWarpConfig   `json:"warp"`
-	Proxies     []string           `json:"proxies"`
-	ProxyFile   string             `json:"proxyfile"`
-	Upstream    engineUpstream     `json:"upstream"`
-	Retry       engineRetry        `json:"retry"`
-	Models      engineModels       `json:"models"`
-	Performance enginePerformance  `json:"performance"`
-	Logging     engineLogging      `json:"logging"`
-	WebUI       engineWebUI        `json:"webui"`
-	Prefer      string             `json:"prefer"`
+	Listen      string            `json:"listen"`
+	ServerKeys  []string          `json:"server_keys"`
+	ZenKeys     []string          `json:"zen_keys,omitempty"`
+	GoKeys      []string          `json:"go_keys,omitempty"`
+	Anonymous   bool              `json:"anonymous"`
+	Warp        engineWarpConfig  `json:"warp"`
+	Proxies     []string          `json:"proxies"`
+	ProxyFile   string            `json:"proxyfile"`
+	Upstream    engineUpstream    `json:"upstream"`
+	Retry       engineRetry       `json:"retry"`
+	Models      engineModels      `json:"models"`
+	Performance enginePerformance `json:"performance"`
+	Logging     engineLogging     `json:"logging"`
+	WebUI       engineWebUI       `json:"webui"`
+	Prefer      string            `json:"prefer"`
 }
 
 type engineWarpConfig struct {
@@ -210,7 +210,10 @@ func (m *Manager) WriteEngineConfig() error {
 		ServerKeys: []string{effectiveGatewayKey(cfg)},
 		ZenKeys:    cfg.EngineZenKeys,
 		GoKeys:     cfg.EngineGoKeys,
-		Anonymous:  true,
+		// Anonymous 只在完全没有付费 key 时开启：实测（同一引擎、同样直连）匿名
+		// 模式请求 big-pickle 恒 429；配一个 zen key 后同一模型立刻 200。
+		// 配了 key 还留 anonymous=true，引擎仍会优先走匿名通道，继续 429。
+		Anonymous: len(cfg.EngineZenKeys) == 0 && len(cfg.EngineGoKeys) == 0,
 		Warp: engineWarpConfig{
 			Enabled:    engineWarpEnabled(cfg),
 			PoolSize:   poolSize,
@@ -369,13 +372,13 @@ func (m *Manager) FreeTierEngineStatus() FreeTierEngineStatus {
 	cfg := m.loadConfig()
 	port := m.managerGatewayPort()
 	st := FreeTierEngineStatus{
-		State:    state,
-		Address:  fmt.Sprintf("http://127.0.0.1:%d/v1", port),
-		Port:     port,
-		PID:      pid,
-		APIKey:   effectiveGatewayKey(cfg),
-		BinPath:  m.EngineBinPath(),
-		Error:    lastErr,
+		State:       state,
+		Address:     fmt.Sprintf("http://127.0.0.1:%d/v1", port),
+		Port:        port,
+		PID:         pid,
+		APIKey:      effectiveGatewayKey(cfg),
+		BinPath:     m.EngineBinPath(),
+		Error:       lastErr,
 		WarpCooling: e.warpCooling,
 	}
 	if _, err := os.Stat(st.BinPath); err == nil {
@@ -399,7 +402,7 @@ func (m *Manager) FreeTierEngineStatus() FreeTierEngineStatus {
 		Status  string `json:"status"`
 		Version string `json:"version"`
 		Models  struct {
-			Total  int `json:"total"`
+			Total   int `json:"total"`
 			Exposed int `json:"exposed"`
 		} `json:"models"`
 		Warp *struct {

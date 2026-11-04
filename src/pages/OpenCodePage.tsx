@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import clsx from 'clsx'
 import {
   Copy,
+  Key,
   Loader2,
   Play,
   Power,
@@ -32,6 +33,12 @@ export default function OpenCodePage({ toast }: { toast: (msg: string, ok?: bool
   const [proxyDirty, setProxyDirty] = useState(false)
   const [savingProxy, setSavingProxy] = useState(false)
 
+  // 付费密钥草稿（zen = 免费层 v1 通道；go = Go 订阅通道）
+  const [zenDraft, setZenDraft] = useState('')
+  const [goDraft, setGoDraft] = useState('')
+  const [keyDirty, setKeyDirty] = useState(false)
+  const [savingKeys, setSavingKeys] = useState(false)
+
   // WARP 参数草稿
   const [warpPool, setWarpPool] = useState('2')
   const [warpSource, setWarpSource] = useState('')
@@ -59,6 +66,10 @@ export default function OpenCodePage({ toast }: { toast: (msg: string, ok?: bool
       if (!aliveRef.current) return
       setConfig(c)
       if (!proxyDirty) setProxyDraft((c.engine_proxies ?? []).join('\n'))
+      if (!keyDirty) {
+        setZenDraft((c.engine_zen_keys ?? []).join('\n'))
+        setGoDraft((c.engine_go_keys ?? []).join('\n'))
+      }
       if (!warpDirty) {
         setWarpPool(String(c.engine_warp_pool_size || 2))
         setWarpSource(c.engine_warp_source_ipv6 ?? '')
@@ -68,7 +79,7 @@ export default function OpenCodePage({ toast }: { toast: (msg: string, ok?: bool
     } finally {
       if (aliveRef.current) setLoading(false)
     }
-  }, [proxyDirty, warpDirty])
+  }, [proxyDirty, warpDirty, keyDirty])
 
   useEffect(() => {
     void reload()
@@ -132,6 +143,20 @@ export default function OpenCodePage({ toast }: { toast: (msg: string, ok?: bool
       toast((e as Error).message, false)
     } finally {
       setSavingProxy(false)
+    }
+  }
+
+  const saveKeys = async () => {
+    setSavingKeys(true)
+    try {
+      await api.configSet('engine_zen_keys', zenDraft)
+      await api.configSet('engine_go_keys', goDraft)
+      setKeyDirty(false)
+      toast('密钥已保存，重启引擎后生效')
+    } catch (e) {
+      toast((e as Error).message, false)
+    } finally {
+      setSavingKeys(false)
     }
   }
 
@@ -376,6 +401,56 @@ export default function OpenCodePage({ toast }: { toast: (msg: string, ok?: bool
         <div className="mt-3 text-[11px] text-zinc-400">
           WARP 出口每个获得一个独立的公网 IPv6；出口被上游限流后会冷却并自动替换。
           关闭 WARP 时免费通道回落到底下的代理列表。
+        </div>
+      </div>
+
+      {/* 付费密钥 */}
+      <div className="bg-white rounded-2xl border border-zinc-200 shadow-sm p-5">
+        <div className="flex items-center gap-2 mb-3">
+          <Key size={16} className="text-teal-600" />
+          <h3 className="text-[15px] font-semibold text-zinc-900">密钥通道</h3>
+          <span className="flex-1" />
+          <span className="text-[12px] text-zinc-400">
+            {`zen ${config?.engine_zen_key_count ?? 0} 个 · go ${config?.engine_go_key_count ?? 0} 个`}
+          </span>
+        </div>
+        <div className="mb-2 rounded-lg bg-amber-50 border border-amber-200 px-3 py-2 text-[12px] text-amber-900">
+          实测结论：<b>完全不配密钥（纯匿名）时，big-pickle 等模型会稳定返回 429</b>
+          「Free usage limit reached」。配上一个 zen key 后，同一模型立刻可用。
+          免费层建议至少填一个 <code>oc_sk_...</code> 密钥。
+        </div>
+        <div className="grid grid-cols-2 gap-4">
+          <label className="block">
+            <div className="text-[12px] text-zinc-500 mb-1">OpenCode 密钥（oc_sk_...，每行一个）</div>
+            <textarea
+              value={zenDraft}
+              onChange={(e) => { setZenDraft(e.target.value); setKeyDirty(true) }}
+              rows={3}
+              placeholder="oc_sk_xxxxxxxx"
+              className="w-full px-3 py-2 rounded-lg border border-zinc-200 text-[12px] font-mono focus:outline-none focus:ring-2 focus:ring-teal-500/30"
+            />
+          </label>
+          <label className="block">
+            <div className="text-xs text-gray-500 mb-1">订阅密钥（可选）</div>
+            <textarea
+              value={goDraft}
+              onChange={(e) => { setGoDraft(e.target.value); setKeyDirty(true) }}
+              rows={3}
+              placeholder="（无则留空）"
+              className="w-full px-3 py-2 rounded-lg border border-zinc-200 text-[12px] font-mono focus:outline-none focus:ring-2 focus:ring-teal-500/30"
+            />
+          </label>
+        </div>
+        <div className="mt-2 flex items-center gap-2">
+          <button
+            onClick={() => void saveKeys()}
+            disabled={!keyDirty || savingKeys}
+            className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-[13px] text-white bg-zinc-900 hover:bg-zinc-800 disabled:opacity-40"
+          >
+            {savingKeys ? <Loader2 size={14} className="animate-spin" /> : null}
+            保存密钥
+          </button>
+          <span className="text-[11px] text-zinc-400">保存后需「重启」引擎生效</span>
         </div>
       </div>
 

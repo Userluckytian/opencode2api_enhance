@@ -1,6 +1,6 @@
 # 插件整改阶段计划（2026-11-04）
 
-> 状态：P1/P3/P4-A~E（事件日志 Grok+QwenWork）、P5 副本通过；P2 待上线；P4-E 其余插件待接
+> 状态：P1/P3/P4/P5 副本通过；9 插件契约冒烟通过（loomy 需真实 session）；P2 待上线
 > 依据：`docs/plugin-audit-2026-11-04.md`、`docs/PLUGIN-CAPABILITIES.md`
 > 上线操作：`docs/ai-framework/plans/2026-11-04-deploy-runbook.md`
 > 实施：`qw2api/qwork-auto`；审查：`mmxproxy/MiniMax-M3.1-Flash`；验收：主代理（命令/证据）
@@ -206,6 +206,74 @@
 - 面板：新增"事件"标签页 + `loadEvents()`。
 - 测试：`eventlog_test.go`（往返 + 无 DataDir 关闭）；`go build` + `go test -run TestEventLog` 通过。
 - 仍待：LobsterHub 接入；LobsterAI 面板入口。
+
+### P4-E 补充（LobsterHub，2026-11-04）
+
+- `eventlog.go`：`<dataDir>/events.jsonl` + 10MB 轮转；`vault.Dir` 为空即关闭。
+- API：`GET /api/events?lines=200`（Bearer）。
+- 事件：`account.enable`、`account.disable`、`account.delete`、`account.clear_suspend`。
+- 面板：左侧新增"事件"导航 + `#view-events` + `loadEvents()`，路由到 `events`。
+- 测试：`eventlog_test.go`（往返 + 无 vault 禁用）；`go build` + `go test -run TestEventLog` 通过。
+- P4-E 现状：Grok/QwenWork/MiniMax/LobsterAI/BuddyHub/LobsterHub 均有 `events.jsonl`；LobsterAI 面板入口仍待加。
+
+### P4-E 收口（LobsterAI 面板入口，2026-11-04）
+
+- `web/index.html`：导航加"事件"（`data-view="events"`）。
+- `web/assets/app.js`：`VIEWS.events`、`renderView()` 分派、`renderEvents()`（`/admin/events?lines=200`，带刷新按钮）。
+- 验证：`go build` + `go test ./web` 通过。
+- **P4-E 全量收口**：6 个插件都有 `events.jsonl` + 面板入口。
+
+---
+
+## 9.5 契约冒烟（2026-11-04，P0 补充）
+
+脚本：`scripts/smoke-provider-serve.ps1`（真拉起每个插件，不碰线上）
+
+对 9 个副本逐个 `go build` → `--provider-serve --port 0` → 校验 ready 行 / `/v1/models` 非空且带 `context_window` / 无令牌 401 / 数据落 `data/`。
+
+| 插件 | ready | models | 401 | data/ |
+|---|---|---|---|---|
+| mmxproxy | ✅ | 4（caps 4） | ✅ | ✅ |
+| qw2api | ✅ | 2（caps 2） | ✅ | ✅ |
+| grok | ✅ | 1（caps 1） | ✅ | ✅ |
+| lobsterai | ✅ | 19（caps 19） | ✅ | ✅ |
+| lobsterhub | ✅ | 25（caps 25） | ✅ | ✅ |
+| buddyhub | ✅ | 27（caps 27） | ✅ | ✅ |
+| skywork | ✅ | 2（caps 2） | ✅ | ✅ |
+| loomy | need_config | — | — | — |
+| flonno | ✅ | 1（caps 1） | ✅ | ✅ |
+
+**冒烟发现并修掉的真实缺陷（都会导致插件在宿主里"没有模型"）：**
+
+1. **MiniMax**：`fallbackModels` 只返回 `id`，空号池时无 `context_window`/`max_output_tokens`，也没有 1M 别名 → 补齐（含 `context_window_options`）。
+2. **LobsterHub**：`modelList()` 的 `modelEntry` 只有 id → 加 `context_window`/`context_length`/`max_output_tokens` + `modelCaps` 表。
+3. **BuddyHub**：`/v1/models` 纯动态，空池返回 0 条（宿主视为目录不可用）→ 加 `upstream.SeedModels()` 与 `seedModels()` 兜底。
+4. **Grok**：grok2api 未就绪时 `/v1/models` 回 503 → 回退内置 `grok-4.7`（256K/32K）。
+5. **Flonno**：空池时透传上游 502 → 空池直接回内置目录（`qwen3.8-27b` + 设置里的 context 值）。
+
+**loomy**：`need_config`（缺真实 session）是契约允许状态，不算缺陷，登记为"需真实凭据验证"。
+
+**脚本自身的坑（已修）：**
+
+- `Set-Content -Encoding UTF8` 写 BOM → Go 拒收；改 `[IO.File]::WriteAllText` + 无 BOM。
+- `Where-Object ... .Count` 在单元素列表上返回标量 → 改显式 foreach 计数。
+
+---
+
+## 9.6 面板 UI 冒烟（2026-11-04，P0 补充）
+
+脚本：`scripts/verify-panel-ui.ps1`（拉起插件 → 抓真实 HTML → 校验"事件"入口）
+
+| 插件 | 面板 | markers | 备注 |
+|---|---|---|---|
+| mmxproxy | ok | 2/2 | `panel_port=18991` 独立端口 |
+| qw2api | ok | 2/2 | `/api/events` 在页内 |
+| grok | ok | 2/2 | 日志抽屉 `log-source` |
+| lobsterai | ok | 2/2 | HTML 导航 + `assets/app.js` 里的 `renderEvents` |
+| lobsterhub | ok | 2/2 | `view-events` |
+| buddyhub | ok | 2/2 | `loadEvents` |
+
+**验证方式**：不只 grep Go 源码，而是**真拉起进程、抓真实返回的 HTML/JS**。LobsterAI 的 `renderEvents` 在独立 `app.js` 里，脚本对它额外抓了一次 `/assets/app.js`——这是我第一版脚本的漏项（只看 HTML 会误判）。
 
 ---
 

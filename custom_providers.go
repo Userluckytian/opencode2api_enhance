@@ -222,7 +222,10 @@ func rebuildVendors() {
 		"skipped", skipped,
 		"result_ids", resultIDs,
 	)
-	refreshModelCatalog()
+	// 不在重建尾部刷新目录：刷新 remote 厂商会触发插件 OnModelRefresh →
+	// syncPlugins → rebuildVendors，形成自激循环（实测每 1.8s 一轮，
+	// 每次都用用户 key 打一遍上游）。目录刷新由 startModelRefresh 定时驱动，
+	// 配置保存后用 refreshModelCatalog() 显式触发一次即可。
 }
 
 // ---------------------------------------------------------------------------
@@ -232,50 +235,50 @@ func rebuildVendors() {
 // customProviderView 列表项。key 明文回传给已鉴权的面板（单用户/内网定位，
 // key 本就明文存于本机 config.json）：编辑表单直接回填，免得每次测试连通重新粘贴。
 type customProviderView struct {
-	ID            string   `json:"id"`
-	Name          string   `json:"name"`
-	Protocol      string   `json:"protocol"`
-	BaseURL       string   `json:"base_url"`
-	APIKeys       []string `json:"api_keys"` // 全部 key（明文回填编辑表单）
-	APIKey        string   `json:"api_key"`  // 首 key（旧 UI 兼容）
-	APIKeySet     bool     `json:"api_key_set"`
-	KeyStrategy   string   `json:"key_strategy"` // round_robin | failover
+	ID          string   `json:"id"`
+	Name        string   `json:"name"`
+	Protocol    string   `json:"protocol"`
+	BaseURL     string   `json:"base_url"`
+	APIKeys     []string `json:"api_keys"` // 全部 key（明文回填编辑表单）
+	APIKey      string   `json:"api_key"`  // 首 key（旧 UI 兼容）
+	APIKeySet   bool     `json:"api_key_set"`
+	KeyStrategy string   `json:"key_strategy"` // round_robin | failover
 	// Key403Cooldown 401/403 失效冷却时长（秒）；0 = 永久禁用（旧行为）；>0 到期自动回池重试。
-	Key403Cooldown int     `json:"key_403_cooldown"`
+	Key403Cooldown int `json:"key_403_cooldown"`
 	// Proxy 本源出站代理（http/https/socks5/socks5h）；空 = 直连。
-	Proxy   string `json:"proxy"`
-	Enabled bool   `json:"enabled"`
+	Proxy         string   `json:"proxy"`
+	Enabled       bool     `json:"enabled"`
 	Models        int      `json:"models"`                 // 聚合目录中该源模型数（实时，经白名单过滤）
 	ModelsAll     []string `json:"models_all"`             // 全量模型清单（上游 ID，编辑勾选用）
 	AllowedModels []string `json:"allowed_models"`         // 暴露白名单（空 = 全部暴露）
 	LastSuccess   string   `json:"last_success,omitempty"` // 最近一次成功（探测/请求）
 	// key 健康计数（运行时快照；无活实例时全 0）
-	KeysTotal     int    `json:"keys_total"`
-	KeysAvailable int    `json:"keys_available"`
-	KeysCooling   int    `json:"keys_cooling"`   // 429/限流冷却中
-	KeysAuthCooling int  `json:"keys_auth_cooling"` // 401/403 冷却中（到期自动恢复）
-	KeysCircuitOpen int  `json:"keys_circuit_open"` // 连续失败熔断中
-	KeysDisabled  int    `json:"keys_disabled"`
-	LastError     string `json:"last_error,omitempty"`
+	KeysTotal       int    `json:"keys_total"`
+	KeysAvailable   int    `json:"keys_available"`
+	KeysCooling     int    `json:"keys_cooling"`      // 429/限流冷却中
+	KeysAuthCooling int    `json:"keys_auth_cooling"` // 401/403 冷却中（到期自动恢复）
+	KeysCircuitOpen int    `json:"keys_circuit_open"` // 连续失败熔断中
+	KeysDisabled    int    `json:"keys_disabled"`
+	LastError       string `json:"last_error,omitempty"`
 }
 
 // customProviderInput 保存请求中的单个源定义。
 type customProviderInput struct {
-	ID            string   `json:"id"`
-	Name          string   `json:"name"`
-	Protocol      string   `json:"protocol"`
-	BaseURL       string   `json:"base_url"`
-	APIKey        string   `json:"api_key"`        // 单 key 兼容输入
-	APIKeys       []string `json:"api_keys"`       // 多 key（优先于 api_key）
-	KeyStrategy   string   `json:"key_strategy"`   // round_robin（默认）| failover | health
+	ID          string   `json:"id"`
+	Name        string   `json:"name"`
+	Protocol    string   `json:"protocol"`
+	BaseURL     string   `json:"base_url"`
+	APIKey      string   `json:"api_key"`      // 单 key 兼容输入
+	APIKeys     []string `json:"api_keys"`     // 多 key（优先于 api_key）
+	KeyStrategy string   `json:"key_strategy"` // round_robin（默认）| failover | health
 	// Key403Cooldown 401/403 失效冷却时长（秒）；0 = 永久禁用（旧行为）；>0 到期自动回池重试。
-	Key403Cooldown int     `json:"key_403_cooldown"`
-	AllowedModels []string `json:"allowed_models"` // 暴露白名单（空 = 全部暴露）
+	Key403Cooldown int      `json:"key_403_cooldown"`
+	AllowedModels  []string `json:"allowed_models"` // 暴露白名单（空 = 全部暴露）
 	// Proxy 本源出站代理（http/https/socks5/socks5h）；空 = 直连。
 	Proxy string `json:"proxy"`
 	// UseLocalProxy 测试专用：测试拉取模型走本机系统代理（http.ProxyFromEnvironment），
 	// 优先于 Proxy 字段；默认 false = 直连或按 Proxy 走指定代理。
-	UseLocalProxy bool `json:"use_local_proxy"`
+	UseLocalProxy bool  `json:"use_local_proxy"`
 	Enabled       *bool `json:"enabled"`
 }
 
@@ -373,7 +376,7 @@ func customProviderViews() []customProviderView {
 			ID: pc.ID, Name: pc.Name, Protocol: proto, BaseURL: baseURL,
 			APIKeys: keys, APIKey: firstKey, APIKeySet: len(keys) > 0,
 			KeyStrategy: strategy, Key403Cooldown: key403,
-			Proxy:       proxyURL, Enabled: enabled,
+			Proxy: proxyURL, Enabled: enabled,
 			Models: counts[pc.ID], LastError: vendorLastErr(pc.ID),
 			ModelsAll: vendorFullModels(pc.ID), AllowedModels: allowedIDs,
 			LastSuccess: vendorLastSuccess(pc.ID),
@@ -560,6 +563,8 @@ func applyCustomProvidersSave(m *manager.Manager, inputs []customProviderInput) 
 	)
 	applyConfig(cfg)
 	rebuildVendors()
+	// 重建不再自动刷目录（防自激循环），这里显式刷一次让面板立即看到新模型。
+	refreshModelCatalog()
 
 	// manager 配置透传：供应商服务与主进程共用同一 config.json，custom 保存后
 	// 50080 经配置监视热重建（不再向实例/网关 runtime 配置传播，见 2026-10 拆分）。

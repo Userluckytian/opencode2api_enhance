@@ -25,9 +25,8 @@ func New(agg *aggregator.Aggregator, modelMap map[string]string, defaultID strin
 	for k, v := range modelMap {
 		cp[k] = v
 	}
-	if defaultID == "" {
-		defaultID = "opencode"
-	}
+	// defaultID 为空表示「无兜底厂商」：未匹配到任何厂商的模型直接报错，
+	// 不再回落到某个内建厂商（v2.0.0 起 opencode 厂商已删除）。
 	return &Router{agg: agg, modelMap: cp, defaultID: defaultID}
 }
 
@@ -48,7 +47,7 @@ func (r *Router) vendorByID(id string) contract.Vendor {
 //     x 未注册（停用/未加载/写错）→ 返回空候选，由上层报明确错误
 //  4. 无前缀且无人提供 → 兜底 defaultID
 //
-// 带前缀的模型不兜底默认厂商：默认厂商对该模型必然报 model not supported
+//  4. 无前缀且无人提供 → 兜底 defaultID（defaultID 为空则无候选，由上层报明确错误）
 // （401），既给客户端一个误导性错误，还会把默认厂商的账号池打进坏池
 //（2026-09-19 skywork 插件停用期间 skywork/* 请求全部误落 opencode 的事故）。
 // 去重并保持顺序。
