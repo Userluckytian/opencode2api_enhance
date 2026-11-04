@@ -188,14 +188,12 @@ pub fn run() {
         data_dir = base.join("opencode2api-manager-test");
         // 端口由槽位表（EnvKind::Portable → 48200 段）处理，见 spawn_core_manager。
     }
-    let mut manager = instance::InstanceManager::new(
+    let manager = instance::InstanceManager::new(
         instances_path,
         binary_dir.clone(),
         runtime_dir.clone(),
     );
-    let _ = manager.load();
-    // 启动即校正：上次非正常退出留下的"Running 但进程已死"状态修正为 Stopped
-    let _ = manager.reconcile_states();
+    // v2.0.0: 实例池已移除，壳不再读写 instances.json（manager 仅保留历史命令签名兼容）。
 
     let manager = Arc::new(Mutex::new(manager));
     let gateway_manager = Arc::new(Mutex::new(gateway::GatewayManager::new(
@@ -294,10 +292,7 @@ pub fn run() {
                                 let _ = c.kill();
                             }
                         }
-                        if let Ok(mut gateway) = state.gateway.lock() {
-                            gateway.stop();
-                        }
-                        commands::stop_all_instances(&state);
+                        // v2.0.0: 不再按旧 instances.json 的 PID 杀进程（PID 可能已被系统复用，误伤无关程序）。
                     }
                     app.exit(0);
                 }
@@ -347,10 +342,7 @@ button: tauri::tray::MouseButton::Left,
                             let _ = c.kill();
                         }
                     }
-                    if let Ok(mut gateway) = state.gateway.lock() {
-                        gateway.stop();
-                    }
-                    commands::stop_all_instances(&state);
+                    // v2.0.0: 同上，退出只杀 core 子进程。
                 }
             }
         });

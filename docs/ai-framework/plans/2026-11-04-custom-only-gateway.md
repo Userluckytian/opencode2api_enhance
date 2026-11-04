@@ -502,3 +502,19 @@ git reset --hard v1.9.0-free-tier-final
 | 日期 | 变更 |
 |------|------|
 | 2026-11-04 | 初版：基于 429 实测结论 + 用户决策 D1–D7 制定 |
+
+---
+
+## 执行记录（2026-11-04 晚）
+
+| 阶段 | 结果 | 证据 |
+|---|---|---|
+| P0 | ✅ 分支 `refactor/custom-only`，tag `v1.9.0-free-tier-final` | `git log` |
+| P1 | ✅ `contract.ParamTransport` + `StaticProxyTransport` | `go test ./core/contract` PASS |
+| P2 | ✅ 免费层后端删除；`freetier_engine.go` | `go build ./...` / `go vet` |
+| P3 | ✅ OpenCode 独立页；导航 5 项；设置/统计瘦身 | `tsc` / `npm run build` |
+| P4 | ✅ 40080 启停/看门狗/healthz + 前端接入 | 隔离端口冒烟：engine `ready:true` |
+| P5 | ✅ 内嵌引擎 + GPL 三件套 + 三平台 CI + v2.0.0 | `cargo check` / YAML / PS parser / 交叉编译 |
+| P6 | ⏳ 桌面壳遗留模块清理 + 安装包冒烟 + tag | 见 issue-log 同日「P5 遗留」 |
+
+**决策变更：** P5 完成后**暂不打 v2.0.0 tag**——桌面壳仍含 instance/probe/gateway 遗留模块，需 P6 清理并真机冒烟后再发版。

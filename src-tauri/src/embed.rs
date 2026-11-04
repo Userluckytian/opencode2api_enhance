@@ -4,23 +4,23 @@ use std::path::Path;
 
 // 内嵌子程序源：按平台由 build.rs 的 cfg 选择（Windows 版 bin/*.exe；
 // Linux/macOS 优先 bin/* 无扩展名，缺失时回退 .exe）。platform_name 决定
-// 释放时的目标文件名——与 instance.rs/probe.rs 的解析逻辑对应。
+// 释放时的目标文件名——与 core/manager 的 EngineBinPath() 解析逻辑对应。
 #[cfg(embed_unix_bin)]
 pub const OPENCODE2API: &[u8] = include_bytes!("../../bin/opencode2api");
-#[cfg(embed_unix_bin)]
-pub const SINGBOX: &[u8] = include_bytes!("../../bin/sing-box");
 #[cfg(not(embed_unix_bin))]
 pub const OPENCODE2API: &[u8] = include_bytes!("../../bin/opencode2api.exe");
-#[cfg(not(embed_unix_bin))]
-pub const SINGBOX: &[u8] = include_bytes!("../../bin/sing-box.exe");
 
-// 免费层 Bun sidecar：存在才内嵌（scripts/build-free-sidecar.* 产物）。
-#[cfg(all(embed_free_sidecar, embed_unix_bin))]
-pub const FREE_SIDECAR: Option<&[u8]> = Some(include_bytes!("../../bin/free-sidecar"));
-#[cfg(all(embed_free_sidecar, not(embed_unix_bin)))]
-pub const FREE_SIDECAR: Option<&[u8]> = Some(include_bytes!("../../bin/free-sidecar.exe"));
-#[cfg(not(embed_free_sidecar))]
-pub const FREE_SIDECAR: Option<&[u8]> = None;
+// 免费层引擎（40080，opencode2api-win）：存在才内嵌。
+// 引擎是 GPL-3.0 的**独立可执行程序**，我们只以独立进程 + HTTP 方式使用它
+// （mere aggregation）：把它随主程序分发时必须同时附上 LICENSE / SOURCE.txt
+// （见 third_party/opencode2api-win/）。
+// 缺失不阻断编译——管理器会报「引擎未安装」，自定义源/插件（50080）不受影响。
+#[cfg(all(embed_free_tier_engine, embed_unix_bin))]
+pub const FREE_TIER_ENGINE: Option<&[u8]> = Some(include_bytes!("../../bin/opencode2api-win"));
+#[cfg(all(embed_free_tier_engine, not(embed_unix_bin)))]
+pub const FREE_TIER_ENGINE: Option<&[u8]> = Some(include_bytes!("../../bin/opencode2api-win.exe"));
+#[cfg(not(embed_free_tier_engine))]
+pub const FREE_TIER_ENGINE: Option<&[u8]> = None;
 
 /// 当前平台下子程序的文件名（Windows 带 .exe，其余平台不带）
 fn platform_name(name: &str) -> String {
@@ -35,13 +35,13 @@ fn platform_name(name: &str) -> String {
 /// 返回是否发生了写入（True 表示首次释放或更新）。
 pub fn ensure_binaries(bin_dir: &Path) -> Result<bool> {
     fs::create_dir_all(bin_dir).with_context(|| format!("创建目录失败: {}", bin_dir.display()))?;
-    let wrote_oc = ensure_file(bin_dir, &platform_name("opencode2api"), OPENCODE2API)?;
-    let wrote_sb = ensure_file(bin_dir, &platform_name("sing-box"), SINGBOX)?;
-    let wrote_fs = match FREE_SIDECAR {
-        Some(data) => ensure_file(bin_dir, &platform_name("free-sidecar"), data)?,
-        None => false,
-    };
-    Ok(wrote_oc || wrote_sb || wrote_fs)
+    let mut wrote = ensure_file(bin_dir, &platform_name("opencode2api"), OPENCODE2API)?;
+    // 引擎仅在构建期找到 bin/opencode2api-win[.exe] 时释放；未内嵌时不动已有文件
+    // （允许用户手工放一份引擎而无需重新编译主程序）。
+    if let Some(data) = FREE_TIER_ENGINE {
+        wrote |= ensure_file(bin_dir, &platform_name("opencode2api-win"), data)?;
+    }
+    Ok(wrote)
 }
 
 fn ensure_file(dir: &Path, name: &str, data: &[u8]) -> Result<bool> {

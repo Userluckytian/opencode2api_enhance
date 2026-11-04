@@ -1,7 +1,7 @@
 {
   "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
   "productName": "opencode2api",
-  "version": "1.9.0",
+  "version": "2.0.0",
   "identifier": "com.opencode2api.manager",
   "build": {
     "frontendDist": "../dist",
@@ -56,8 +56,8 @@
       "icons/icon.ico"
     ],
     "category": "Utility",
-    "shortDescription": "多实例 LLM 代理管理器（opencode2api + sing-box 节点池，桌面/headless WebUI）",
-    "longDescription": "基于 Tauri 2 的本地多实例代理管理器：管理 opencode2api 代理与 sing-box 出口，支持节点扫描、统一网关、健康巡检、订阅批量导入与调用日志分析。桌面（Windows/Linux）与 headless WebUI 双模式。",
+    "shortDescription": "LLM 代理管理器（OpenCode 免费层 + 自定义供应商，桌面/headless WebUI）",
+    "longDescription": "基于 Tauri 2 的本地 LLM 代理管理器，三进程架构：40000 管理面板 + 40080 OpenCode 免费层引擎（opencode2api-win，GPL-3.0 独立进程）+ 50080 自定义/插件供应商服务。支持多供应商多 Key 轮询、调用日志与统计。桌面（Windows/Linux）与 headless WebUI 双模式。",
     "windows": {
       "nsis": {
         "installMode": "perMachine",
@@ -89,7 +89,8 @@
       "../dist/index.html": "bin/dist/index.html",
       "../dist/assets/": "bin/dist/assets/",
       "../dist/app-icon.png": "bin/dist/app-icon.png",
-      "target/release/WebView2Loader.dll": "WebView2Loader.dll"
+      "target/release/WebView2Loader.dll": "WebView2Loader.dll",
+      "../third_party/opencode2api-win/": "third_party/opencode2api-win/"
     }
   }
 }

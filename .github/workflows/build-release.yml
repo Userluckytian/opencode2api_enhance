@@ -20,25 +20,26 @@ jobs:
         include:
           - os: windows-latest
             go_bin: opencode2api.exe
-            sb_name: sing-box.exe
-            sb_url: https://github.com/SagerNet/sing-box/releases/download/v1.13.16/sing-box-1.13.16-windows-amd64.zip
-            sb_archive: zip
+            # 三进程架构的免费层引擎（40080，外部 GPL 程序）按目标平台交叉构建
+            goos: windows
+            goarch: amd64
+            engine_bin: opencode2api-win.exe
             bundles: nsis
             updater_platform: windows-x86_64
             win_dll: true
           - os: ubuntu-latest
             go_bin: opencode2api
-            sb_name: sing-box
-            sb_url: https://github.com/SagerNet/sing-box/releases/download/v1.13.16/sing-box-1.13.16-linux-amd64.tar.gz
-            sb_archive: targz
+            goos: linux
+            goarch: amd64
+            engine_bin: opencode2api-win
             bundles: deb,appimage
             updater_platform: linux-x86_64
             win_dll: false
           - os: macos-latest
             go_bin: opencode2api
-            sb_name: sing-box
-            sb_url: https://github.com/SagerNet/sing-box/releases/download/v1.13.16/sing-box-1.13.16-darwin-arm64.tar.gz
-            sb_archive: targz
+            goos: darwin
+            goarch: arm64
+            engine_bin: opencode2api-win
             bundles: dmg,app
             updater_platform: darwin-aarch64
             win_dll: false
@@ -60,7 +61,10 @@ jobs:
       - name: Setup Go
         uses: actions/setup-go@v5
         with:
-          go-version: '1.22'
+          # 本仓库 go.mod 声明 go 1.22；免费层引擎 opencode2api-win 的 go.mod 声明
+          # go 1.24，且 setup-go 固定版本时不会自动切换工具链 —— 统一用 1.24
+          # （1.24 构建 go 1.22 模块向后兼容，无风险）。
+          go-version: '1.24'
 
       - name: Rust cache
         uses: swatinem/rust-cache@v2
@@ -74,40 +78,54 @@ jobs:
           sudo apt-get install -y libwebkit2gtk-4.1-dev libgtk-3-dev librsvg2-dev libayatana-appindicator3-dev
 
       # 准备内嵌二进制：embed.rs 用 include_bytes! 把 bin/ 下二进制编译进主程序，
-      # 但 bin/ 被 .gitignore 忽略，故 CI 需自行生成/下载到 bin/。
+      # 但 bin/ 被 .gitignore 忽略，故 CI 需自行生成到 bin/。
+      # v2.0.0 起 bin/ 只有两份：① 本仓库 Go 核心（管理面 40000）
+      #                 ② 免费层引擎 opencode2api-win（40080，外部 GPL 程序）
       - name: Build opencode2api (from Go source)
         shell: bash
         run: |
           mkdir -p bin
           go build -trimpath -ldflags "-s -w -X main.version=${GITHUB_REF_NAME}" -o bin/${{ matrix.go_bin }} .
+          ls -lh bin/
 
-      - name: Download sing-box (1.13.16, ${{ matrix.os }})
+      # 免费层引擎（40080）：上游 opencode2api-win（GPL-3.0，
+      # https://github.com/wbi35772/opencode2api-win）没有可下载的 release 资产，
+      # 因此在 CI 内按**固定提交**从源码交叉构建（ENGINE_COMMIT，与
+      # third_party/opencode2api-win/SOURCE.txt 保持一致）。
+      # 运行期由管理器以独立子进程 + HTTP 使用（mere aggregation：不链接其代码），
+      # 产物名与 embed.rs / Go 侧 platform_name("opencode2api-win") 对齐。
+      - name: Build free-tier engine (opencode2api-win)
+        shell: bash
+        env:
+          ENGINE_COMMIT: 9964407
+        run: |
+          set -euo pipefail
+          rm -rf engine-src
+          git clone --no-checkout https://github.com/wbi35772/opencode2api-win.git engine-src
+          git -C engine-src checkout "$ENGINE_COMMIT"
+          mkdir -p bin
+          ( cd engine-src && CGO_ENABLED=0 GOOS=${{ matrix.goos }} GOARCH=${{ matrix.goarch }} \
+              go build -trimpath -ldflags "-s -w" -o ../bin/${{ matrix.engine_bin }} ./cmd/opencode2api )
+          # Windows 下 chmod 无意义，失败忽略；非 Windows 必须有执行位（spawn 会 Permission denied）
+          chmod +x "bin/${{ matrix.engine_bin }}" || true
+          ls -lh bin/
+
+      # GPL-3.0 义务：随引擎二进制分发「与本次构建完全一致」的源码 + 提交号
+      # （LICENSE / SOURCE.txt / README.md 已在仓库 third_party/ 里入库）。
+      # git archive 从 engine-src 导出 tar.gz；COMMIT.txt 写完整 sha 供核对。
+      - name: Package GPL source (opencode2api-win)
         shell: bash
         run: |
-          mkdir -p bin sbx
-          # GitHub release 偶发网络抖动（curl 52 Empty reply）：直连重试 4 次，失败切镜像兜底
-          dl() {
-            local url="$1" out="$2"
-            for base in "" "https://gh-proxy.com/" "https://ghfast.top/"; do
-              local u="${base}${url}"
-              echo "== trying: $u"
-              if curl -fsSL --retry 4 --retry-all-errors --retry-delay 3 -o "$out" "$u"; then
-                return 0
-              fi
-            done
-            return 1
-          }
-          if [ "${{ matrix.sb_archive }}" = "zip" ]; then
-            dl "${{ matrix.sb_url }}" sb.zip
-            unzip -o sb.zip -d sbx
-            find sbx -name sing-box.exe -exec cp {} bin/sing-box.exe \;
-          else
-            dl "${{ matrix.sb_url }}" sb.tgz
-            tar -xzf sb.tgz -C sbx
-            find sbx -name sing-box -type f -exec cp {} bin/sing-box \;
-            chmod +x bin/sing-box
-          fi
-          ls -lh bin/
+          set -euo pipefail
+          mkdir -p third_party/opencode2api-win
+          sha="$(git -C engine-src rev-parse HEAD)"
+          echo "engine commit: $sha"
+          # 在 engine-src 内执行 archive：-o 的相对路径按当前工作目录解析，
+          # ../third_party = 仓库根的 third_party/（不能用 ../../，会跑到仓库外）
+          ( cd engine-src && git archive --format=tar.gz -o ../third_party/opencode2api-win/opencode2api-win-source.tar.gz HEAD )
+          printf '%s\n' "$sha" > third_party/opencode2api-win/COMMIT.txt
+          echo "$sha" >> "$GITHUB_STEP_SUMMARY"
+          ls -lh third_party/opencode2api-win/
 
       # tauri.conf 的 resources 引用 WebView2Loader.dll 仅 Windows 需要；
       # Windows 用仓库内 src-tauri/WebView2Loader.dll（已验证版本），非 Windows 放占位文件
@@ -129,16 +147,8 @@ jobs:
         shell: bash
         run: npm install
 
-      - name: Build free-tier Bun sidecar
-        shell: bash
-        run: |
-          if [ "${{ runner.os }}" = "Windows" ]; then
-            powershell -ExecutionPolicy Bypass -File scripts/build-free-sidecar.ps1
-          else
-            # 脚本自带固定 Bun 1.4.4 下载（与 Windows 一致），不再依赖 bun.sh/install
-            bash scripts/build-free-sidecar.sh
-          fi
-          ls -lh bin/
+      # v2.0.0：不再有 Bun sidecar / sing-box —— 免费层由外部引擎进程（40080）承担，
+      # 已在上面 "Build free-tier engine" 步骤产出并内嵌。
 
       - name: Tauri build (bundles ${{ matrix.bundles }})
         shell: bash
@@ -215,6 +225,12 @@ jobs:
             src-tauri/target/release/bundle/dmg/*.dmg
             src-tauri/target/release/bundle/macos/*.app.tar.gz
             src-tauri/target/release/bundle/macos/*.sig
+            # GPL-3.0 分发件：引擎许可证/来源声明 + 与本次构建一致的源码包
+            third_party/opencode2api-win/LICENSE
+            third_party/opencode2api-win/SOURCE.txt
+            third_party/opencode2api-win/README.md
+            third_party/opencode2api-win/COMMIT.txt
+            third_party/opencode2api-win/opencode2api-win-source.tar.gz
 
   # GitHub Release：仅 tag（v*）触发时执行——汇总三平台产物并发布（首次新建，幂等）。
   release:
@@ -347,6 +363,29 @@ jobs:
           body_path: RELEASE_BODY.md
           name: opencode2api ${{ github.ref_name }}
           fail_on_unmatched_files: false
+
+      # GPL-3.0：把引擎许可证 + 来源声明 + 与本次构建一致的源码包打成**一个**附件
+      # 挂到版本 Release（三平台源码同一固定提交，故只取任一份，避免同名资产冲突）。
+      - name: Attach GPL engine source bundle to release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          src="$(find release -type f -name 'opencode2api-win-source.tar.gz' -print -quit)"
+          [ -n "$src" ] || { echo "未找到引擎源码包（检查 build job 的 third_party 上传路径）"; exit 1; }
+          dir="$(dirname "$src")"
+          for f in LICENSE SOURCE.txt README.md COMMIT.txt; do
+            [ -f "$dir/$f" ] || { echo "缺少 GPL 分发件：$dir/$f"; exit 1; }
+          done
+          # 附件名带版本号，便于核对；内容 = 许可证 + 声明 + 提交号 + 完整源码
+          out="opencode2api-win-gpl-${GITHUB_REF_NAME}"
+          rm -rf "$out"; mkdir -p "$out"
+          cp "$dir"/LICENSE "$dir"/SOURCE.txt "$dir"/README.md "$dir"/COMMIT.txt "$out/"
+          cp "$src" "$out/opencode2api-win-source.tar.gz"
+          tar -czf "opencode2api-win-gpl-${GITHUB_REF_NAME}.tar.gz" "$out"
+          rm -rf "$out"
+          gh release upload "${GITHUB_REF_NAME}" "opencode2api-win-gpl-${GITHUB_REF_NAME}.tar.gz" --clobber
 
       # 应用内更新的固定端点：rolling release updater-latest 上的 latest.json。
       # 不用 /releases/latest（会排除预发布、且按创建时间而非版本号排序）。

@@ -1,0 +1,58 @@
+opencode2api-win —— 免费层引擎（40080）来源与许可证声明
+============================================================
+
+本目录内容随发行包一起分发，用于满足 GPL-3.0 对「随二进制提供源码/书面要约」
+的要求。本目录中的 LICENSE 是引擎上游项目的许可证原文（逐字节复制，未修改）。
+
+1) 组件
+   - 名称        : opencode2api-win（OpenCode 免费层网关 / WARP 出口引擎）
+   - 在本文的用途: 40080 端口的独立进程，即「免费层引擎」
+   - 许可证      : GNU General Public License version 3（GPL-3.0-only），
+                   见本目录 LICENSE
+
+2) 上游仓库
+   https://github.com/wbi35772/opencode2api-win
+
+3) 对应上游提交（我们内嵌/分发的二进制即由该提交构建）
+   commit  : 99644074e00ead27bdbb931a59c9c0e5dac1a245
+   短提交  : 9964407
+   提交说明: baseline: opencode2api Windows/WARP gateway
+             (v1.4.6 + session-affinity 429 fix)
+
+4) 构建命令（CI 与本仓库脚本 scripts/fetch-free-tier-engine.ps1 一致）
+   CGO_ENABLED=0 GOOS=<os> GOARCH=<arch> \
+     go build -trimpath -ldflags "-s -w" -o opencode2api-win ./cmd/opencode2api
+
+   Windows 本地产物：bin/opencode2api-win.exe
+   Linux/macOS     ：bin/opencode2api-win
+
+5) 与本项目（opencode2api_enhance，管理面板）的关系 —— mere aggregation
+   - 引擎是**独立可执行程序**，由管理器以子进程方式启动（参数
+     `-config <runtime/free-tier/config.json>`），二者只通过 127.0.0.1 上的
+     HTTP/OpenAI 兼容接口通信。
+   - 本项目**不链接、不内联、不派生**引擎源码：没有把引擎代码编进管理器
+     二进制，也没有修改其源码后重新发布（仅按固定提交原样构建）。
+   - 因此在 GPL-3.0 下这属于「聚合分发（mere aggregation）」/「使用一个
+     独立程序」，管理面板自身的许可证不受 GPL 传染；相应地我们必须分发
+     本目录（LICENSE + 本声明 + 上游源码包）。
+   - 运行数据全部落在管理器数据目录下的引擎专属工作目录：
+     %APPDATA%/opencode2api-manager/runtime/free-tier/
+     （引擎在该目录读写 config.json 及 models.catalog / rotation /
+       availability 等状态文件）
+
+6) 获取完整对应源码
+   - 上游仓库按上述提交可见：
+     https://github.com/wbi35772/opencode2api-win/tree/9964407
+   - CI（GitHub Actions: .github/workflows/build-release.yml）在每次发行
+     构建时用 `git archive` 导出「与本次二进制完全一致」的源码包，并一并
+     上传：文件名 opencode2api-win-source.tar.gz，同目录 COMMIT.txt 记录
+     完整 sha。
+
+7) 书面要约（等效履行 GPL-3.0 §6）
+   自本发行版本发布之日起三年内，可凭版本号索取上述提交对应的机器可读
+   完整源码；索取渠道见上游仓库 Issues。
+
+8) 免责声明
+   引擎按 GPL-3.0「按现状」提供，不附任何明示或暗示保证。上游项目的
+   README.md 与 doc/ 目录包含其自身的行为说明与安全注意（WARP、TLS 指纹
+   伪装等），由使用者自行承担使用责任。

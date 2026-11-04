@@ -13,19 +13,23 @@
 # Prerequisites:
 #   - go on PATH          (builds the core)
 #   - cargo + MSVC        (builds the shell; script bootstraps MSVC env itself)
-#   - bin\sing-box.exe    (checked into CI, NOT in git; fetch one first --
-#                          scripts\fetch-singbox.ps1, or the .zip from the
-#                          sing-box release page for windows-amd64)
+#   - bin\opencode2api-win.exe   (free-tier engine, GPL-3.0 external binary, NOT
+#                          in git. Auto-fetched by scripts\fetch-free-tier-engine.ps1
+#                          when missing -- needs git + go >= 1.24 and network)
+#   - third_party\opencode2api-win\  (LICENSE / SOURCE.txt / README.md -- GPL
+#                          obligation: shipped next to the engine binary)
 #   - bin\dist\           (run: npm run build)
 #
 # Output layout (portable contract; Go core locates frontend via
 # os.Executable() -> exe-adjacent bin\dist):
 #   <OutDir>/
-#   |-- opencode2api.exe     # Rust shell (embeds core + sing-box; releases bin/ on run)
+#   |-- opencode2api.exe     # Rust shell (embeds core + engine; releases bin/ on run)
 #   |-- WebView2Loader.dll   # required by tauri runtime (NOT auto-copied for bare exe)
 #   |-- portable.txt         # empty marker -> 48200 slot + isolated data dir
-#   `-- bin/
-#       `-- dist/            # latest frontend build (served by core)
+#   |-- bin/
+#   |   |-- dist/            # latest frontend build (served by core)
+#   |   `-- opencode2api-win.exe  # released by the shell on first run
+#   `-- third_party/opencode2api-win/   # GPL-3.0 license + source notice
 #
 # Isolation guarantees:
 #   - admin:  http://127.0.0.1:48200   (gateway 48280 / instances 48300+)
@@ -245,17 +249,29 @@ if (-not $SkipCoreBuild) {
     Write-Host "[1/4] skip Go core build (reuse bin\opencode2api.exe)"
 }
 if (-not (Test-Path bin\opencode2api.exe)) { throw "bin\opencode2api.exe missing" }
-if (-not (Test-Path bin\sing-box.exe))     { throw "bin\sing-box.exe missing (place sing-box prebuilt)" }
 
-# ---- 1b. Build free-tier Bun sidecar (embedded by Rust shell) ----
-# OpenCode 免费层校验客户端 TLS 指纹；没有 sidecar 时免费层会回退旧路径并 429。
-Write-Host "[1b/4] building free-tier Bun sidecar ..."
-& (Join-Path $Root "scripts\build-free-sidecar.ps1")
-if (-not (Test-Path (Join-Path $Root "bin\free-sidecar.exe"))) {
-    throw "bin\free-sidecar.exe missing (free-tier sidecar build failed)"
+# ---- 1b. Ensure free-tier engine (40080) binary exists ----
+# bin\opencode2api-win.exe is the GPL-3.0 external engine (github.com/wbi35772/
+# opencode2api-win, pinned commit -- see third_party\opencode2api-win\SOURCE.txt).
+# bin/ is gitignored, so a fresh clone has no engine: fetch/build it first. The
+# Rust shell embeds whatever it finds in bin\ at compile time (build.rs cfg
+# embed_free_tier_engine) and releases it next to the portable exe on first run.
+$engineBin = Join-Path $Root "bin\opencode2api-win.exe"
+if (-not (Test-Path $engineBin)) {
+    Write-Host "[1b/4] bin\opencode2api-win.exe missing -> running scripts\fetch-free-tier-engine.ps1 ..."
+    $fetch = Join-Path $Root "scripts\fetch-free-tier-engine.ps1"
+    if (-not (Test-Path $fetch)) {
+        throw "bin\opencode2api-win.exe missing AND $fetch not found. Place a prebuilt engine into bin\ or restore the fetch script."
+    }
+    & $fetch
+    if (-not (Test-Path $engineBin)) {
+        throw "bin\opencode2api-win.exe still missing after fetch-free-tier-engine.ps1 (need git + go >= 1.24 + network; or place a prebuilt engine into bin\)"
+    }
+} else {
+    Write-Host "[1b/4] free-tier engine ok: bin\opencode2api-win.exe"
 }
 
-# ---- 2. Build Rust shell (release; embeds latest core + sing-box) ----
+# ---- 2. Build Rust shell (release; embeds latest core + free-tier engine) ----
 if (-not $SkipRustBuild) {
     Write-Host "[2/4] building Rust shell (cargo release) ..."
 
@@ -285,15 +301,16 @@ if (-not (Test-Path $releaseExe)) { throw "release exe missing: $releaseExe" }
 # ---- 3. Assemble portable folder ----
 Write-Host "[3/4] assembling portable folder ..."
 if (Test-Path $OutDir) {
-    # Running the packaged exe once releases bin\opencode2api.exe + bin\sing-box.exe
-    # next to it (ensure_binaries). Those can be locked by a still-running process,
-    # and Remove-Item only WARNS on failure -- the stale files then survive into the
-    # new package. Clear it explicitly and fail loudly if anything is still locked.
+    # Running the packaged exe once releases bin\opencode2api.exe +
+    # bin\opencode2api-win.exe next to it (ensure_binaries). Those can be locked
+    # by a still-running process (manager / engine), and Remove-Item only WARNS
+    # on failure -- the stale files then survive into the new package. Clear it
+    # explicitly and fail loudly if anything is still locked.
     try {
         Remove-Item -Recurse -Force $OutDir -ErrorAction Stop
     } catch {
-        $locked = Get-Process -Name "opencode2api" -ErrorAction SilentlyContinue
-        $hint = if ($locked) { " (stop running opencode2api.exe first, PID: " + (($locked | ForEach-Object { $_.Id }) -join ', ') + ")" } else { "" }
+        $locked = Get-Process -Name "opencode2api", "opencode2api-win" -ErrorAction SilentlyContinue
+        $hint = if ($locked) { " (stop running opencode2api.exe / opencode2api-win.exe first, PID: " + (($locked | ForEach-Object { $_.Id }) -join ', ') + ")" } else { "" }
         throw ("cannot clear output dir $OutDir" + $hint + ": " + $_.Exception.Message)
     }
     if (Test-Path $OutDir) { throw "output dir still present after cleanup: $OutDir" }
@@ -319,13 +336,33 @@ if (Test-Path (Join-Path $Root "dist\index.html")) {
     throw "dist\index.html missing (run: npm run build)"
 }
 
+# ---- 3b. Ship the GPL-3.0 notice next to the embedded engine ----
+# bin\opencode2api-win.exe is embedded into the shell and released into bin/ at
+# first run. Under GPL-3.0 (mere aggregation) the distributed package MUST carry
+# the license + source notice, so third_party\opencode2api-win\ is copied to the
+# output ROOT (not into bin/). Missing dir = packaging is non-compliant -> fail.
+$gplSrc = Join-Path $Root "third_party\opencode2api-win"
+foreach ($f in @("LICENSE", "SOURCE.txt", "README.md")) {
+    if (-not (Test-Path (Join-Path $gplSrc $f))) {
+        throw "GPL notice missing: third_party\opencode2api-win\$f (engine is GPL-3.0; cannot ship the package without it)"
+    }
+}
+$gplDst = Join-Path $OutDir "third_party\opencode2api-win"
+New-Item -ItemType Directory -Force -Path $gplDst | Out-Null
+foreach ($f in @("LICENSE", "SOURCE.txt", "README.md")) {
+    Copy-Item (Join-Path $gplSrc $f) (Join-Path $gplDst $f) -Force
+}
+
 # ---- 4. Verify ----
 Write-Host "[4/4] verifying ..."
 $checks = @(
     "opencode2api.exe",
     "WebView2Loader.dll",
     "portable.txt",
-    "bin\dist\index.html"
+    "bin\dist\index.html",
+    "third_party\opencode2api-win\LICENSE",
+    "third_party\opencode2api-win\SOURCE.txt",
+    "third_party\opencode2api-win\README.md"
 )
 foreach ($c in $checks) {
     if (-not (Test-Path (Join-Path $OutDir $c))) { throw "verification FAILED: $c" }
@@ -335,7 +372,9 @@ Write-Host ""
 Write-Host "== PORTABLE PACK READY =="
 Write-Host "  dir     : $OutDir"
 Write-Host "  admin   : http://127.0.0.1:48200"
-Write-Host "  gateway : http://127.0.0.1:48280/v1 (starts when pool has running members)"
-Write-Host "  data    : $env:APPDATA\opencode2api-manager-test (isolated)"
+Write-Host "  engine  : http://127.0.0.1:48280/v1 (free-tier 40080 slot for portable build; starts when the shell releases bin\opencode2api-win.exe)"
+Write-Host "  providers: http://127.0.0.1:50080/v1 (vendor service, custom + plugin providers)"
+Write-Host "  gpl     : third_party\opencode2api-win\ (engine license + SOURCE.txt)"
+Write-Host "  data    : $env:APPDATA\opencode2api-manager-test (isolated; engine dir = ...\runtime\free-tier)"
 Write-Host "  start   : double-click $OutDir\opencode2api.exe"
 Write-Host "  remove  : delete $OutDir (and data dir above if desired)"
