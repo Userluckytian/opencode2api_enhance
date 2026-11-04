@@ -296,7 +296,20 @@ func (m *Manager) StartFreeTierEngine(runner Runner) error {
 		return err
 	}
 	e.pid = pid
-	if err := waitForPort(port, 20*time.Second); err != nil {
+	// WARP 开启时引擎会先完成首次出口注册再监听端口（上游最长 90s），
+	// 因此等待窗口要覆盖这段：否则会误判「启动超时」并把状态打成 failed。
+	waitTimeout := 20 * time.Second
+	if engineWarpEnabled(m.loadConfig()) {
+		waitTimeout = 95 * time.Second
+	}
+	if err := waitForPort(port, waitTimeout); err != nil {
+		// 仍在启动（WARP 注册未完成）：保持 starting，让面板/看门狗继续观察，
+		// 不返回错误——引擎稍后会自行监听。
+		if engineWarpEnabled(m.loadConfig()) {
+			e.state = "starting"
+			e.lastErr = "等待 WARP 首次出口注册"
+			return nil
+		}
 		e.state = "failed"
 		e.lastErr = "引擎启动超时: " + err.Error()
 		return err

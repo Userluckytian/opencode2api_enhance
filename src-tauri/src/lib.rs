@@ -1,37 +1,25 @@
-pub mod call_log;
-pub mod clash_yaml;
 pub mod commands;
 pub mod config;
 pub mod embed;
-pub mod gateway;
-pub mod instance;
 pub mod job;
-pub mod opencode_cfg;
-pub mod probe;
-pub mod singbox;
 
-use std::sync::{Arc, Mutex};
+use std::sync::Mutex;
 use tauri::Manager;
 
-/// 全局共享状态（与 Windsurf Account Manager 的 AppState 模式一致）
+/// 全局共享状态：桌面壳只保留「core 子进程 + 其 Job Object」两项生命周期资源
+/// （v2.0.0 起其余壳内模块全部删除，业务职责在 Go core）。
 pub struct AppState {
-    pub manager: Arc<Mutex<instance::InstanceManager>>,
-    pub scan: Arc<probe::ScanController>,
-    pub gateway: Arc<Mutex<gateway::GatewayManager>>,
-    /// Go core 管理器子进程（大步3：管理职责已移交 HTTP，壳负责拉起/随退出终止）
+    /// Go core 管理器子进程（管理职责已移交 HTTP，壳负责拉起/随退出终止）
     pub core_child: Mutex<Option<std::process::Child>>,
     /// core 所在 Job Object：壳退出（含强杀）时自动终止 core 及其全部子进程，
     /// 杜绝孤儿进程 / 端口残留。Drop 时关闭句柄触发 KILL_ON_JOB_CLOSE。
     pub core_job: Mutex<Option<job::JobObject>>,
 }
 
-
-/// 桌面入口：释放内嵌二进制 → 构建 AppState → 启动 Tauri（托盘常驻）
+/// 桌面入口：释放内嵌二进制 → 拉起 core → 启动 Tauri（托盘常驻）
 ///
-/// 端口规划（2026-08-10 决策）：每个环境固定一段「槽位」，从 40000 向上、每槽 4100 宽；
-/// sing-box 出口 = 实例 API + 2000（紧挨，不再 +10000 错开）。槽内布局：
-///   base 管理器、+80 网关、+90 探针 API、+100~+2099 实例段（2000 个）、
-///   +2090 探针 SOCKS（= 探针 API + 2000）、+2100~+4099 sing-box 段。
+/// 端口规划：每个环境固定一段「槽位」，从 40000 向上、每槽 4100 宽。槽内布局：
+///   base 管理器（Go core）、+80 免费层引擎、+180 提供方服务（provider）。
 /// - 槽 0（40000）正式 release；槽 1（44100）dev（tauri dev）；槽 2（48200）便携测试包；
 ///   - 槽 3（52300）web-dev / headless（由 Go core 直跑，桌面壳不使用）
 #[derive(Clone, Copy, PartialEq)]
@@ -53,11 +41,10 @@ fn slot_base(kind: EnvKind) -> u16 {
     }
 }
 
-// 槽内偏移（与 Go core core/manager/batch.go singboxPortOffset=2000 对齐）。
+// 槽内偏移：+80 免费层引擎（env 名沿用 OPCODE2API_GATEWAY_PORT，与 Go core 契约一致）；
+// +180 提供方服务（仅非 Release 环境注入，Release 用 Go 默认 50080）。
 const OFF_GATEWAY: u16 = 80;
-const OFF_PROBE_API: u16 = 90;
-const OFF_INSTANCE_BASE: u16 = 100;
-const OFF_PROBE_SOCKS: u16 = 2090;
+const OFF_PROVIDER: u16 = 180;
 
 /// core 管理器实际端口：优先环境变量 OPCODE2API_MANAGER_PORT（手动覆盖），
 /// 否则槽位基址 + 避让扫描（槽内前 32 个端口在控制区，通常立即可用）。
@@ -71,7 +58,7 @@ fn manager_port(kind: EnvKind) -> u16 {
 }
 
 /// 从 start 起扫描 budget 个端口，返回第一个当前空闲（无监听）的端口。
-/// 用于彻底避开正式环境的实例/sing-box 端口（如 28100 可能是正式实例的 sing-box）。
+/// 用于避开同机其它环境已占用的管理器端口。
 fn pick_free_port(start: u16, budget: u16) -> u16 {
     use std::time::Duration;
     for p in start..start.saturating_add(budget) {
@@ -130,7 +117,7 @@ pub fn run() {
         .collect();
 
     // 调试构建默认隔离数据目录：与正式版（%APPDATA%\opencode2api-manager）
-    // 分开，避免实例池/配置/runtime 互相干扰。可用 OPCODE2API_DATA_DIR 显式覆盖。
+    // 分开，避免配置/runtime 互相干扰。可用 OPCODE2API_DATA_DIR 显式覆盖。
     // 注意：环境变量存在但为空串时视为未设置（否则会静默回落共享生产目录）。
     if cfg!(debug_assertions) {
         let unset_or_empty = match std::env::var_os("OPCODE2API_DATA_DIR") {
@@ -166,12 +153,12 @@ pub fn run() {
         Err(e) => eprintln!("警告: 释放内置组件失败: {}", e),
     }
 
-    let (instances_path, binary_dir, runtime_dir) = commands::manager_paths();
+    let (instances_path, binary_dir, _) = commands::manager_paths();
     let mut data_dir = instances_path
         .parent()
         .map(|p| p.to_path_buf())
         .unwrap_or_default();
-    // 便携测试包隔离：exe 旁存在 portable.txt → 用独立数据目录，避免与正式版共用实例/配置。
+    // 便携测试包隔离：exe 旁存在 portable.txt → 用独立数据目录，避免与正式版共用配置。
     let is_portable = binary_dir
         .parent()
         .map(|p| p.join("portable.txt").exists())
@@ -188,21 +175,8 @@ pub fn run() {
         data_dir = base.join("opencode2api-manager-test");
         // 端口由槽位表（EnvKind::Portable → 48200 段）处理，见 spawn_core_manager。
     }
-    let manager = instance::InstanceManager::new(
-        instances_path,
-        binary_dir.clone(),
-        runtime_dir.clone(),
-    );
-    // v2.0.0: 实例池已移除，壳不再读写 instances.json（manager 仅保留历史命令签名兼容）。
 
-    let manager = Arc::new(Mutex::new(manager));
-    let gateway_manager = Arc::new(Mutex::new(gateway::GatewayManager::new(
-        binary_dir,
-        runtime_dir,
-    )));
-
-    // 大步3：管理职责移交 Go core（HTTP /api/admin/*）。壳只负责：
-    // 释放内嵌二进制 → 以管理器方式拉起 core → 窗口承载 core 的 SPA。
+    // 壳只负责：释放内嵌二进制 → 以管理器方式拉起 core → 窗口承载 core 的 SPA。
     unsafe {
         std::env::set_var("OPCODE2API_DATA_DIR", &data_dir);
     }
@@ -211,17 +185,18 @@ pub fn run() {
     // 透传参数里的 -port 会覆盖默认槽位端口（Go flag 后者覆盖前者），
     // core 实际监听值 = 覆盖值（若有）否则 mgr_port——健康检查与地址打印都须与之对齐。
     let effective_port = override_port(&core_extra).unwrap_or(mgr_port);
-    let (core_child, core_job) = match spawn_core_manager(&data_dir, effective_port, env_kind, &core_extra) {
-        Ok((child, job)) => (Some(child), job),
-        Err(e) => {
-            eprintln!("启动 core 管理器失败: {e}");
-            (None, None)
-        }
-    };
+    let (core_child, core_job) =
+        match spawn_core_manager(&data_dir, effective_port, env_kind, &core_extra) {
+            Ok((child, job)) => (Some(child), job),
+            Err(e) => {
+                eprintln!("启动 core 管理器失败: {e}");
+                (None, None)
+            }
+        };
 
-    // headless：不构建 Tauri 窗口，直接阻塞等待 core（退出时清理网关/实例）
+    // headless：不构建 Tauri 窗口，直接阻塞等待 core
     if headless {
-        run_headless(effective_port, core_child, core_job, manager, gateway_manager);
+        run_headless(effective_port, core_child, core_job);
         return;
     }
 
@@ -230,20 +205,17 @@ pub fn run() {
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init())
         .manage(AppState {
-            manager,
-            scan: Arc::new(probe::ScanController::new()),
-            gateway: gateway_manager,
             core_child: Mutex::new(core_child),
             core_job: Mutex::new(core_job),
         })
         .invoke_handler(tauri::generate_handler![
-            // 大步3：仅保留壳命令（窗口/托盘/二进制）；自启由 Go core 承载（HTTP /autostart，跨平台），管理命令已被 HTTP 取代
+            // 仅保留壳命令（二进制信息 / 窗口 / 托盘）；其余管理功能均由 Go core HTTP 承载
             commands::get_binaries_info,
             commands::hide_to_tray,
             commands::toggle_maximize,
             commands::quit_app
         ])
-.setup(move |app| {
+        .setup(move |app| {
             use tauri::Manager;
 
             // Linux/安装版：资源 dist 位于只读资源目录（deb: /usr/lib/opencode2api/bin/dist），
@@ -265,7 +237,7 @@ pub fn run() {
                 tauri::menu::MenuItem::with_id(app, "quit", "退出", true, None::<&str>)?;
             let menu = tauri::menu::Menu::with_items(app, &[&show_i, &quit_i])?;
 
-// 图标：取 built-in 窗口图标（由 tauri.conf bundle.icon 提供，打包后必有）
+            // 图标：取 built-in 窗口图标（由 tauri.conf bundle.icon 提供，打包后必有）
             let tray_icon = app.default_window_icon().cloned();
 
             let mut tray = tauri::tray::TrayIconBuilder::with_id("main-tray")
@@ -285,7 +257,7 @@ pub fn run() {
                     }
                 }
                 "quit" => {
-                    // 先停 core 管理器（连带其网关/实例），再退出（ExitRequested 也会兜底清理）
+                    // 只终止 core 子进程（Job Object 连带其全部子孙），再退出
                     if let Some(state) = app.try_state::<AppState>() {
                         if let Ok(mut ch) = state.core_child.lock() {
                             if let Some(mut c) = ch.take() {
@@ -301,7 +273,7 @@ pub fn run() {
             .on_tray_icon_event(|tray, event| {
                 // 左键单击显示窗口；右键由系统自动弹菜单（无需手动处理）
                 if let tauri::tray::TrayIconEvent::Click {
-button: tauri::tray::MouseButton::Left,
+                    button: tauri::tray::MouseButton::Left,
                     ..
                 } = event
                 {
@@ -323,7 +295,7 @@ button: tauri::tray::MouseButton::Left,
             Ok(())
         })
         .on_window_event(|window, event| {
-            // 关闭窗口 = 最小化到托盘（实例继续运行）
+            // 关闭窗口 = 最小化到托盘（core 继续运行）
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
                 api.prevent_close();
                 let _ = window.hide();
@@ -332,17 +304,15 @@ button: tauri::tray::MouseButton::Left,
         .build(tauri::generate_context!("tauri.conf.json"))
         .expect("桌面构建失败")
         .run(|app, event| {
-            // 应用退出（托盘"退出"/quit）时停止全部运行中的实例 + 统一网关，
-            // 确保网关进程和实例进程不残留后台（网关端口、实例端口全部释放）
+            // 应用退出（托盘"退出"/quit_app）时终止 core 子进程，
+            // 端口随之释放；Job Object 兜底清理其全部子孙进程。
             if let tauri::RunEvent::ExitRequested { .. } = event {
                 if let Some(state) = app.try_state::<AppState>() {
-                    // 先停 core 管理器，再停网关、实例（端口全部释放）
                     if let Ok(mut ch) = state.core_child.lock() {
                         if let Some(mut c) = ch.take() {
                             let _ = c.kill();
                         }
                     }
-                    // v2.0.0: 同上，退出只杀 core 子进程。
                 }
             }
         });
@@ -388,13 +358,11 @@ fn copy_tree(src: &std::path::Path, dst: &std::path::Path) -> std::io::Result<()
 }
 
 /// headless 模式主循环：无 GUI（SSH/服务器场景），释放组件 → 拉起 core →
-/// 复制前端资源（如需）→ 打印管理地址 → 阻塞等待 core 退出 → 清理网关/实例。
+/// 复制前端资源（如需）→ 打印管理地址 → 阻塞等待 core 退出。
 fn run_headless(
     mgr_port: u16,
     core_child: Option<std::process::Child>,
     core_job: Option<job::JobObject>,
-    manager: Arc<Mutex<instance::InstanceManager>>,
-    gateway: Arc<Mutex<gateway::GatewayManager>>,
 ) {
     // Linux/安装版：资源 dist 位于只读资源目录（deb: /usr/lib/opencode2api/bin/dist），
     // binary_dir 回退到配置目录时把 dist 复制过去，保证浏览器访问 core WebUI 可用。
@@ -441,33 +409,12 @@ fn run_headless(
     let _ = child.wait();
     drop(core_job);
 
-    // 清理：网关 + 运行中实例（对齐 GUI 退出行为，端口全部释放）
-    if let Ok(mut g) = gateway.lock() {
-        g.stop();
-    }
-    if let Ok(mut mgr) = manager.lock() {
-        let _ = mgr.load();
-        let names: Vec<String> = mgr
-            .list_instances()
-            .iter()
-            .filter(|i| {
-                i.pid.is_some()
-                    || i.singbox_pid.is_some()
-                    || i.status == instance::InstanceStatus::Running
-                    || i.status == instance::InstanceStatus::Starting
-            })
-            .map(|i| i.name.clone())
-            .collect();
-        for n in names {
-            let _ = mgr.stop_instance(&n);
-        }
-    }
-    println!("[headless] core 已退出，清理完成");
+    println!("[headless] core 已退出");
 }
 
 /// 拉起 Go core 管理器（bin/opencode2api -port <port> ...），等待 /health 就绪。
-/// 数据目录经 OPCODE2API_DATA_DIR 注入（setup 已设置）。
-/// 网关/实例/探针端口按环境槽位注入 env（用户显式 OPCODE2API_*_PORT 优先）。
+/// 数据目录经 OPCODE2API_DATA_DIR 注入（run() 已设置）。
+/// 引擎/提供方端口按环境槽位注入 env（用户显式 OPCODE2API_*_PORT 优先）。
 /// extra_args：追加到 core 命令行末尾（--headless 透传；Go flag 重复参数后者覆盖）。
 fn spawn_core_manager(
     data_dir: &std::path::Path,
@@ -480,7 +427,7 @@ fn spawn_core_manager(
     use std::time::Duration;
 
     let (_, binary_dir, _) = commands::manager_paths();
-    let exe = instance::resolve_platform_bin(&binary_dir, "opencode2api");
+    let exe = commands::resolve_platform_bin(&binary_dir, "opencode2api");
     if !exe.exists() {
         return Err(std::io::Error::new(
             std::io::ErrorKind::NotFound,
@@ -488,8 +435,8 @@ fn spawn_core_manager(
         ));
     }
     let cfg_path = data_dir.join("config.json");
-    // 网关/实例/探针端口按环境槽位注入（槽位表：base+偏移）；用户显式环境变量优先。
-    // 统一网关端口额外支持 config.gateway_port：config 设置了有效端口时**不注入 env**，
+    // 端口按环境槽位注入（槽位表：base+偏移）；用户显式环境变量优先。
+    // 引擎端口额外支持 config.gateway_port：config 设置了有效端口时**不注入 env**，
     // 让 core 直接读 config（两者读同一 config.json）——若把 config 值固化进 env，
     // 用户之后在 WebUI 重置端口时 core 的 managerGatewayPort 会命中残留 env 旧值，
     // 恢复不到默认槽位（env > config > 默认）。仅 env 未设且 config 未设置时才注入槽位。
@@ -506,37 +453,23 @@ fn spawn_core_manager(
             }
         }
     }
-    if std::env::var_os("OPCODE2API_INSTANCE_BASE_PORT").is_none() {
+    // 提供方服务端口：仅非 Release 环境注入槽位值（Dev 44280 / Portable 48380），
+    // Release 保持 Go 默认 50080。
+    if env_kind != EnvKind::Release && std::env::var_os("OPCODE2API_PROVIDER_PORT").is_none() {
         unsafe {
-            std::env::set_var("OPCODE2API_INSTANCE_BASE_PORT", slot(OFF_INSTANCE_BASE));
-        }
-    }
-    if std::env::var_os("OPCODE2API_PROBE_API_PORT").is_none() {
-        unsafe {
-            std::env::set_var("OPCODE2API_PROBE_API_PORT", slot(OFF_PROBE_API));
-        }
-    }
-    if std::env::var_os("OPCODE2API_PROBE_SOCKS_PORT").is_none() {
-        unsafe {
-            std::env::set_var("OPCODE2API_PROBE_SOCKS_PORT", slot(OFF_PROBE_SOCKS));
+            std::env::set_var("OPCODE2API_PROVIDER_PORT", slot(OFF_PROVIDER));
         }
     }
     let port_str = port.to_string();
     let mut cmd = Command::new(&exe);
-    cmd.args([
-        "-port",
-        &port_str,
-        "-password",
-        "",
-        "-config",
-    ])
-    .arg(&cfg_path)
-    .arg("-log-level")
-    .arg("warn");
+    cmd.args(["-port", &port_str, "-password", "", "-config"])
+        .arg(&cfg_path)
+        .arg("-log-level")
+        .arg("warn");
     if !extra_args.is_empty() {
         cmd.args(extra_args);
     }
-    // 隐藏 core 子进程的控制台窗口（与 instance.rs no_window 一致）
+    // 隐藏 core 子进程的控制台窗口
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
