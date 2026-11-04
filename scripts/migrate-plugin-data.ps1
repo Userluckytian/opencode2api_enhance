@@ -19,7 +19,9 @@
 [CmdletBinding()]
 param(
   [string]$ProvidersRoot = 'D:\Program Files\opencode2api\bin\providers',
-  [switch]$Execute
+  [switch]$Execute,
+  # 仅用于沙箱演练：跳过“插件进程必须停止”检查；真机不要用。
+  [switch]$SkipProcessCheck
 )
 
 $ErrorActionPreference = 'Stop'
@@ -39,7 +41,7 @@ if (-not (Test-Path -LiteralPath $ProvidersRoot)) { Fail "providers 根目录不
 $running = Get-Process -ErrorAction SilentlyContinue | Where-Object {
   $_.ProcessName -in @('lobsterai2api', 'lobsterhub', 'mmxproxy-provider')
 }
-if ($Execute -and $running) {
+if ($Execute -and $running -and -not $SkipProcessCheck) {
   Fail ("请先在宿主面板停用相关插件（检测到进程: {0}）" -f (($running | Select-Object -ExpandProperty ProcessName) -join ', '))
 }
 if (-not $Execute -and $running) {
@@ -81,7 +83,8 @@ if (Test-Path -LiteralPath $lobsterCfg) {
         }
         Copy-Item -LiteralPath $lobsterCfg -Destination "$lobsterCfg.bak-$stamp" -Force
         $cfg.provider_private_configs.auth_dir = 'auths'
-        ($cfg | ConvertTo-Json -Depth 20) | Set-Content -LiteralPath $lobsterCfg -Encoding UTF8
+        # 不能 Set-Content -Encoding UTF8（PS5.1 会写 BOM，Go 的 encoding/json 会拒收）
+        [IO.File]::WriteAllText($lobsterCfg, ($cfg | ConvertTo-Json -Depth 20), (New-Object System.Text.UTF8Encoding($false)))
       }
     }
   } else {

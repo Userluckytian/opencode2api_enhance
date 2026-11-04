@@ -163,18 +163,16 @@ func (m *Manager) SyncCustomProviders(coreConfigPath string, customs []map[strin
 }
 
 // mergeProviderEntries 把 custom 条目合并进既有 providers 列表：
-// 非 custom 原样保留、custom 全量替换；原列表为空且 customs 非空时物化内建条目
-// （显式列表语义下防只写 custom 丢掉 opencode）。
+// 非 custom 原样保留、custom 全量替换。
+//
+// v2.0.0：不再物化内建 opencode 条目——该厂商实现已随免费层一起删除，
+// 注入它只会在装配时刷「unknown vendor type: opencode」并把死条目写进用户配置。
 func mergeProviderEntries(existing, customs []map[string]any) []map[string]any {
 	kept := make([]map[string]any, 0, len(existing)+len(customs))
 	for _, p := range existing {
 		if t, _ := p["type"].(string); t != "custom" {
 			kept = append(kept, p)
 		}
-	}
-	if len(existing) == 0 && len(customs) > 0 {
-		// 内建厂商仅剩 opencode（windsurf 已于 2026-10-13 移除）。
-		kept = append(kept, map[string]any{"id": "opencode", "type": "opencode", "enabled": true})
 	}
 	return append(kept, customs...)
 }

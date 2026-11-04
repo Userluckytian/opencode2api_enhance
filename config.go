@@ -16,6 +16,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/6Kmfi6HP/opencode2api/core/manager"
 )
 
 // 全局热变量（applyConfig 原子写、请求路径原子读）。
@@ -61,19 +63,24 @@ func configStartupRewriteNeeded(path string) bool {
 	return json.Unmarshal(data, &cfg) != nil
 }
 
-// saveConfig 落盘配置（原子替换）。
+// saveConfig 落盘配置（合并写，保留本结构未声明的键）。
 func saveConfig(path string, cfg AppConfig) error {
-	return saveConfigWithWriter(path, cfg, "")
+	return saveConfigWithWriter(path, cfg, "root")
 }
 
-// saveConfigWithWriter 落盘配置并记录写者（writer 便于排障；当前仅占位）。
+// saveConfigWithWriter 落盘配置并标注写者（仅用于排障日志）。
+//
+// 合并写而非整文件覆盖：config.json 是「根 AppConfig + manager.Config」双结构共用的
+// 同一文件（gateway_key / engine_* / 端口等只属于 manager.Config）。整文件覆盖会把
+// 管理面板里配好的引擎参数（WARP、代理、密钥池、端口）全部抹掉。
+// MergeConfigJSON 只替换本结构声明的键，其余原样保留。
 func saveConfigWithWriter(path string, cfg AppConfig, writer string) error {
 	_ = writer
-	data, err := json.MarshalIndent(cfg, "", "  ")
+	merged, err := manager.MergeConfigJSON(path, cfg)
 	if err != nil {
 		return err
 	}
-	return writeFileAtomic(path, data, 0o644)
+	return writeFileAtomic(path, merged, 0o644)
 }
 
 // applyConfig 把配置应用到进程内全局状态（热重载与启动共用）。

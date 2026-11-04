@@ -1,7 +1,8 @@
 # 插件整改阶段计划（2026-11-04）
 
-> 状态：P1 副本验证通过；P2 代码/迁移脚本完成（待上线）；P3~P5 待实施
+> 状态：P1/P3/P4-A~E（事件日志 Grok+QwenWork）、P5 副本通过；P2 待上线；P4-E 其余插件待接
 > 依据：`docs/plugin-audit-2026-11-04.md`、`docs/PLUGIN-CAPABILITIES.md`
+> 上线操作：`docs/ai-framework/plans/2026-11-04-deploy-runbook.md`
 > 实施：`qw2api/qwork-auto`；审查：`mmxproxy/MiniMax-M3.1-Flash`；验收：主代理（命令/证据）
 > 纪律：只改副本/worktree；线上替换等停机窗口；RunBios 不动。
 
@@ -78,6 +79,7 @@
 ### P2-A LobsterAI
 - 默认 `<插件>/auths` 已合规；问题是安装态 `provider.json` 写了绝对路径。
 - 迁移脚本：`scripts/migrate-plugin-data.ps1` 移动凭证 + 改 `auth_dir="auths"`；要求停插件。
+- 脚本硬化（2026-11-04）：支持 `-SkipProcessCheck`（仅沙箱演练）；写 `provider.json` 改为无 BOM UTF-8（Go `encoding/json` 不接受 BOM）。
 
 ### P2-B LobsterHub
 - 代码：`pluginDataDir(configured, dir)`：未配置时 `<插件>/data`；桌面版默认不变。
@@ -115,6 +117,20 @@
 - `Account.Balance` 或 `data/balance-cache.json`；启动回填；同步完成 `loadPool()`。
 - 验收：同步 104 号 → 切页/刷新/重启仍在。
 
+### P3 执行记录（2026-11-04）
+
+| 项 | 结果 |
+|---|---|
+| 副本 | `_plugin-work/phase3/{qw2api,mmxproxy}` |
+| QwenWork | `client.go`：`RawUsage`/`RealModel`/model 事件；`server.go`：`realModel`+`RequestRecord.RealModel`；`aggregate.go` 非流式回填；`index.html` 日志 `→真实模型` + 命中卡 |
+| QwenWork 测试 | 新增 `real_model_test.go`（raw_usage 双层、raw-only、覆盖优先级）；`build/vet/test` 通过 |
+| MiniMax | `Account.Balance` + `load()` 回填 + `balance()` 镜像 + GET balance 落盘 + `balanceLight` 镜像；前端 sync 轮询 status 后 `loadPool()` |
+| MiniMax 测试 | `store_balance_test.go`（load 恢复、save/load 往返）；`build/vet/test -count=1` 通过 |
+| 审查 | MiniMax 指出 QwenWork 优先级反转/非流式/面板缺失；已修（raw-only 覆盖、aggregate 回填、日志/命中卡、单测） |
+| P3-B | `relaySSE` 解析 `error`/`usage`/`finish_reason`，失败显示"上游错误"，meta 显示 finish/token；`relaySSE` 传入 `myIdBefore`，命中卡不再取错记录 |
+| 原始目录 | 未动；线上未动 |
+| 遗留 | 多轮对话仍未做；真实模型需一次真实请求验证 |
+
 ---
 
 ## 8. P4：Grok + 事件日志
@@ -125,6 +141,72 @@
 - P4-D 夜间/Clash：`pool_window_*` 生效；`register_clash_*` 接线或明确未实现。
 - P4-E 事件日志：`data/events.jsonl` + API + 面板；首批 Grok/QwenWork/BuddyHub/MiniMax/LobsterAI/Hub。
 
+### P4-A 执行记录（2026-11-04）
+
+- 副本：`_plugin-work/phase4/grok`
+- `cleanup.go`：`removeCredentialFiles(dir, accounts)` —— 按 email/userID 删 `xai-*.json`；`*.txt` 逐行剔除匹配行（全空删文件）；tmp+rename。
+- `panel.go`：delete 前取账号详情，`BatchDelete` 成功后清文件；响应带 `removedFiles`。
+- 测试：`cleanup_test.go`（email、userID、无匹配 3 例）；`build/vet/test` 通过。
+- 仍待：孤儿文件清理入口、注册后增量导入、`linkedDeleteTargets`、`deletion-preview`（当前先解"删了又回来"主路径）。
+
+### P4-B/C 执行记录（2026-11-04）
+
+- `admin.go` 的 `QuotaInfo` 补齐 `source/confidence/unit/used/usagePercent/periodStart/periodEnd/exhaustedAt/nextProbeAt`。
+- `panel.html` 的额度列改为 `quotaCell()`：`used/limit`、百分比、重置时间；没有 quota 时回退主 `quotaWindow`；`unknown` 显示"待查询"。
+- `admin.go` 新增 `BatchUpdate`（PATCH `/accounts/batch`，priority/maxConcurrent/minimumRemaining）。
+- `panel.go` 新增 `rotation_friendly`：priority=0、maxConcurrent=1、minimumRemaining=0；面板加"轮询友好"按钮。
+- 验证：`go build/vet/test` 通过。
+- 仍待：严格 RR（需改 grok2api）、按账号内联编辑、命中账号/换号原因可观测、额度详情抽屉。
+
+### P4-D 执行记录（2026-11-04）
+
+- `config.go` 新增 `pool_window_start` / `pool_window_end`。
+- `keeper.go`：非手动 `Tick` 只在窗口内补号；`inPoolWindow` 支持同日/跨午夜/空值不限；手动"立即检查"仍可强制。
+- `panel.html` 设置页加两个窗口字段；`panel.go` 读写/allowlist/maskedSettings 同步。
+- 测试：`keeper_window_test.go`（同日、跨午夜、空值、非法、start==end）通过。
+- `register_clash_*`：**仍未接线**（Go 层没有读取；注册 worker 是否支持需另查）。本轮明确标记为"未实现"，不再宣称支持。
+
+### P4-E 执行记录（Grok 首批，2026-11-04）
+
+- `eventlog.go`：`data/events.jsonl` 追加写，10MB 轮转；`logEvent` / `readEvents`。
+- 事件接入：`account.delete`、`quota.refresh`、`token.refresh`、`schedule.rotation_friendly`、`register.start/success/fail`。
+- 面板：日志抽屉新增 `events` 源（"事件"），显示时间/级别/类型/账号/消息。
+- 验证：`go build/vet/test` 通过。
+- 仍待：QwenWork/BuddyHub/MiniMax/LobsterAI/Hub 接入；事件筛选/导出 API。
+
+### P4-E 补充（QwenWork，2026-11-04）
+
+- `internal/server/eventlog.go`：`data/events.jsonl` + 10MB 轮转；`logEvent/readEvents`；`eventTypeForPath` 映射管理端点。
+- 事件：`account.add/remove/switch/refresh/import`、`autoreg.start/stop`，由 HTTP 中间件按状态记录（>=400 记 error）。
+- 面板：请求日志卡新增"事件"按钮，切换显示 `/api/events?lines=300` 时间线。
+- 测试：`eventlog_test.go` 追加/读取/字段；`go build` + `go test` 通过。
+- 仍待：BuddyHub/MiniMax/LobsterAI/Hub 接入。
+
+### P4-E 补充（MiniMax，2026-11-04）
+
+- `eventlog.go`：`data/events.jsonl` + 10MB 轮转；`logEvent/readEvents`；`GET /v1/events?lines=200`。
+- 事件：`account.register`、`account.delete`、`account.signin`、`quota.sync`。
+- 面板：左侧新增"07 事件"页，显示时间线（`loadEvents()`）。
+- 测试：`eventlog_test.go`（路径/追加/读取/字段）；`go build` + `go test` 通过。
+- 仍待：BuddyHub/LobsterAI/Hub 接入；事件筛选/导出。
+
+### P4-E 补充（LobsterAI，2026-11-04）
+
+- `internal/server/eventlog.go`：`data/events.jsonl` + 10MB 轮转；`SetEventsDir` 注入数据目录（空 = 关闭）。
+- `cmd/server/main.go`：从 `cfg.StateFile` 反推目录注入；`GET /admin/events?lines=200`。
+- 事件：`account.delete`；后续可加 `credential.refresh`/`login`。
+- 测试：`eventlog_test.go`（往返 + 空目录关闭）；`go build` + `go test -run TestEventLog` 通过。
+- 仍待：面板入口（LobsterAI 面板为独立 Web，后续再加）；BuddyHub/Hub 接入。
+
+### P4-E 补充（BuddyHub，2026-11-04）
+
+- `internal/pluginhub/eventlog.go`：`<dataDir>/events.jsonl` + 10MB 轮转；`DataDir` 为空即关闭。
+- API：`GET /api/events?lines=200`（Bearer）。
+- 事件：`account.toggle`、`account.revive`、`account.delete`、`task.run`、`credits.refresh`。
+- 面板：新增"事件"标签页 + `loadEvents()`。
+- 测试：`eventlog_test.go`（往返 + 无 DataDir 关闭）；`go build` + `go test -run TestEventLog` 通过。
+- 仍待：LobsterHub 接入；LobsterAI 面板入口。
+
 ---
 
 ## 9. P5：UI + 动效
@@ -133,6 +215,44 @@
 - P5-B 布局/暗色（7）：xhx、MiniMax、Flonno shell、侧栏/页头/卡片/表格。
 - P5-C 动效（3）：count-up/额度条/状态 pulse/toast/按钮；`prefers-reduced-motion`。
 - 设计令牌见报告 4.2；动效见 4.5。
+
+### P5-A 执行记录（2026-11-04）
+
+- QwenWork（`_plugin-work/phase3/qw2api/.../index.html`）：默认亮色；暖白 `#F7F6F1` + 抹茶 `#7C9A6D` + 奶酪 `#E9C46A`；危险色陶土红；品牌绿阶全部替换；主题 fallback 改 `light`。
+- Skywork（`_plugin-work/phase5/skywork/.../index.html`）：同 QwenWork 的全套 token（默认亮色、抹茶阶、奶酪、陶土红）。
+- Grok（`_plugin-work/phase4/grok/web/panel.html`）：`--bg/--accent/--green/--red/--amber` 全部换抹茶/暖白；圆角 10→12；加 `--cheese`。
+- LobsterAI（`_plugin-work/phase5/lobsterai/web/assets/app.css`）：System Blue → 抹茶；表面/文字/边框暖灰；success/warning/error/info 换抹茶/奶酪/陶土/雾蓝。
+- LOOMy（`_plugin-work/phase5/loomy/index.html`）：靛蓝/紫 → 抹茶；暖白表面；状态色换抹茶/奶酪/陶土。
+- 验证：QwenWork/Skywork/LobsterAI/LOOMy `go build` 通过；QwenWork/Skywork server 测试通过。
+- 仍待：BuddyHub/LobsterHub 暗色重写见 P5-B；xhx/Flonno shell；P5-C 动效。
+
+### P5-B 执行记录（2026-11-04）
+
+- BuddyHub（`_plugin-work/phase5/buddyhub/frontend/dist/style.css`）：深墨+荧光绿 → 暖白+抹茶；`#e6ead9`/`rgba(184,245,61)`/粉色 danger 全部替换；卡片/侧栏跟随。
+- LobsterHub（`_plugin-work/phase5/lobsterhub/frontend/dist/style.css`）：同 BuddyHub 反转；品牌 mark/pill 用墨绿底。
+- MiniMax（`_plugin-work/phase3/mmxproxy/web/index.html`）：纸墨朱红 → 暖白+抹茶；`--acc/#7C9A6D`、`--acc-deep/#5F7D52`、`--blue/#6E8FA8`、状态色换抹茶/奶酪/陶土。
+- 验证：三者 `go build` 通过；MiniMax `go test` 通过。
+- 仍待：xhx（Edge 面板）、Flonno shell 未改；P5-C 动效。
+
+### P5-B 补充（Flonno，2026-11-04）
+
+- `_plugin-work/phase5/flonno/internal/server/web/assets/style.css`：深墨+荧光绿 → 暖白+抹茶；`#e6ead9`/`rgba(184,245,61)`/粉色 danger 全替换；`index.html` 内嵌 SVG 的 `#b8f53d` 改 `#7C9A6D`。
+- xhx：源目录没有 HTML/CSS 面板（只有 Go/Edge profile），**不适用** token 替换，登记为 N/A。
+- 验证：Flonno `go build` 通过。
+
+### P5-C 执行记录（QwenWork 首批，2026-11-04）
+
+- 只加 `transform/opacity`，不改布局：
+  - 按钮 hover/active 轻缩放；
+  - 统计卡/账号卡/卡片 hover 上浮 + 阴影；
+  - 连接状态 chip 柔和 pulse；
+  - 进度条宽度过渡；
+  - toast 出现/消失更短。
+- 全部包在 `@media (prefers-reduced-motion: no-preference)`；已有的 reduce 全局降级仍生效。
+- 验证：`go build` + `go test ./internal/server` 通过。
+- Skywork 同套 5 个效果（同源 index.html）也已加，`go build` + server 测试通过。
+- Grok/LobsterAI/LOOMy：同款低风险动效（按钮/卡片/状态 pulse），均带 reduce 降级；三者 `go build` 通过。
+- 仍待：P4-E 其余插件接入事件日志；P2 上线；真实 UI/对话验收。
 
 ---
 

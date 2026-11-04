@@ -450,18 +450,12 @@ func customProvidersClearHandler(m *manager.Manager) http.HandlerFunc {
 func applyCustomProvidersSave(m *manager.Manager, inputs []customProviderInput) ([]customProviderView, error) {
 	cfg := loadConfig(configPath)
 
-	// 保留非 custom 条目；providers 原本为空（隐式全注册）→ 物化内建条目，
-	// 防显式列表只含 custom 导致内建源全部失效。
+	// 保留非 custom 条目（v2.0.0 起不再物化内建 opencode 条目）。
 	var kept []ProviderCfg
 	for _, pc := range cfg.Providers {
 		if pc.Type != "custom" {
 			kept = append(kept, pc)
 		}
-	}
-	if len(cfg.Providers) == 0 {
-		// 内建厂商仅剩 opencode（windsurf 已于 2026-10-13 移除）。
-		enabled := true
-		kept = append(kept, ProviderCfg{ID: "opencode", Type: "opencode", Enabled: &enabled})
 	}
 
 	seen := map[string]bool{}
@@ -485,9 +479,7 @@ func applyCustomProvidersSave(m *manager.Manager, inputs []customProviderInput) 
 		if !customIDPattern.MatchString(in.ID) {
 			return nil, fmt.Errorf("无效 id %q：需字母数字开头，可含 - _，≤32 字符", in.ID)
 		}
-		if in.ID == "opencode" {
-			return nil, fmt.Errorf("id %q 与内建厂商冲突", in.ID)
-		}
+		// v2.0.0：opencode 不再是内建厂商（实现已删除），此 id 不再保留给内建。
 		if seen[in.ID] {
 			return nil, fmt.Errorf("重复 id %q", in.ID)
 		}

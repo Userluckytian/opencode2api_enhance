@@ -43,7 +43,6 @@ var providerServiceMode bool
 // noPlugins 禁止本进程启动插件子进程。
 var noPlugins bool
 
-
 func versionString() string {
 	return fmt.Sprintf("opencode2api %s (branch=%s, commit=%s, built=%s)", version, branch, commit, date)
 }
@@ -143,10 +142,16 @@ func main() {
 	defer providerSvc.Close()
 
 	// 免费层引擎（40080）：外部程序，托管启停 + 看门狗。
+	// 必须在后台启动：WARP 开启时引擎要等首次出口注册（上游最长 90s）才监听，
+	// 同步等待会把管理面板（40000）的监听一起拖后，面板表现为"打不开"。
 	engineRunner := manager.NewRealRunner()
-	if err := managerInst.StartFreeTierEngine(engineRunner); err != nil {
-		slog.Warn("free-tier engine unavailable", "error", err, "hint", "把 opencode2api-win 放到 bin/ 目录")
-	}
+	go func() {
+		if err := managerInst.StartFreeTierEngine(engineRunner); err != nil {
+			slog.Warn("free-tier engine unavailable", "error", err, "hint", "把 opencode2api-win 放到 bin/ 目录")
+		} else {
+			slog.Info("free-tier engine started")
+		}
+	}()
 	go managerInst.WatchdogFreeTierEngine(engineRunner)
 
 	mux := http.NewServeMux()
@@ -182,12 +187,18 @@ func withRecover(next http.Handler) http.Handler {
 // 只注册模型端点 + 插件管理 API，不装配管理器/实例/引擎。
 func runProviderServiceMode(port, listenAddr string) {
 	mux := http.NewServeMux()
-	pluginMgr := pluginprovider.New(pluginprovider.Config{
+	// v2.0.0: 插件厂商必须绑定全局引用，否则 syncPlugins 直接 return，
+	// 插件供应商永远不会注册进聚合器（表现为 /v1/models 无插件模型）。
+	pluginMgr := bindPluginMgr(pluginprovider.New(pluginprovider.Config{
 		OnChange:       syncPlugins,
 		OnModelRefresh: onPluginModelRefresh,
-	})
+	}))
 	pluginMgr.Start()
 	defer pluginMgr.Close()
+	// 本进程是真正服务自定义源的一方：定时目录刷新与活性探测都必须在这里跑，
+	// 否则管理面板的 key 冷却/熔断徽标永远停在「全部可用」。
+	startModelRefresh()
+	startCustomProbeLoop()
 
 	mux.HandleFunc("/v1/chat/completions", loggingMiddleware(apiKeyAuthMiddleware(chatCompletionsHandler)))
 	mux.HandleFunc("/v1/responses", loggingMiddleware(apiKeyAuthMiddleware(responsesHandler)))
