@@ -515,6 +515,6 @@ git reset --hard v1.9.0-free-tier-final
 | P3 | ✅ OpenCode 独立页；导航 5 项；设置/统计瘦身 | `tsc` / `npm run build` |
 | P4 | ✅ 40080 启停/看门狗/healthz + 前端接入 | 隔离端口冒烟：engine `ready:true` |
 | P5 | ✅ 内嵌引擎 + GPL 三件套 + 三平台 CI + v2.0.0 | `cargo check` / YAML / PS parser / 交叉编译 |
-| P6 | ⏳ 桌面壳遗留模块清理 + 安装包冒烟 + tag | 见 issue-log 同日「P5 遗留」 |
+| P6 | ✅ 桌面壳遗留模块清理 + tauri:dev 真机冒烟；tag v2.0.0 | 见 issue-log「P6 完成」 |
 
-**决策变更：** P5 完成后**暂不打 v2.0.0 tag**——桌面壳仍含 instance/probe/gateway 遗留模块，需 P6 清理并真机冒烟后再发版。
+**决策变更：** P6 已清理壳内遗留模块并通过 `tauri:dev` 冒烟，`v2.0.0` tag 已打（本地，未 push）。真实安装包冒烟仍待做。
