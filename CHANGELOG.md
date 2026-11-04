@@ -1,5 +1,50 @@
 # Changelog
 
+## v2.0.0（2026-11-05，正式版）
+
+### 架构重构：从「免费层聚合器」到三进程控制面
+
+v1.9.0 之前，免费层（OpenCode）由本项目自研：SOCKS5 节点池 + sing-box 出口 + 实例池 + Bun 指纹桥 + 自建统一网关。这套实现能工作，但维护成本高，且客户端的 TLS/HTTP 指纹始终无法与官方 OpenCode CLI 对齐，免费模型稳定撞 429。
+
+v2.0.0 彻底否定该路径，改为**托管外部引擎**：
+
+| 端口 | 角色 | 说明 |
+|------|------|------|
+| **40000** | 管理面板（本进程） | 仅控制面：配置、启停、日志、统计。**不再代理任何推理请求** |
+| **40080** | OpenCode 免费层引擎 | 外部程序 `opencode2api-win`（GPL-3.0），随包内嵌、独立进程运行 |
+| **50080** | 供应商服务 | 自定义源（OpenAI/Anthropic/Gemini/Responses）+ 插件式供应商 |
+
+### 删除
+
+- SOCKS5 节点池、节点健康/坏池/竞速、链式代理（`socks*.go`、`pool_health.go`）
+- 实例池与统一网关装配（`core/manager` 27 个文件）、实例页面
+- Bun sidecar 与 sing-box（`core/freesidecar`、`scripts/build-free-sidecar.*`、`scripts/fetch-singbox.*`）
+- `vendors/opencode`（指纹伪装、429 阶梯、双目录）
+- 订阅拉取、节点扫描、Clash 解析、本地配置、批量操作
+- 前端「独享 / 实例池 / 节点池」三页
+
+### 新增
+
+- **OpenCode 独立页**：接入信息（地址 + 密钥）、WARP 出口池、出口代理、密钥通道（zen/go）、免费模型概览
+- `core/manager/freetier_engine.go`：引擎配置生成、启停、30s 看门狗、`/healthz` 解析
+- `contract.StaticProxyTransport`：单代理 Transport，取代 `via_proxy` 布尔
+- 三平台引擎交叉编译（linux/amd64、darwin/arm64、windows/amd64）
+- GPL-3.0 合规分发：`third_party/opencode2api-win/`（LICENSE + SOURCE.txt + README），CI 每次发行附源码包
+
+### 修复
+
+- **模型路由不再乱兜底**：未匹配的模型不再发给「所有厂商」，改为返回可操作错误（提示需要「供应商/模型」前缀并列出可用供应商）。此前插件模型会被兜底到无关厂商，产生 `no healthy proxy node` + `opencode.ai` 地址这类误导性错误。
+- **免费层 429 根因**：匿名（不配密钥）模式下，`big-pickle` 等模型稳定 429；配置一个 zen key 后同一模型立即 200。引擎配置的 `anonymous` 改为「仅在无 zen/go key 时开启」。
+- **配置不再被覆写**：保存自定义源改为合并写，`gateway_key` / `engine_*` / 端口等字段不再丢失。
+- **插件供应商恢复注册**：补回 `bindPluginMgr` 调用，否则插件模型不会出现在 50080。
+- **打破重建自激循环**：`rebuildVendors` 与 `refreshModelCatalog` 互相触发，曾每 1.8s 重建一轮并反复用用户 key 打上游。
+- **引擎启动不再阻塞面板**：WARP 首次注册最长 90s，改为后台启动。
+
+### 升级提示
+
+- 端口变化：39999（Bun 桥接）、40100+（实例）、42100+（sing-box）全部移除。
+- 客户端请连 **50080**（自定义/插件）或 **40080**（OpenCode 免费层），不要连 40000。
+- 免费层建议在 OpenCode 页「密钥通道」至少填一个 `oc_sk_...` 密钥。
 ## v1.9.0（2026-10-27，正式版）
 
 ### 供应商服务独立端口 50080
