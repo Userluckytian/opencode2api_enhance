@@ -242,8 +242,9 @@ type customProviderView struct {
 	KeyStrategy   string   `json:"key_strategy"` // round_robin | failover
 	// Key403Cooldown 401/403 失效冷却时长（秒）；0 = 永久禁用（旧行为）；>0 到期自动回池重试。
 	Key403Cooldown int     `json:"key_403_cooldown"`
-	ViaProxy      bool     `json:"via_proxy"`
-	Enabled       bool     `json:"enabled"`
+	// Proxy 本源出站代理（http/https/socks5/socks5h）；空 = 直连。
+	Proxy   string `json:"proxy"`
+	Enabled bool   `json:"enabled"`
 	Models        int      `json:"models"`                 // 聚合目录中该源模型数（实时，经白名单过滤）
 	ModelsAll     []string `json:"models_all"`             // 全量模型清单（上游 ID，编辑勾选用）
 	AllowedModels []string `json:"allowed_models"`         // 暴露白名单（空 = 全部暴露）
@@ -270,9 +271,10 @@ type customProviderInput struct {
 	// Key403Cooldown 401/403 失效冷却时长（秒）；0 = 永久禁用（旧行为）；>0 到期自动回池重试。
 	Key403Cooldown int     `json:"key_403_cooldown"`
 	AllowedModels []string `json:"allowed_models"` // 暴露白名单（空 = 全部暴露）
-	ViaProxy      bool     `json:"via_proxy"`
+	// Proxy 本源出站代理（http/https/socks5/socks5h）；空 = 直连。
+	Proxy string `json:"proxy"`
 	// UseLocalProxy 测试专用：测试拉取模型走本机系统代理（http.ProxyFromEnvironment），
-	// 不叠加节点池（via_proxy）；默认 false = 直连或按 via_proxy 走节点池。
+	// 优先于 Proxy 字段；默认 false = 直连或按 Proxy 走指定代理。
 	UseLocalProxy bool `json:"use_local_proxy"`
 	Enabled       *bool `json:"enabled"`
 }
@@ -340,7 +342,7 @@ func customProviderViews() []customProviderView {
 		if p == nil {
 			p = map[string]any{}
 		}
-		via, _ := p[custom.ParamViaProxy].(bool)
+		proxyURL, _ := p[custom.ParamProxy].(string)
 		proto, _ := p[custom.ParamProtocol].(string)
 		if proto == "" {
 			proto = custom.ProtoOpenAI
@@ -371,7 +373,7 @@ func customProviderViews() []customProviderView {
 			ID: pc.ID, Name: pc.Name, Protocol: proto, BaseURL: baseURL,
 			APIKeys: keys, APIKey: firstKey, APIKeySet: len(keys) > 0,
 			KeyStrategy: strategy, Key403Cooldown: key403,
-			ViaProxy:    via, Enabled: enabled,
+			Proxy:       proxyURL, Enabled: enabled,
 			Models: counts[pc.ID], LastError: vendorLastErr(pc.ID),
 			ModelsAll: vendorFullModels(pc.ID), AllowedModels: allowedIDs,
 			LastSuccess: vendorLastSuccess(pc.ID),
@@ -528,7 +530,7 @@ func applyCustomProvidersSave(m *manager.Manager, inputs []customProviderInput) 
 			custom.ParamBaseURL:        in.BaseURL,
 			custom.ParamProtocol:       in.Protocol,
 			custom.ParamKeyStrategy:    strategy,
-			custom.ParamViaProxy:       in.ViaProxy,
+			custom.ParamProxy:          strings.TrimSpace(in.Proxy),
 			custom.ParamKey403Cooldown: key403,
 		}
 		if len(keys) > 0 {
@@ -637,14 +639,13 @@ func customProvidersTestHandler() http.HandlerFunc {
 		for _, key := range keys {
 			cfg := custom.Config{
 				ID: in.ID, Name: in.Name, BaseURL: in.BaseURL,
-				APIKey: key, Protocol: in.Protocol, ViaProxy: in.ViaProxy,
+				APIKey: key, Protocol: in.Protocol, Proxy: in.Proxy,
 				// 连通测试必须真实触达上游：禁用目录缓存（防不可达时拿旧缓存误报成功）。
 				NoModelCache: true,
 			}
 			if in.UseLocalProxy {
-				// 走本机系统代理（http.ProxyFromEnvironment），不叠加节点池。
+				// 走本机系统代理（http.ProxyFromEnvironment），优先于 Proxy 字段。
 				cfg.Transport = localProxyTransport{}
-				cfg.ViaProxy = false
 			}
 			v, err := custom.New(cfg)
 			if err != nil {

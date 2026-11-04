@@ -7,7 +7,6 @@ package remote
 
 import (
 	"github.com/6Kmfi6HP/opencode2api/core/contract"
-	"github.com/6Kmfi6HP/opencode2api/vendors/opencode"
 )
 
 // Params 键（ProviderSpec.Params 透传；仅配置驱动场景使用）。
@@ -24,7 +23,7 @@ func init() {
 			BaseURL:   strParam(spec.Params, ParamBaseURL),
 			AuthToken: strParam(spec.Params, ParamAuthToken),
 		}
-		if tr, ok := spec.Params[opencode.ParamTransport].(contract.Transport); ok && tr != nil {
+		if tr, ok := spec.Params[contract.ParamTransport].(contract.Transport); ok && tr != nil {
 			cfg.Transport = tr
 		}
 		return New(cfg)

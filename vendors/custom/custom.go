@@ -52,7 +52,10 @@ type Config struct {
 	Name      string // 展示名
 	BaseURL   string // 上游根地址（尾斜杠容忍）
 	Protocol  string // openai | anthropic | gemini | responses
-	ViaProxy  bool   // 出站走代理池（TierFree）；默认直连（TierPaid）
+	// Proxy 本源出站代理（http/https/socks5/socks5h）；空 = 直连。
+	// 取代历史上的 ViaProxy 布尔开关：那个开关绑死「节点池」，池化能力已移除，
+	// 但「某供应商必须走代理才通」是真实需求，故改为直接填代理地址。
+	Proxy     string
 	Transport contract.Transport
 	// APIKeys 多 key（轮询/错误转移调度）；APIKey 为单 key 兼容字段，两者合并去重。
 	APIKeys     []string
@@ -217,10 +220,9 @@ func (v *Vendor) probeModel() string {
 func (v *Vendor) ID() string   { return v.cfg.ID }
 func (v *Vendor) Name() string { return v.cfg.Name }
 
+// tier 恒为 TierPaid：单代理 Transport 不区分出口池层级，
+// 保留方法只为兼容 Transport.Client(tier, streaming) 的调用约定。
 func (v *Vendor) tier() contract.Tier {
-	if v.cfg.ViaProxy {
-		return contract.TierFree
-	}
 	return contract.TierPaid
 }
 
@@ -690,7 +692,7 @@ func (e *keyStatusError) Error() string {
 	return fmt.Sprintf("upstream status %d", e.status)
 }
 
-// do 经统一网关 Transport 发出请求（直连或代理池由配置决定），回传出口节点地址。
+// do 经注入的 Transport 发出请求，回传出口节点地址（单代理下恒为空）。
 // streaming=true 时用无总超时客户端（长推理流不被切断）。
 func (v *Vendor) do(ctx context.Context, method, url string, headers map[string]string, body []byte, streaming bool) (*http.Response, string, error) {
 	var rd io.Reader

@@ -8,7 +8,6 @@ import (
 	"time"
 
 	"github.com/6Kmfi6HP/opencode2api/core/contract"
-	"github.com/6Kmfi6HP/opencode2api/vendors/opencode"
 )
 
 // Params 键（ProviderSpec.Params；配置 providers[].params 同名透传）。
@@ -19,7 +18,13 @@ const (
 	ParamKeyStrategy   = "key_strategy"   // round_robin（默认）| failover；仅作用于本源
 	ParamAllowedModels = "allowed_models" // 暴露白名单（上游模型 ID；空 = 全部暴露）
 	ParamProtocol      = "protocol"
-	ParamViaProxy      = "via_proxy"
+	// ParamProxy 本源出站代理（http / https / socks5 / socks5h）；空 = 直连。
+	// 取代历史上的 via_proxy 布尔开关：那个开关绑死「节点池」，池化能力已移除，
+	// 但「某供应商必须走代理才通」是真实需求，故改为直接填代理地址。
+	ParamProxy = "proxy"
+	// ParamViaProxy 是 ParamProxy 的向后兼容别名：旧配置里的 via_proxy 布尔值
+	// 无法映射到具体代理地址，只用于在迁移时识别「该源曾要求走代理」。
+	ParamViaProxy = "via_proxy"
 	// ParamKey403Cooldown 401/403 失效冷却时长（秒）：>0 到期自动回池重试；0 = 永久禁用（旧行为）。
 	ParamKey403Cooldown = "key_403_cooldown"
 )
@@ -35,10 +40,10 @@ func init() {
 			KeyStrategy:     strParam(spec.Params, ParamKeyStrategy),
 			AllowedModels:   strSliceParam(spec.Params, ParamAllowedModels),
 			Protocol:        strParam(spec.Params, ParamProtocol),
-			ViaProxy:        boolParam(spec.Params, ParamViaProxy),
+			Proxy:           strParam(spec.Params, ParamProxy),
 			Key403Cooldown:  time.Duration(intParam(spec.Params, ParamKey403Cooldown, 0)) * time.Second,
 		}
-		if tr, ok := spec.Params[opencode.ParamTransport].(contract.Transport); ok && tr != nil {
+		if tr, ok := spec.Params[contract.ParamTransport].(contract.Transport); ok && tr != nil {
 			cfg.Transport = tr
 		}
 		return New(cfg)

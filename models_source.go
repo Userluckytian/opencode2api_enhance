@@ -13,6 +13,7 @@ import (
 	"github.com/6Kmfi6HP/opencode2api/core/aggregator"
 	"github.com/6Kmfi6HP/opencode2api/core/contract"
 	chatRouter "github.com/6Kmfi6HP/opencode2api/core/router"
+	"github.com/6Kmfi6HP/opencode2api/vendors/custom"
 	"github.com/6Kmfi6HP/opencode2api/vendors/opencode"
 	// 聚合厂商注册：blank import 触发各厂商 init() 自注册（扩增即生效）。
 	// 新厂商加一行 blank import 即可，无需改装配逻辑。
@@ -296,9 +297,10 @@ func vendorParams(t string) map[string]any {
 			opencode.ParamRateLimitMinIntervalMS: int(rateLimitMinIntervalMS.Load()),
 		}
 	case "custom":
-		// 自定义模型源：只需传输注入（出站经统一网关，直连或代理池由 via_proxy 决定）。
+		// 自定义模型源：默认直连；条目带 proxy 时由 mergeVendorParams 换成
+		// StaticProxyTransport（单代理，不再经过节点池）。
 		return map[string]any{
-			opencode.ParamTransport: rootTransport{},
+			contract.ParamTransport: contract.DirectTransport{},
 		}
 	}
 	return map[string]any{}
@@ -306,8 +308,16 @@ func vendorParams(t string) map[string]any {
 
 // mergeVendorParams 合并「类型级运行时注入」与「条目级配置参数」：
 // 运行时键（"_" 前缀，如 _transport）不可被配置覆盖；其余以条目 params 为准。
+//
+// 例外：custom 源声明了 proxy 时，这里把注入的传输换成 StaticProxyTransport——
+// 单代理地址是条目级配置，但传输实现必须由 core 构造（厂商不自建 client）。
 func mergeVendorParams(t string, entry map[string]any) map[string]any {
 	merged := vendorParams(t)
+	if t == "custom" {
+		if proxyURL, _ := entry[custom.ParamProxy].(string); strings.TrimSpace(proxyURL) != "" {
+			merged[contract.ParamTransport] = contract.StaticProxyTransport{ProxyURL: strings.TrimSpace(proxyURL)}
+		}
+	}
 	if len(entry) == 0 {
 		return merged
 	}
