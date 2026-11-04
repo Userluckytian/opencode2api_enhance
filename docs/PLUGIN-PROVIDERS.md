@@ -364,6 +364,10 @@ argv         = --provider-serve --port 0   （port 0 = OS 分配随机端口）
 
 ## 十一、插件功能建议清单（P1/P2，提炼自两个参考实现）
 
+> **完整能力目录见 [`docs/PLUGIN-CAPABILITIES.md`](PLUGIN-CAPABILITIES.md)**：A~J 共 100+ 项，含
+> 适用条件、最小实现、验收、事件日志/模型元数据/删除生命周期/profile 规范、自评表与反模式。
+> 新插件按"先过 §10 契约，再从能力目录挑选"的顺序做。
+
 > §10 是契约强制项（P0，宿主校验，违反即拒载）。本章是**建议级**功能点，提炼自两个
 > 已落地的真实插件：**mmxproxy**（`panel_port` 固定端口面板、号池守护、事件驱动凭证
 > 恢复、网络管理）与 **skywork**（`panel=sidecar` 动态端口面板、对话调试、resolve

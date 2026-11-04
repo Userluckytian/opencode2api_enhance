@@ -280,97 +280,66 @@ export type ConfigView = {
   base_url: string
   default_password: string
   has_password: boolean
-  clash_external_url: string
-  has_clash_token: boolean
-  /** E1: 上游代理出口（socks5:// 或 http:// 前缀，留空 = 直连） */
-  upstream_proxy: string
-  timeout_ttft_min_ms: number
-  timeout_ttft_max_ms: number
-  timeout_silence_min_ms: number
-  timeout_silence_max_ms: number
-  timeout_precontent_silence_min_ms: number
-  timeout_precontent_silence_max_ms: number
-  failover_probe_min: number
-  failover_probe_max: number
+  /** 调用日志读取上限（0 = 全部历史） */
   call_log_max: number
-  show_node_prefix: boolean
-  /** 免费通道上报的客户端版本（空 = 自动探测 npm 最新版） */
-  opencode_client_version: string
   /** U3: 界面轮询间隔（秒，0 = 关闭轮询，默认 5） */
   ui_poll_interval_sec: number
-  subscribe_url: string
-  subscribe_interval_min: number
-  health_check_interval_sec: number
-  health_restart_threshold: number
   has_gateway_key: boolean
   gateway_key: string
-  /** 统一网关监听端口（0 = 未设置，用环境槽位/默认 40080） */
+
+  /** 服务端口（0 = 未设置） */
   gateway_port: number
-  /** 免费层 Bun sidecar 端口 / 开关 */
-  free_sidecar_port: number
-  free_sidecar_enabled: boolean
-  /** 链式代理（前置节点） */
-  chain_enabled: boolean
-  chain_groups: string[]
-  chain_nodes: string[]
-  front_candidates: string[]
-  front_group: string
-  front_node: string
-  chain_auto_detect: boolean
-  /** 实例池链路探活（P1） */
-  pool_probe_interval_sec: number
-  pool_probe_timeout_sec: number
-  pool_quality_window_min: number
-  pool_probe_enabled: boolean
-  probe_solo_enabled: boolean
-  /** 性能模式熔断/半开（P2） */
-  pool_breaker_threshold: number
-  pool_halfopen_interval_sec: number
-  pool_performance_mode: boolean
-  /** 请求级竞速（P2b） */
-  pool_race_copies: number
-  /** 并发设置（D3） */
-  scan_concurrency: number
-  /** N2: 停止扫描并发（默认 4） */
-  stop_scan_concurrency: number
-  batch_concurrency: number
-  test_concurrency: number
-  pool_probe_concurrency: number
+  provider_port: number
+  /** 生效值（含环境槽位/默认值） */
+  gateway_port_effective: number
+  provider_port_effective: number
+
+  // ── 免费层引擎（40080，opencode2api-win） ──
+  engine_enabled: boolean
+  engine_warp_enabled: boolean
+  /** WARP 出口数上限（0 = 引擎默认 2） */
+  engine_warp_pool_size: number
+  /** 外层源 IPv6 前缀（通常一个路由到本机的 /64） */
+  engine_warp_source_ipv6: string
+  /** 出口代理列表（http/https/socks5/socks5h 或 direct） */
+  engine_proxies: string[]
+  /** 可选付费密钥池（空 = 纯匿名免费层） */
+  engine_zen_keys: string[]
+  engine_go_keys: string[]
+  engine_zen_key_count: number
+  engine_go_key_count: number
+  engine_retry_max_attempts: number
+  engine_models_refresh_sec: number
+}
+
+/** 免费层引擎（40080）状态 */
+export type FreeTierEngineStatus = {
+  /** stopped | starting | ready | failed */
+  state: string
+  /** 引擎 API 基址（如 http://127.0.0.1:40080/v1） */
+  address: string
+  port: number
+  running: boolean
+  healthy: boolean
+  pid: number
+  api_key: string
+  version?: string
+  model_total: number
+  model_shown: number
+  warp_status?: string
+  warp_stack?: string
+  warp_active: number
+  warp_cooling: number
+  bin_path: string
+  bin_exists: boolean
+  error?: string
 }
 
 export type BinariesInfo = {
   bin_dir: string
   oc_exists: boolean
-  sb_exists: boolean
-  sidecar_exists: boolean
-}
-
-/** 免费层 Bun sidecar 状态（设置页） */
-export type FreeSidecarStatus = {
-  enabled: boolean
-  port: number
-  url: string
-  running: boolean
-  healthy: boolean
-  pid: number
-  bin?: string
-  script?: string
-  error?: string
-}
-
-export type FreeSidecarCheck = {
-  name: string
-  ok: boolean
-  detail: string
-}
-
-/** 链式代理检测结果（设置页「检测链路」） */
-export type ChainCheckResult = {
-  target: string
-  front?: string
-  ok: boolean
-  latency_ms?: number
-  error?: string
+  /** v2.0.0: 免费层引擎（opencode2api-win）二进制是否存在 */
+  engine_exists: boolean
 }
 
 // ─── 全流程调用日志 ─────────────────────────────────────────────
@@ -870,11 +839,13 @@ export const api = {
   configGet: () => req<ConfigView>('GET', '/config'),
   configSet: (key: string, value: string) => req<void>('POST', '/config/set', { key, value }),
   // 免费层 Bun sidecar：状态 / 环境检查 / 重启
-  freeSidecarStatus: () => req<FreeSidecarStatus>('GET', '/free-sidecar/status'),
-  freeSidecarCheck: () => req<FreeSidecarCheck[]>('GET', '/free-sidecar/check'),
-  freeSidecarRestart: () => req<FreeSidecarStatus>('POST', '/free-sidecar/restart'),
-  // 链式代理：检测目标节点经前置组的整条链
-  chainCheck: (node: string) => req<ChainCheckResult>('POST', '/chain/check', { node }),
+  // 免费层引擎（40080，opencode2api-win）
+  freeTierEngineStatus: () => req<FreeTierEngineStatus>('GET', '/free-tier/status'),
+  freeTierEngineStart: () => req<FreeTierEngineStatus>('POST', '/free-tier/start'),
+  freeTierEngineStop: () => req<FreeTierEngineStatus>('POST', '/free-tier/stop'),
+  freeTierEngineRestart: () => req<FreeTierEngineStatus>('POST', '/free-tier/restart'),
+  freeTierEngineWriteConfig: () =>
+    req<{ status: string; path: string }>('POST', '/free-tier/config'),
   // auto 虚拟模型：GET 当前配置 / POST 保存即传播子进程（热生效，无需重启）
   autoModelGet: () => req<AutoModelConfig>('GET', '/auto-model'),
   autoModelSave: (cfg: AutoModelConfig) => req<{ status: string; config: AutoModelConfig }>('POST', '/auto-model', cfg),

@@ -3,7 +3,6 @@ import clsx from 'clsx'
 import { Loader2, RefreshCw, Search, Settings, Trash2 } from 'lucide-react'
 import { api, type OrphanProcess } from '../lib/api'
 import type { ConfigView, BinariesInfo } from '../lib/api'
-import { isDesktop } from '../lib/env'
 import type { UpdateInfo } from '../lib/updates'
 
 export default function SettingsPage({
@@ -31,29 +30,17 @@ export default function SettingsPage({
   const [autostart, setAutostart] = useState<boolean>(false)
   const [binariesInfo, setBinariesInfo] = useState<BinariesInfo | null>(null)
 
-  // Clash 外部控制表单
-  const [clashUrl, setClashUrl] = useState('')
-  const [clashToken, setClashToken] = useState('')
-
-  // 免费通道客户端版本（opencode 上报 User-Agent 用的版本号）
-  const [ocVersion, setOcVersion] = useState('')
-  const [savingOcVersion, setSavingOcVersion] = useState(false)
-
-  // 网关超时切换 / 节点前缀 已归位实例池页
-  // 订阅自动拉取 已归位节点池页
-  // 残留进程清理（孤儿实例 / 探针残留）
+  // 残留进程清理
   const [orphans, setOrphans] = useState<OrphanProcess[]>([])
   const [orphanBusy, setOrphanBusy] = useState(false)
   const [killBusy, setKillBusy] = useState(false)
   const [selected, setSelected] = useState<Set<number>>(new Set())
-  // P2 audit: 保存 Clash / 保存代理 / 开机自启开关 / 数据清理 忙态
-  const [savingClash, setSavingClash] = useState(false)
+
+  // 忙态
   const [autostartBusy, setAutostartBusy] = useState(false)
   const [cleanLevel, setCleanLevel] = useState<1 | 2 | 3 | null>(null)
 
-
-  // G31/L10: toast 用 ref 封装（App 的 showToast 每次渲染重建）——effect 固定只跑一次，
-  // 不因 toast 变化重发 3 个请求，也不会把服务器旧值覆盖回未保存的表单输入
+  // toast 用 ref 封装（App 的 showToast 每次渲染重建）——effect 固定只跑一次
   const toastRef = useRef(toast)
   toastRef.current = toast
 
@@ -73,471 +60,312 @@ export default function SettingsPage({
         toastRef.current('加载设置失败', false)
       }
     }
-    loadData()
-    // L10: 首次加载初始化表单值（clashUrl）——单独处理、不回写进 loadData，
-    // 后续其它路径重载数据也不会覆盖用户未保存的表单输入
-    api
-      .configGet()
-      .then((cfg) => {
-        setClashUrl(cfg.clash_external_url)
-        setOcVersion(cfg.opencode_client_version || '')
-      })
-      .catch(() => {})
+    void loadData()
   }, [])
 
-  const handleSaveClash = async () => {
-    setSavingClash(true)
-    try {
-      await api.configSet('clash_external_url', clashUrl)
-      if (clashToken.trim()) {
-        await api.configSet('clash_auth_token', clashToken)
-      }
-      toast('已保存', true)
-      // 重新加载配置以更新 has_clash_token 状态
-      const cfg = await api.configGet()
-      setConfig(cfg)
-      setClashToken('')
-    } catch (e) {
-      console.error('保存失败', e)
-      toast('保存失败', false)
-    } finally {
-      setSavingClash(false)
-    }
-  }
-
-  // 保存免费通道客户端版本；空串 = 删掉该项，回到自动探测 npm 最新版
-  const handleSaveOcVersion = async () => {
-    setSavingOcVersion(true)
-    try {
-      await api.configSet('opencode_client_version', ocVersion.trim())
-      toast(ocVersion.trim() ? `已保存，重启网关后生效：opencode/${ocVersion.trim()}` : '已清空，重启网关后回到自动探测', true)
-      const cfg = await api.configGet()
-      setConfig(cfg)
-      setOcVersion(cfg.opencode_client_version || '')
-    } catch (e) {
-      console.error('保存客户端版本失败', e)
-      toast('保存失败', false)
-    } finally {
-      setSavingOcVersion(false)
-    }
-  }
-
-  const handleAutostartChange = async (enabled: boolean) => {
-    if (autostartBusy) return
+  const handleToggleAutostart = async (next: boolean) => {
     setAutostartBusy(true)
     try {
-      await api.autostartSet(enabled)
-      setAutostart(enabled)
-      toast(enabled ? '已启用开机自启' : '已禁用开机自启', true)
+      await api.autostartSet(next)
+      setAutostart(next)
+      toast(next ? '已开启开机自启' : '已关闭开机自启')
     } catch (e) {
-      console.error('设置开机自启失败', e)
-      toast('设置失败', false)
+      toast('设置失败：' + (e as Error).message, false)
     } finally {
       setAutostartBusy(false)
     }
   }
 
-  // 统一网关密钥（main 功能 M6）已在实例池页提供（同一 gateway_key，避免两处重复入口）——此处不再保留
-
-  // 残留进程：探测 / 全选 / 一键清除
-  const doScanOrphans = async () => {
+  const scanOrphans = async () => {
     setOrphanBusy(true)
     try {
-      const s = await api.orphanScan()
-      setOrphans(s.items)
-      setSelected(new Set(s.items.map((i) => i.pid)))
-      toast(`探测到 ${s.total} 个残留进程（探针 ${s.probe} · 孤儿 ${s.orphan}）`, s.total === 0)
+      const r = await api.orphanScan()
+      const list = r.items ?? []
+      setOrphans(list)
+      setSelected(new Set())
+      toast(list.length === 0 ? '没有发现残留进程' : `发现 ${list.length} 个残留进程`)
     } catch (e) {
-      console.error('探测残留进程失败', e)
-      toast('探测失败', false)
+      toast('扫描失败：' + (e as Error).message, false)
     } finally {
       setOrphanBusy(false)
     }
   }
 
-  const toggleAll = () => {
-    setSelected((prev) => (prev.size === orphans.length ? new Set() : new Set(orphans.map((i) => i.pid))))
-  }
-
-  const toggleOne = (pid: number) => {
-    setSelected((prev) => {
-      const next = new Set(prev)
-      if (next.has(pid)) next.delete(pid)
-      else next.add(pid)
-      return next
-    })
-  }
-
-  const doKillOrphans = async () => {
-    const pids = [...selected]
-    if (pids.length === 0) {
-      toast('未选中任何进程', false)
-      return
-    }
-    if (!window.confirm(`确定清除选中的 ${pids.length} 个残留进程？\n运行中的实例与网关不受影响。`)) return
+  const killSelected = async () => {
+    if (selected.size === 0) return
     setKillBusy(true)
     try {
-      const r = await api.orphanKill(pids)
-      const errCount = Object.keys(r.errors).length
-      toast(`已清除 ${r.killed.length} 个残留进程${errCount ? `，失败 ${errCount}` : ''}`, errCount === 0)
-      await doScanOrphans() // 清除后自动重新探测
+      const r = await api.orphanKill([...selected])
+      const killed = r.killed?.length ?? 0
+      const failed = Object.keys(r.errors ?? {}).length
+      toast(`已清理 ${killed} 个进程${failed ? `，${failed} 个失败` : ''}`, failed === 0)
+      await scanOrphans()
     } catch (e) {
-      console.error('清除残留进程失败', e)
-      toast('清除失败', false)
+      toast('清理失败：' + (e as Error).message, false)
     } finally {
       setKillBusy(false)
     }
   }
 
-  const handleDataClean = async (level: 1 | 2 | 3) => {
-    const labels: Record<number, string> = {
-      1: '仅清理运行时数据（日志、统计、临时配置，保留实例记录）',
-      2: '清理运行时数据 + 清空实例记录（回到空实例池）',
-      3: '全部重置（运行数据 + 实例 + 配置，回到出厂默认）',
-    }
-    if (!window.confirm(`确定要执行「${labels[level]}」？\n\n这会先停止所有运行中的实例与网关。此操作不可撤销。`)) return
-    if (level === 3 && !window.confirm('这是完全重置，将删除所有配置并备份到 config.json.bak。\n请再次确认继续？')) return
-    if (cleanLevel) return
+  const doClean = async (level: 1 | 2 | 3) => {
+    const label = level === 1 ? '运行数据' : level === 2 ? '运行数据 + 模型缓存' : '全部数据（含配置）'
+    if (!window.confirm(`确认清除${label}？此操作不可撤销。`)) return
     setCleanLevel(level)
     try {
       await api.dataClean(level)
-      try {
-        const [cfg, as] = await Promise.all([api.configGet(), api.autostartGet()])
-        setConfig(cfg)
-        setAutostart(as)
-      } catch { /* 忽略刷新失败 */ }
-      toast('清理完成', true)
+      toast(`已清除${label}`)
+      const cfg = await api.configGet()
+      setConfig(cfg)
     } catch (e) {
-      console.error('清理失败', e)
-      toast('清理失败', false)
+      toast('清除失败：' + (e as Error).message, false)
     } finally {
       setCleanLevel(null)
     }
   }
 
-  if (!config || !binariesInfo) {
-    return <div className="p-8 text-zinc-500">加载中...</div>
-  }
-
   return (
-    <div className="p-6 space-y-6">
-      <h1 className="text-[16px] font-semibold text-zinc-900 flex items-center gap-2.5">
+    <div className="p-6 space-y-4 max-w-4xl">
+      <div className="flex items-center gap-2">
         <Settings size={18} className="text-teal-700" />
-        设置
-      </h1>
-
-      {/* Clash 外部控制（仅桌面端：本机有 Clash 客户端才有意义；Web/Docker/Linux 服务器 headless 端隐藏，走订阅导入） */}
-      {isDesktop && (
-      <div className="bg-white rounded-2xl border p-5 space-y-4">
-        <h2 className="text-lg font-semibold text-zinc-900">Clash 外部控制</h2>
-        
-        <div className="space-y-2">
-          <label className="block text-sm font-medium text-zinc-700">URL</label>
-          <input
-            type="text"
-            placeholder="http://127.0.0.1:9097"
-            value={clashUrl}
-            onChange={(e) => setClashUrl(e.target.value)}
-            className="w-full px-3 py-2 border rounded-lg"
-          />
-          <p className="text-zinc-500 text-xs">Clash 控制面板的访问地址</p>
-        </div>
-
-        <div className="space-y-2">
-          <label className="block text-sm font-medium text-zinc-700">访问密钥</label>
-          <input
-            type="password"
-            placeholder={config.has_clash_token ? '留空则不修改' : ''}
-            value={clashToken}
-            onChange={(e) => setClashToken(e.target.value)}
-            className="w-full px-3 py-2 border rounded-lg"
-          />
-          {config.has_clash_token && (
-            <p className="text-zinc-500 text-xs">已配置</p>
-          )}
-          <p className="text-zinc-500 text-xs">留空则不修改</p>
-        </div>
-
-        <button
-          onClick={handleSaveClash}
-          disabled={savingClash}
-          className="flex items-center gap-1.5 bg-zinc-900 text-white rounded-lg px-4 py-2 text-[13px] hover:bg-zinc-700 disabled:cursor-not-allowed disabled:opacity-60"
-        >
-          {savingClash ? <Loader2 size={14} className="animate-spin" /> : null}
-          {savingClash ? '保存中…' : '保存'}
-        </button>
-      </div>
-      )}
-
-      {/* 免费通道客户端版本（上游按 User-Agent 版本判定；抬高下限后可在此跟进，无需重编译） */}
-      <div className="bg-white rounded-2xl border p-5 space-y-4">
-        <div>
-          <h2 className="text-lg font-semibold text-zinc-900">免费通道客户端版本</h2>
-          <p className="text-zinc-500 text-xs">
-            上报给 OpenCode 上游的客户端版本（User-Agent: opencode/&lt;版本&gt;）。上游会抬高免费通道的最低版本要求，
-            报得太低会返回 426 Upgrade Required。留空则自动探测 npm 上的最新版本。
-          </p>
-        </div>
-
-        <div className="space-y-2">
-          <label className="block text-sm font-medium text-zinc-700">版本号</label>
-          <input
-            type="text"
-            placeholder="留空 = 自动探测（如 1.99.0）"
-            value={ocVersion}
-            onChange={(e) => setOcVersion(e.target.value)}
-            className="w-full px-3 py-2 border rounded-lg"
-          />
-          <p className="text-zinc-500 text-xs">
-            格式 x.y.z 三段数字。保存后重启网关生效（版本号在会话初始化时读取）。
-          </p>
-        </div>
-
-        <button
-          onClick={handleSaveOcVersion}
-          disabled={savingOcVersion}
-          className="flex items-center gap-1.5 bg-zinc-900 text-white rounded-lg px-4 py-2 text-[13px] hover:bg-zinc-700 disabled:cursor-not-allowed disabled:opacity-60"
-        >
-          {savingOcVersion ? <Loader2 size={14} className="animate-spin" /> : null}
-          {savingOcVersion ? '保存中…' : '保存'}
-        </button>
+        <h1 className="text-[16px] font-semibold text-zinc-900">设置</h1>
       </div>
 
-      {/* 开机自启（仅桌面端：桌面临近登录自启；Web/Docker/Linux 服务器 headless 端隐藏，服务器用 systemd/容器编排管理） */}
-      {isDesktop && (
-      <div className="bg-white rounded-2xl border p-5 space-y-4">
-        <h2 className="text-lg font-semibold text-zinc-900">开机自启</h2>
-        
-        <div className="flex items-center space-x-3">
-          <label className="relative inline-flex items-center cursor-pointer">
-            <input
-              type="checkbox"
-              checked={autostart}
-              onChange={(e) => handleAutostartChange(e.target.checked)}
-              disabled={autostartBusy}
-              className="sr-only peer"
+      {/* 服务端口 */}
+      <section className="bg-white rounded-2xl border border-zinc-200 shadow-sm p-5">
+        <h2 className="text-lg font-semibold text-zinc-900">服务端口</h2>
+        <p className="mt-1 text-[12px] text-zinc-500">
+          管理面板不代理推理请求；推理请分别连 OpenCode（免费层）或供应商服务（自定义源）。
+        </p>
+        <div className="mt-4 overflow-hidden rounded-xl border border-zinc-100">
+          <table className="w-full text-[13px]">
+            <thead className="bg-zinc-50 text-zinc-500">
+              <tr>
+                <th className="text-left font-medium px-3 py-2">服务</th>
+                <th className="text-left font-medium px-3 py-2">端口</th>
+                <th className="text-left font-medium px-3 py-2">说明</th>
+              </tr>
+            </thead>
+            <tbody className="text-zinc-700">
+              <tr className="border-t border-zinc-100">
+                <td className="px-3 py-2">管理面板</td>
+                <td className="px-3 py-2 font-mono">{window.location.port || '40000'}</td>
+                <td className="px-3 py-2 text-zinc-500">当前页面入口（控制面）</td>
+              </tr>
+              <tr className="border-t border-zinc-100">
+                <td className="px-3 py-2">OpenCode 免费层引擎</td>
+                <td className="px-3 py-2 font-mono">{config?.gateway_port_effective ?? 40080}</td>
+                <td className="px-3 py-2 text-zinc-500">OpenCode 免费模型推理入口</td>
+              </tr>
+              <tr className="border-t border-zinc-100">
+                <td className="px-3 py-2">供应商服务</td>
+                <td className="px-3 py-2 font-mono">{config?.provider_port_effective ?? 50080}</td>
+                <td className="px-3 py-2 text-zinc-500">自定义源 + 插件供应商入口</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      {/* 引擎二进制 */}
+      <section className="bg-white rounded-2xl border border-zinc-200 shadow-sm p-5">
+        <h2 className="text-lg font-semibold text-zinc-900">引擎二进制</h2>
+        <p className="mt-1 text-[12px] text-zinc-500">
+          免费层引擎（opencode2api-win）与核心程序的位置与状态。
+        </p>
+        <div className="mt-3 space-y-2 text-[13px]">
+          <div className="flex items-center gap-2">
+            <span
+              className={clsx(
+                'w-1.5 h-1.5 rounded-full',
+                binariesInfo?.oc_exists ? 'bg-green-500' : 'bg-red-500',
+              )}
             />
-            <div className="w-11 h-6 bg-zinc-200 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-zinc-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-zinc-900"></div>
-          </label>
-          <span className="text-sm text-zinc-700">开机时自动启动管理器</span>
-        </div>
-        <p className="text-zinc-500 text-xs">Windows 注册表 / Linux .desktop / macOS LaunchAgent</p>
-      </div>
-      )}
-
-      {/* 残留进程清理（孤儿实例 / 探针残留） */}
-      <div className="bg-white rounded-2xl border p-5 space-y-4">
-        <div className="flex items-center justify-between gap-4">
-          <div>
-            <h2 className="text-lg font-semibold text-zinc-900">残留进程清理</h2>
-            <p className="text-zinc-500 text-xs">
-              探测「占着进程但未使用」的节点/实例/探针残留（扫描残留、已停止实例的孤儿进程），勾选后一键清除；运行中的实例与网关自动跳过。
-            </p>
+            <span className="text-zinc-700">核心程序 opencode2api</span>
+            <span className="text-zinc-400">{binariesInfo?.oc_exists ? '已安装' : '缺失'}</span>
           </div>
+          <div className="flex items-center gap-2">
+            <span
+              className={clsx(
+                'w-1.5 h-1.5 rounded-full',
+                binariesInfo?.engine_exists ? 'bg-green-500' : 'bg-amber-500',
+              )}
+            />
+            <span className="text-zinc-700">免费层引擎 opencode2api-win</span>
+            <span className="text-zinc-400">{binariesInfo?.engine_exists ? '已安装' : '未安装'}</span>
+          </div>
+          <div className="text-[11px] text-zinc-400">目录：{binariesInfo?.bin_dir ?? '—'}</div>
+        </div>
+      </section>
+
+      {/* 开机自启 */}
+      <section className="bg-white rounded-2xl border border-zinc-200 shadow-sm p-5">
+        <h2 className="text-lg font-semibold text-zinc-900">开机自启</h2>
+        <div className="mt-3 flex items-center gap-3">
           <button
-            onClick={() => void doScanOrphans()}
-            disabled={orphanBusy}
-            className="flex items-center gap-1.5 bg-zinc-900 text-white rounded-lg px-4 py-2 text-[13px] hover:bg-zinc-700 disabled:opacity-60 disabled:cursor-not-allowed whitespace-nowrap"
+            onClick={() => void handleToggleAutostart(!autostart)}
+            disabled={autostartBusy}
+            className={clsx(
+              'relative w-11 h-6 rounded-full transition-colors',
+              autostart ? 'bg-teal-600' : 'bg-zinc-300',
+              autostartBusy && 'opacity-60',
+            )}
           >
-            {orphanBusy ? <Loader2 size={14} className="animate-spin" /> : <Search size={14} />}
-            {orphanBusy ? '探测中…' : '探测残留'}
+            <span
+              className={clsx(
+                'absolute top-0.5 w-5 h-5 rounded-full bg-white shadow transition-all',
+                autostart ? 'left-[22px]' : 'left-0.5',
+              )}
+            />
+          </button>
+          <span className="text-[13px] text-zinc-600">
+            {autostart ? '已开启：登录系统后自动启动管理面板' : '已关闭'}
+          </span>
+        </div>
+      </section>
+
+      {/* 残留进程清理 */}
+      <section className="bg-white rounded-2xl border border-zinc-200 shadow-sm p-5">
+        <div className="flex items-center gap-2">
+          <h2 className="text-lg font-semibold text-zinc-900">残留进程清理</h2>
+          <span className="flex-1" />
+          <button
+            onClick={() => void scanOrphans()}
+            disabled={orphanBusy}
+            className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-[13px] text-zinc-700 bg-white border border-zinc-200 hover:bg-zinc-50 disabled:opacity-50"
+          >
+            <Search size={14} className={orphanBusy ? 'animate-pulse' : ''} />
+            {orphanBusy ? '扫描中…' : '扫描'}
+          </button>
+          <button
+            onClick={() => void killSelected()}
+            disabled={selected.size === 0 || killBusy}
+            className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-[13px] text-red-600 bg-red-50 hover:bg-red-100 disabled:opacity-40"
+          >
+            {killBusy ? <Loader2 size={14} className="animate-spin" /> : <Trash2 size={14} />}
+            清理选中（{selected.size}）
           </button>
         </div>
-
-        {orphans.length > 0 && (
-          <>
-            <div className="rounded-lg border border-zinc-200 overflow-hidden">
-              <table className="w-full text-[13px]">
-                <thead>
-                  <tr className="text-left text-zinc-400 bg-zinc-50 border-b border-zinc-100">
-                    <th className="py-2 pl-3 w-8">
+        <p className="mt-1 text-[12px] text-zinc-500">
+          扫描占用本项目端口但没有对应管理进程的残留子进程（引擎/供应商服务异常退出时可能出现）。
+        </p>
+        {orphans.length > 0 ? (
+          <div className="mt-3 overflow-hidden rounded-xl border border-zinc-100">
+            <table className="w-full text-[13px]">
+              <thead className="bg-zinc-50 text-zinc-500">
+                <tr>
+                  <th className="w-8 px-2 py-2"></th>
+                  <th className="text-left font-medium px-3 py-2">PID</th>
+                  <th className="text-left font-medium px-3 py-2">进程</th>
+                  <th className="text-left font-medium px-3 py-2">端口</th>
+                  <th className="text-left font-medium px-3 py-2">说明</th>
+                </tr>
+              </thead>
+              <tbody>
+                {orphans.map((p) => (
+                  <tr key={p.pid} className="border-t border-zinc-100">
+                    <td className="px-2 py-2">
                       <input
                         type="checkbox"
-                        checked={selected.size === orphans.length && orphans.length > 0}
-                        onChange={toggleAll}
-                        title="全选/取消"
+                        checked={selected.has(p.pid)}
+                        onChange={(e) => {
+                          const n = new Set(selected)
+                          if (e.target.checked) n.add(p.pid)
+                          else n.delete(p.pid)
+                          setSelected(n)
+                        }}
                       />
-                    </th>
-                    <th className="py-2 pl-2">进程</th>
-                    <th className="py-2 pl-2">PID</th>
-                    <th className="py-2 pl-2">类型</th>
-                    <th className="py-2 pl-2 pr-3">说明</th>
+                    </td>
+                    <td className="px-3 py-2 font-mono">{p.pid}</td>
+                    <td className="px-3 py-2">{p.name || '—'}</td>
+                    <td className="px-3 py-2 font-mono">{p.port || '—'}</td>
+                    <td className="px-3 py-2 text-zinc-500">{p.detail || '—'}</td>
                   </tr>
-                </thead>
-                <tbody>
-                  {orphans.map((o) => (
-                    <tr key={o.pid} className="border-b border-zinc-50 hover:bg-zinc-50/60">
-                      <td className="py-2 pl-3">
-                        <input type="checkbox" checked={selected.has(o.pid)} onChange={() => toggleOne(o.pid)} />
-                      </td>
-                      <td className="py-2 pl-2 text-zinc-700 font-mono">{o.name}</td>
-                      <td className="py-2 pl-2 text-zinc-500">{o.pid}</td>
-                      <td className="py-2 pl-2">
-                        <span
-                          className={clsx(
-                            'inline-block px-2 py-0.5 rounded-full text-[11px] font-medium',
-                            o.category === 'probe' ? 'bg-orange-50 text-orange-600' : 'bg-amber-50 text-amber-700',
-                          )}
-                        >
-                          {o.category === 'probe' ? '探针残留' : '实例残留'}
-                        </span>
-                        {o.instance && <span className="ml-1.5 text-[12px] text-zinc-500">{o.instance}</span>}
-                        {o.port! > 0 && <span className="ml-1.5 text-[12px] text-zinc-400">端口 {o.port}</span>}
-                      </td>
-                      <td className="py-2 pl-2 pr-3 text-zinc-500">{o.detail}</td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-            <div className="flex items-center justify-end gap-3">
-              <span className="text-[12px] text-zinc-400">
-                已选 {selected.size} / {orphans.length}
-              </span>
-              <button
-                onClick={() => void doKillOrphans()}
-                disabled={killBusy || selected.size === 0}
-                className="flex items-center gap-1.5 bg-red-600 text-white rounded-lg px-4 py-2 text-[13px] hover:bg-red-700 disabled:opacity-60 disabled:cursor-not-allowed"
-              >
-                {killBusy ? <Loader2 size={14} className="animate-spin" /> : <Trash2 size={14} />}
-                {killBusy ? '清除中…' : '一键清除'}
-              </button>
-            </div>
-          </>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        ) : (
+          <div className="mt-3 text-[12px] text-zinc-400">尚未扫描，或没有残留进程。</div>
         )}
-      </div>
+      </section>
 
       {/* 清除数据 */}
-      <div className="bg-white rounded-2xl border p-5 space-y-4 border-red-200">
+      <section className="bg-white rounded-2xl border border-red-200 shadow-sm p-5">
         <h2 className="text-lg font-semibold text-red-700">清除数据</h2>
-        <p className="text-zinc-500 text-xs">
-          遇到环境异常（实例/端口残留、配置损坏）时可清理本地数据。执行前会自动停止所有实例与网关。
+        <p className="mt-1 text-[12px] text-zinc-500">
+          分级清理，逐级包含上一级内容。操作不可撤销，建议先备份数据目录。
         </p>
-        <div className="flex flex-wrap gap-2">
-          <button
-            onClick={() => handleDataClean(1)}
-            disabled={!!cleanLevel}
-            className="flex items-center gap-1.5 px-4 py-2 rounded-lg border border-zinc-300 text-[13px] hover:bg-zinc-100 disabled:cursor-not-allowed disabled:opacity-50"
-          >
-            {cleanLevel === 1 ? <Loader2 size={14} className="animate-spin" /> : null}
-            清理运行数据
-          </button>
-          <button
-            onClick={() => handleDataClean(2)}
-            disabled={!!cleanLevel}
-            className="flex items-center gap-1.5 px-4 py-2 rounded-lg border border-amber-300 text-[13px] text-amber-700 hover:bg-amber-50 disabled:cursor-not-allowed disabled:opacity-50"
-          >
-            {cleanLevel === 2 ? <Loader2 size={14} className="animate-spin" /> : null}
-            清空实例记录
-          </button>
-          <button
-            onClick={() => handleDataClean(3)}
-            disabled={!!cleanLevel}
-            className="flex items-center gap-1.5 px-4 py-2 rounded-lg bg-red-600 text-white text-[13px] hover:bg-red-700 disabled:cursor-not-allowed disabled:opacity-50"
-          >
-            {cleanLevel === 3 ? <Loader2 size={14} className="animate-spin" /> : null}
-            全部重置
-          </button>
-        </div>
-        <p className="text-zinc-500 text-xs">全部重置会删除 config.json（备份为 config.json.bak），需重新配置</p>
-      </div>
-
-      {/* 关于 */}
-      <div className="bg-white rounded-2xl border p-5 space-y-4">
-        <h2 className="text-lg font-semibold text-zinc-900">关于</h2>
-
-        <div className="space-y-2">
-          <label className="block text-sm font-medium text-zinc-700">版本与更新</label>
-          <div className="flex flex-wrap items-center gap-2">
-            <code className="text-sm bg-zinc-100 px-3 py-2 rounded border font-mono">v{__APP_VERSION__}</code>
+        <div className="mt-3 flex flex-wrap gap-2">
+          {([1, 2, 3] as const).map((lv) => (
             <button
-              type="button"
+              key={lv}
+              onClick={() => void doClean(lv)}
+              disabled={cleanLevel !== null}
+              className={clsx(
+                'flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-[13px] disabled:opacity-40',
+                lv === 3
+                  ? 'text-white bg-red-600 hover:bg-red-700'
+                  : 'text-red-700 bg-red-50 hover:bg-red-100',
+              )}
+            >
+              {cleanLevel === lv ? <Loader2 size={14} className="animate-spin" /> : <Trash2 size={14} />}
+              {lv === 1 ? '清运行数据' : lv === 2 ? '清运行数据 + 模型缓存' : '清全部（含配置）'}
+            </button>
+          ))}
+        </div>
+      </section>
+
+      {/* 关于 + 更新 */}
+      <section className="bg-white rounded-2xl border border-zinc-200 shadow-sm p-5">
+        <h2 className="text-lg font-semibold text-zinc-900">关于</h2>
+        <div className="mt-3 space-y-2 text-[13px] text-zinc-600">
+          <div>
+            当前版本：<span className="font-mono">v{__APP_VERSION__}</span>
+          </div>
+          {update && (
+            <div className="text-[12px] text-zinc-500">
+              最新版本：<span className="font-mono">v{update.latest}</span>
+            </div>
+          )}
+          <div className="flex items-center gap-2 pt-1">
+            <button
               onClick={onCheckUpdate}
               disabled={checking}
-              className="flex items-center gap-1.5 px-3 py-2 rounded-lg border border-zinc-300 text-[13px] hover:bg-zinc-100 disabled:cursor-not-allowed disabled:opacity-50"
+              className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-[13px] text-zinc-700 bg-white border border-zinc-200 hover:bg-zinc-50 disabled:opacity-50"
             >
-              {checking ? <Loader2 size={14} className="animate-spin" /> : <RefreshCw size={14} />}
-              检查更新
+              <RefreshCw size={14} className={checking ? 'animate-spin' : ''} />
+              {checking ? '检查中…' : '检查更新'}
             </button>
-            {update && canNativeUpdate && (
+            {checkedAt ? (
+              <span className="text-[11px] text-zinc-400">
+                上次检查：{new Date(checkedAt).toLocaleTimeString()}
+              </span>
+            ) : null}
+            {canNativeUpdate && update ? (
               <button
-                type="button"
                 onClick={onInstallUpdate}
-                className="flex items-center gap-1.5 px-3 py-2 rounded-lg bg-amber-600 text-white text-[13px] hover:bg-amber-700"
+                className="px-3 py-1.5 rounded-lg text-[13px] text-white bg-teal-600 hover:bg-teal-700"
               >
                 立即更新
               </button>
-            )}
-            {update && !canNativeUpdate && (
+            ) : null}
+            {update ? (
               <button
-                type="button"
                 onClick={() => onOpenRelease(update.url)}
-                className="flex items-center gap-1.5 px-3 py-2 rounded-lg bg-amber-600 text-white text-[13px] hover:bg-amber-700"
+                className="px-3 py-1.5 rounded-lg text-[13px] text-zinc-700 hover:bg-zinc-100"
               >
-                打开发布页
+                查看发布页
               </button>
-            )}
-            {update && canNativeUpdate && (
-              <button
-                type="button"
-                onClick={() => onOpenRelease(update.url)}
-                className="px-3 py-2 rounded-lg border border-zinc-300 text-[13px] text-zinc-700 hover:bg-zinc-100"
-              >
-                发布说明
-              </button>
-            )}
+            ) : null}
           </div>
-          <p className="text-[12px] text-zinc-600">
-            {update
-              ? `发现新版本 v${update.latest}${update.prerelease ? '（预发布）' : ''}`
-              : checkedAt
-                ? '已是最新版本'
-                : '尚未检查'}
-            {checkedAt ? ` · 上次检查 ${new Date(checkedAt).toLocaleString('zh-CN', { hour12: false })}` : ''}
-          </p>
-          {update?.publishedAt && (
-            <p className="text-[12px] text-zinc-500">发布时间：{new Date(update.publishedAt).toLocaleString('zh-CN', { hour12: false })}</p>
-          )}
-          {updateError && <p className="text-[12px] text-red-600">检查失败：{updateError}</p>}
-          <p className="text-[12px] text-zinc-500">
-            启动时及每 6 小时自动检查 GitHub Releases（按语义化版本取最高版本）。桌面版可在应用内下载并安装；
-            headless / 浏览器版只提醒并跳转发布页。
-          </p>
-        </div>
-
-        <div className="space-y-2">
-          <label className="block text-sm font-medium text-zinc-700">二进制目录</label>
-          <code className="block text-sm bg-zinc-100 px-3 py-2 rounded border font-mono">
-            {binariesInfo.bin_dir}
-          </code>
-        </div>
-
-        <div className="space-y-2">
-          <label className="block text-sm font-medium text-zinc-700">子程序状态</label>
-          <div className="space-y-1">
-            <div className="flex items-center space-x-2 text-sm">
-              <span className={binariesInfo.oc_exists ? 'text-green-600' : 'text-red-600'}>
-                {binariesInfo.oc_exists ? '✓' : '✗'}
-              </span>
-              <span>opencode2api.exe</span>
-            </div>
-            <div className="flex items-center space-x-2 text-sm">
-              <span className={binariesInfo.sb_exists ? 'text-green-600' : 'text-red-600'}>
-                {binariesInfo.sb_exists ? '✓' : '✗'}
-              </span>
-              <span>sing-box.exe</span>
-            </div>
-            <div className="flex items-center space-x-2 text-sm">
-              <span className={binariesInfo.sidecar_exists ? 'text-green-600' : 'text-red-600'}>
-                {binariesInfo.sidecar_exists ? '✓' : '✗'}
-              </span>
-              <span>free-sidecar.exe</span>
-            </div>
+          {updateError ? (
+            <div className="text-[12px] text-red-600">检查失败：{updateError}</div>
+          ) : null}
+          <div className="pt-2 text-[11px] text-zinc-400">
+            OpenCode 免费层由独立的 opencode2api-win 引擎提供（GPL-3.0），以独立进程方式运行。
           </div>
         </div>
-
-        <p className="text-zinc-500 text-xs">子程序随主程序内嵌，运行时不满足时自动释放</p>
-      </div>
+      </section>
     </div>
   )
 }

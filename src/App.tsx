@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import clsx from 'clsx'
-import { Server, Layers, Radar, Settings, BarChart3, ScrollText, Plug, Sparkles } from 'lucide-react'
+import { Zap, Settings, BarChart3, ScrollText, Plug, Sparkles } from 'lucide-react'
 import { api } from './lib/api'
 import { useUpdateCheck } from './lib/updates'
 import { nativeUpdateSupported } from './lib/nativeUpdate'
@@ -8,20 +8,16 @@ import { isDesktop } from './lib/env'
 import { TitleBar } from './components/TitleBar'
 import TaskPanel from './components/TaskPanel'
 import UpdateModal from './components/UpdateModal'
-import InstancesPage from './pages/InstancesPage'
-import PoolPage from './pages/PoolPage'
-import NodesPage from './pages/NodesPage'
+import OpenCodePage from './pages/OpenCodePage'
 import CustomModelsPage from './pages/CustomModelsPage'
 import SettingsPage from './pages/SettingsPage'
 import StatsPage from './pages/StatsPage'
 import LogsPage from './pages/LogsPage'
 
-type Tab = 'instances' | 'pool' | 'nodes' | 'custom' | 'settings' | 'stats' | 'logs'
+type Tab = 'opencode' | 'custom' | 'stats' | 'logs' | 'settings'
 
-const NAV: { id: Tab; label: string; icon: typeof Server }[] = [
-  { id: 'instances', label: '独享', icon: Server },
-  { id: 'pool', label: '实例池', icon: Layers },
-  { id: 'nodes', label: '节点池', icon: Radar },
+const NAV: { id: Tab; label: string; icon: typeof Zap }[] = [
+  { id: 'opencode', label: 'OpenCode', icon: Zap },
   { id: 'custom', label: '自定义模型', icon: Plug },
   { id: 'stats', label: '统计', icon: BarChart3 },
   { id: 'logs', label: '日志', icon: ScrollText },
@@ -52,7 +48,7 @@ const SCAN_STALE_PER_NODE_MS = 5_000
 const scanStaleMs = (total: number) => Math.min(600_000, SCAN_STALE_BASE_MS + total * SCAN_STALE_PER_NODE_MS)
 
 export default function App() {
-  const [tab, setTab] = useState<Tab>('instances')
+  const [tab, setTab] = useState<Tab>('opencode')
   const [toast, setToast] = useState<{ msg: string; ok: boolean } | null>(null)
   // V2: 全局任务悬浮栈（跨页面常驻，多任务并存堆叠）
   const [tasks, setTasks] = useState<TaskItem[]>([])
@@ -219,18 +215,6 @@ export default function App() {
     return () => window.clearInterval(timer)
   }, [upsertTask])
 
-  // M10: onRelease 稳定化（只依赖稳定回调）——PoolPage 因 props 引用不变而保持 memo，隔离重渲染
-  const onRelease = useCallback(
-    (r: { active: boolean; done: number; total: number }) => {
-      if (!r.active) {
-        removeTask('release')
-        return
-      }
-      upsertTask({ id: 'release', type: 'release', title: '释放实例', done: r.done, total: r.total, busy: r.done < r.total })
-    },
-    [removeTask, upsertTask],
-  )
-
   // 退出入口已移除：设置页按钮删除，托盘菜单（Rust 侧）仍可退出
 
   return (
@@ -297,9 +281,7 @@ export default function App() {
 
         {/* 内容区 */}
         <main className="flex-1 min-w-0 overflow-y-auto">
-          {tab === 'instances' && <InstancesPage toast={showToast} />}
-          {tab === 'pool' && <PoolPage toast={showToast} onRelease={onRelease} onTask={upsertTask} />}
-          {tab === 'nodes' && <NodesPage toast={showToast} onTask={upsertTask} onRemove={removeTask} />}
+          {tab === 'opencode' && <OpenCodePage toast={showToast} />}
           {tab === 'custom' && <CustomModelsPage toast={showToast} />}
           {tab === 'stats' && <StatsPage toast={showToast} />}
           {tab === 'logs' && <LogsPage toast={showToast} />}
