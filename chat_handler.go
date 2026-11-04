@@ -291,21 +291,8 @@ func listModelsHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	configMu.RUnlock()
 
-	// 仅返回免费可用模型（产品定位：免费模型聚合；付费模型不带 key 调用必 401，不展示）。
-	// 不做按 key 的鉴权分流——任何客户端拿到的都是同一份"免费目录"。
-	modelMu.RLock()
-	var combinedModels []ModelInfo
-	for _, model := range models {
-		if isFreeModel(model.ID) {
-			combinedModels = append(combinedModels, model)
-		}
-	}
-	for _, goModel := range goModelsCache {
-		if isFreeModel(goModel.ID) && !containsModelWithID(combinedModels, goModel.ID) {
-			combinedModels = append(combinedModels, goModel)
-		}
-	}
-	modelMu.RUnlock()
+	// 全部模型都可用（v2.0.0：模型来自用户自己的自定义源/插件供应商）。
+	combinedModels := append([]ModelInfo(nil), models...)
 
 	allModels := replaceModelIDsWithAliases(combinedModels, aliases)
 	// 多厂商聚合：把其它厂商（非 opencode）的免费模型并入列表（同名加厂商前缀）。

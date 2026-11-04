@@ -2,9 +2,7 @@
 // Same package (main) - do not change package clause manually.
 //
 // 模型目录缓存（唯一数据源：core/aggregator 聚合器）。
-// 旧版 fetchModels/fetchGoModels 直连 opencode.ai 的硬编码拉取已删除——
-// 目录一律由 syncModelsFromAggregator 从聚合器同步（启动、定时、reload 三个入口共用），
-// 上游 URL/鉴权/免费判定等厂商专属逻辑全部收拢在 vendors/opencode。
+// v2.0.0 起 OpenCode 双目录（zen/go）已随免费层移除，只剩一份平铺缓存。
 package main
 
 import (
@@ -25,10 +23,9 @@ type ModelInfo struct {
 }
 
 var (
-	modelsCache   []ModelInfo
-	goModelsCache []ModelInfo
-	modelMu       sync.RWMutex
-	modelsLoaded  bool
+	modelsCache  []ModelInfo
+	modelMu      sync.RWMutex
+	modelsLoaded bool
 )
 
 func containsModelWithID(models []ModelInfo, modelID string) bool {
@@ -38,18 +35,6 @@ func containsModelWithID(models []ModelInfo, modelID string) bool {
 		}
 	}
 	return false
-}
-
-func isModelInGoCatalog(modelID string) bool {
-	modelMu.RLock()
-	defer modelMu.RUnlock()
-	return containsModelWithID(goModelsCache, modelID)
-}
-
-func isGoCatalogOnlyModel(modelID string) bool {
-	modelMu.RLock()
-	defer modelMu.RUnlock()
-	return containsModelWithID(goModelsCache, modelID) && !containsModelWithID(modelsCache, modelID)
 }
 
 func getModelIDs() []string {
@@ -62,40 +47,7 @@ func getModelIDs() []string {
 	return ids
 }
 
-func getGoModelIDs() []string {
-	modelMu.RLock()
-	defer modelMu.RUnlock()
-	ids := make([]string, len(goModelsCache))
-	for i, m := range goModelsCache {
-		ids[i] = m.ID
-	}
-	return ids
-}
-
-func filterFreeModels(ids []string) []string {
-	free := make([]string, 0, len(ids))
-	for _, id := range ids {
-		if isFreeModel(id) {
-			free = append(free, id)
-		}
-	}
-	return free
-}
-
-// getCandidateModels 返回与当前认证权限一致的回退候选模型列表。
-// public 模式只回退到免费模型；带 key 的模式只回退到与目标模型走相同端点的模型，避免跨目录 401。
-func getCandidateModels(auth UpstreamAuth, modelID string) []string {
-	if auth.Mode == AuthRoutePublic {
-		return filterFreeModels(getModelIDs())
-	}
-	if auth.shouldUseGoEndpoint(modelID) {
-		return getGoModelIDs()
-	}
-	return getModelIDs()
-}
-
-// startModelRefresh 定时刷新模型列表（每 10 分钟）；数据源为厂商聚合器（aggregator），
-// 拉取后同步写入 modelsCache / goModelsCache。
+// startModelRefresh 定时刷新模型列表（每 10 分钟）；数据源为厂商聚合器（aggregator）。
 func startModelRefresh() {
 	go func() {
 		ticker := time.NewTicker(10 * time.Minute)
@@ -105,9 +57,8 @@ func startModelRefresh() {
 			refreshModelCatalogIfDue()
 			modelMu.RLock()
 			n := len(modelsCache)
-			ng := len(goModelsCache)
 			modelMu.RUnlock()
-			slog.Info("model catalog auto-refreshed", "zen", n, "go", ng)
+			slog.Info("model catalog auto-refreshed", "count", n)
 		}
 	}()
 }

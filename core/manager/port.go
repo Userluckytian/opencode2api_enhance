@@ -1,4 +1,7 @@
 // 端口工具（Rust commands.rs port_suggest / port_check / force_free_port 移植）。
+//
+// v2.0.0：实例池移除后不再有「实例端口段」，端口建议改为在 41000~43000 段内
+// 找一个空闲端口（用于自定义源测试或临时调试）。
 package manager
 
 import (
@@ -17,24 +20,26 @@ func lcgNext(seed *uint64) uint64 {
 	return *seed
 }
 
-// isPortUsedByInstance 端口是否已被实例表占用。
-func (m *Manager) isPortUsedByInstance(port uint16) bool {
-	for _, inst := range m.ListInstances() {
-		if inst.Port == port || inst.SingboxPort == port {
-			return true
+// suggestFreePorts 从 start 起找 count 个连续可用端口。
+func (m *Manager) suggestFreePorts(start uint16, count int) []uint16 {
+	out := make([]uint16, 0, count)
+	port := int(start)
+	for len(out) < count && port <= 65535 {
+		if isPortFree(uint16(port)) {
+			out = append(out, uint16(port))
 		}
+		port++
 	}
-	return false
+	return out
 }
 
-// PortSuggest 建议一个可用端口（在环境实例段 [base+100, base+2100) 内 LCG 取 2000 次尝试）。
-// 与批量添加/订阅导入同段，端口和建议永远落在当前环境槽内（跨环境零重叠）。
+// PortSuggest 建议一个可用端口（41000~43000 段内 LCG 取 2000 次尝试）。
+// 该段避开默认三端口（40000/40080/50080）与常见冲突区。
 func (m *Manager) PortSuggest() (uint16, error) {
 	seed := randSeed()
-	base := m.instanceBasePort()
 	for i := 0; i < 2000; i++ {
-		candidate := base + 100 + uint16(lcgNext(&seed)%2000)
-		if !m.isPortUsedByInstance(candidate) && isPortFree(candidate) {
+		candidate := uint16(41000 + lcgNext(&seed)%2000)
+		if isPortFree(candidate) {
 			return candidate, nil
 		}
 	}
@@ -47,13 +52,10 @@ type PortCheckResult struct {
 	Reason    string `json:"reason"`
 }
 
-// PortCheck 检查端口是否可被新实例使用。
+// PortCheck 检查端口是否可用。
 func (m *Manager) PortCheck(port uint16) PortCheckResult {
 	if port < 1024 {
 		return PortCheckResult{Available: false, Reason: "端口需 >= 1024"}
-	}
-	if m.isPortUsedByInstance(port) {
-		return PortCheckResult{Available: false, Reason: "已被实例占用"}
 	}
 	if isPortFree(port) {
 		return PortCheckResult{Available: true, Reason: "端口可用"}
@@ -73,13 +75,4 @@ func (m *Manager) ForceFreePort(runner Runner, port uint16) []int {
 		}
 	}
 	return freed
-}
-
-// RestartPoolResult 一键重启池结果（前端契约）。
-type RestartPoolResult struct {
-	Stopped        int      `json:"stopped"`
-	Started        int      `json:"started"`
-	FreedPorts     []uint16 `json:"freed_ports"`
-	GatewayRunning bool     `json:"gateway_running"`
-	Error          string   `json:"error,omitempty"`
 }

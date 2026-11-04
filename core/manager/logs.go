@@ -157,21 +157,20 @@ func (m *Manager) ReadProcessLogs(processFilter, roleFilter string, since time.T
 	return LogsResult{Entries: entries, Count: len(entries), Truncated: truncated}
 }
 
-// collectLogSources 枚举网关 + 全部实例（含已停止，保留历史日志）的日志来源。
+// collectLogSources 枚举两个日志来源：免费层引擎（free-tier）与供应商服务。
 func (m *Manager) collectLogSources() []logSource {
-	sources := []logSource{{
-		name: gatewayLogSource,
-		role: "gateway",
-		dir:  filepath.Join(m.paths.RuntimeDir, gatewayLogSource, "logs"),
-	}}
-	for _, inst := range m.ListInstances() {
-		sources = append(sources, logSource{
-			name: inst.Name,
-			role: "instance",
-			dir:  filepath.Join(m.paths.RuntimeDirOf(inst.Name), "logs"),
-		})
+	return []logSource{
+		{
+			name: "免费层引擎",
+			role: "engine",
+			dir:  filepath.Join(m.paths.FreeTierEngineDir(), "logs"),
+		},
+		{
+			name: "供应商服务",
+			role: "provider",
+			dir:  filepath.Join(m.paths.RuntimeDir, providerServiceDirBase, "logs"),
+		},
 	}
-	return sources
 }
 
 // matchProcess 过滤来源名；空过滤器 = 全部命中；"gateway" 与 "_unified-gateway" 互为同义。

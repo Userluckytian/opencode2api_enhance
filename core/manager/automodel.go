@@ -6,9 +6,7 @@ package manager
 
 import (
 	"encoding/json"
-	"os"
-	"path/filepath"
-	"reflect"
+	"net/http"
 	"strings"
 )
 
@@ -109,63 +107,30 @@ func (m *Manager) SetAutoModel(cfg AutoModelCfg) error {
 
 // propagateAutoModel 把 auto_model 键补写进 runtime 下每个子进程配置
 // （实例 + 统一网关；仿 PropagateCustomProviders：内容未变不写，避免无谓热重载）。
-func (m *Manager) propagateAutoModel() error {
-	val := m.loadConfig().AutoModel
-	entries, err := os.ReadDir(m.paths.RuntimeDir)
-	if err != nil {
-		return nil // runtime 目录不存在 = 尚无子进程，跳过
-	}
-	var firstErr error
-	for _, e := range entries {
-		if !e.IsDir() {
-			continue
-		}
-		cfgPath := filepath.Join(m.paths.RuntimeDir, e.Name(), "opencode2api.json")
-		if !fileExists(cfgPath) {
-			continue
-		}
-		if err := patchAutoModelFile(cfgPath, val); err != nil && firstErr == nil {
-			firstErr = err
-		}
-	}
-	return firstErr
-}
+// propagateAutoModel 已随免费层移除（子进程不再存在，无需跨进程传播）。
+// auto 虚拟模型配置只由本进程（供应商服务）读取，保存即生效。
+func (m *Manager) propagateAutoModel() error { return nil }
 
-// patchAutoModelFile 替换子进程配置的 auto_model 键（其余键保留）。
-// 文件缺失/损坏跳过（下次启动会整体重新生成）；内容未变化不写（防触发子进程热重载）。
-// 相等判定经 map 归一化（json.Unmarshal 到 map 再 DeepEqual），规避结构体字段序与
-// map 键序差异导致的「语义相同却字节不同 → 每次保存都重写」。
-func patchAutoModelFile(path string, cfg *AutoModelCfg) error {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return nil
-	}
-	var doc map[string]any
-	if json.Unmarshal(data, &doc) != nil {
-		return nil // 损坏文件不碰
-	}
-	if cfg == nil {
-		if _, exists := doc["auto_model"]; !exists {
-			return nil
+
+// AutoModelConfigHandler GET/POST /api/admin/auto-model：读取/保存 auto 虚拟模型配置。
+func (m *Manager) AutoModelConfigHandler() http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodGet:
+			writeJSON(w, m.AutoModel())
+		case http.MethodPost:
+			var cfg AutoModelCfg
+			if err := json.NewDecoder(r.Body).Decode(&cfg); err != nil {
+				writeErr(w, http.StatusBadRequest, "请求体不是合法 JSON")
+				return
+			}
+			if err := m.SetAutoModel(cfg); err != nil {
+				writeErr(w, http.StatusInternalServerError, err.Error())
+				return
+			}
+			writeJSON(w, m.AutoModel())
+		default:
+			writeErr(w, http.StatusMethodNotAllowed, "method not allowed")
 		}
-		delete(doc, "auto_model")
-	} else {
-		want, err := json.Marshal(cfg)
-		if err != nil {
-			return err
-		}
-		var wantMap map[string]any
-		if err := json.Unmarshal(want, &wantMap); err != nil {
-			return err
-		}
-		if reflect.DeepEqual(doc["auto_model"], wantMap) {
-			return nil
-		}
-		doc["auto_model"] = wantMap
 	}
-	out, err := json.MarshalIndent(doc, "", "  ")
-	if err != nil {
-		return err
-	}
-	return WriteFileAtomic(path, out, 0o644)
 }

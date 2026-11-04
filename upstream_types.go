@@ -6,8 +6,6 @@ import (
 	"crypto/subtle"
 	"net/http"
 	"strings"
-
-	"github.com/6Kmfi6HP/opencode2api/vendors/opencode"
 )
 
 type TierType int
@@ -22,8 +20,6 @@ type AuthRouteMode int
 const (
 	AuthRoutePublic AuthRouteMode = iota
 	AuthRouteAuto
-	AuthRouteZen
-	AuthRouteGo
 )
 
 type UpstreamAuth struct {
@@ -37,7 +33,6 @@ type UpstreamAuth struct {
 }
 
 // tierOfAuth maps auth route mode to a call-log tier string.
-// AuthRoutePublic (free/open) -> "free"; otherwise "paid" (matches opencode authT.tier).
 func tierOfAuth(a UpstreamAuth) string {
 	if a.Mode == AuthRoutePublic {
 		return "free"
@@ -45,6 +40,11 @@ func tierOfAuth(a UpstreamAuth) string {
 	return "paid"
 }
 
+// extractUpstreamAuth 解析入站请求带的凭据。
+//
+// v2.0.0 起本进程不再有「OpenCode 免费层/付费层」之分：所有模型都来自
+// 自定义源或插件供应商，凭据只用于本进程的入站鉴权（apiKeyAuthMiddleware 已
+// 在更外层校验），这里仅保留「是否带 key」这一事实供调用日志区分。
 func extractUpstreamAuth(r *http.Request) UpstreamAuth {
 	auth := r.Header.Get("Authorization")
 	if !strings.HasPrefix(auth, "Bearer ") {
@@ -54,35 +54,10 @@ func extractUpstreamAuth(r *http.Request) UpstreamAuth {
 	if token == "" || token == "public" {
 		return UpstreamAuth{Mode: AuthRoutePublic}
 	}
-	// 本地门禁密钥（adminPassword）：仅用于本层认证，不当作上游付费 key，
-	// 底层请求 opencode 时一律走 public 免费。
 	if adminPassword != "" && subtle.ConstantTimeCompare([]byte(token), []byte(adminPassword)) == 1 {
 		return UpstreamAuth{Mode: AuthRoutePublic}
 	}
-	// go:/zen: 前缀路由：去掉前缀后剩余部分仍需是有效 key（sk- 开头）；
-	// 前缀后的剩余部分若是本地门禁密钥，同样视为 public（底层免费）。
-	if rest, ok := strings.CutPrefix(token, "go:"); ok && isValidOpenCodeKey(rest) {
-		if adminPassword != "" && subtle.ConstantTimeCompare([]byte(rest), []byte(adminPassword)) == 1 {
-			return UpstreamAuth{Mode: AuthRoutePublic}
-		}
-		return UpstreamAuth{Token: rest, Mode: AuthRouteGo}
-	}
-	if rest, ok := strings.CutPrefix(token, "zen:"); ok && isValidOpenCodeKey(rest) {
-		if adminPassword != "" && subtle.ConstantTimeCompare([]byte(rest), []byte(adminPassword)) == 1 {
-			return UpstreamAuth{Mode: AuthRoutePublic}
-		}
-		return UpstreamAuth{Token: rest, Mode: AuthRouteZen}
-	}
-	// 只有 sk- 开头的才是有效 key，其余（no-key-required 等占位符）一律走 public
-	if isValidOpenCodeKey(token) {
-		return UpstreamAuth{Token: token, Mode: AuthRouteAuto}
-	}
-	return UpstreamAuth{Mode: AuthRoutePublic}
-}
-
-// 只认 sk- 开头的 key，避免客户端占位 key（如 no-key-required）被透传给上游导致 401
-func isValidOpenCodeKey(token string) bool {
-	return strings.HasPrefix(token, "sk-") && len(token) > 15
+	return UpstreamAuth{Token: token, Mode: AuthRouteAuto}
 }
 
 func (auth UpstreamAuth) tier() TierType {
@@ -99,22 +74,9 @@ func (auth UpstreamAuth) authorizationHeader() string {
 	return "Bearer " + auth.Token
 }
 
-func (auth UpstreamAuth) shouldUseGoCatalog() bool {
-	return auth.Mode == AuthRouteGo
-}
-
-func (auth UpstreamAuth) shouldUseGoEndpoint(modelID string) bool {
-	switch auth.Mode {
-	case AuthRouteGo:
-		return isModelInGoCatalog(modelID)
-	case AuthRouteAuto:
-		return isGoCatalogOnlyModel(modelID)
-	default:
-		return false
-	}
-}
-
-// isFreeModel 复用 OpenCode 厂商的免费模型规则，确保目录标记与 /v1/models 过滤一致。
-func isFreeModel(modelID string) bool {
-	return opencode.IsFreeModel(modelID)
-}
+// isFreeModel 判定某模型是否「无需额外付费即可用」。
+//
+// 历史上这是 OpenCode 的价值模型（-free 后缀 / 价格为零），现在所有模型都由
+// 用户自己的自定义源提供，因此一律可用——保留函数是为了让调用日志/统计的
+// 「free/paid」列继续有意义（本包恒返回 true）。
+func isFreeModel(string) bool { return true }

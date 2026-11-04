@@ -216,6 +216,18 @@ func waitForPortAbort(port uint16, timeout time.Duration, abort func() bool) err
 	}
 }
 
+// probePort 探测 127.0.0.1:port 是否可连接（有进程在监听）。
+// timeout 是单次拨号上限；返回 true = 端口存活。
+func probePort(port uint16, timeout time.Duration) bool {
+	addr := net.JoinHostPort("127.0.0.1", strconv.Itoa(int(port)))
+	conn, err := net.DialTimeout("tcp", addr, timeout)
+	if err != nil {
+		return false
+	}
+	_ = conn.Close()
+	return true
+}
+
 // isPortFree 探测端口是否未被监听（一次性 bind 判断）。
 func isPortFree(port uint16) bool {
 	ln, err := net.Listen("tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(int(port))))

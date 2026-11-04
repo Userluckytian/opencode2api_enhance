@@ -1,86 +1,40 @@
-// SOCKS 配置态只读快照 + 路由结论判定（调试与可观测性计划阶段 1 遗留项）。
-// 独立文件：不改动 socks.go（避免与并行工作冲突）。
-// Same package (main) - do not change package clause manually.
+// 路由结论判定（调用日志 CallRecord.RouteVerdict / call_log.jsonl 的 route_verdict）。
+//
+// v2.0.0：节点池移除后只剩「直连」与「经自定义代理」两种出站形态，
+// 因此结论集合收敛为 proxied / direct_by_design，其余常量保留以兼容历史日志。
+// 为什么用字符串枚举而不是 bool：bool + omitempty 会让 false 整键从 JSON 消失，
+// 前端永远拿到 undefined，无法区分「假」与「未写入」。
 package main
 
 import "strings"
 
-// 路由结论枚举（CallRecord.RouteVerdict / call_log.jsonl 的 route_verdict）。
-//
-// 为什么用字符串枚举而不是 bool：已删除的 ViaProxy 就是教训——bool + omitempty
-// 会让 false 整键从 JSON 中消失，前端永远拿到 undefined，无法区分「假」与「未写入」。
-// 字符串的空值天然表示「未知 / 旧记录」，前端可安全降级为 '-'。
 const (
-	// RouteVerdictProxied 本次调用确实经由代理节点出站。
+	// RouteVerdictProxied 本次调用确实经由代理出站。
 	RouteVerdictProxied = "proxied"
-	// RouteVerdictDirectByDesign 付费层直连：设计如此（getHTTPClientForTierWithProxy 对 TierPaid 恒返回空代理地址），不是故障。
+	// RouteVerdictDirectByDesign 直连：设计如此（厂商未配置 proxy）。
 	RouteVerdictDirectByDesign = "direct_by_design"
-	// RouteVerdictDirectConfigMissing 免费层本应走代理池，但本进程根本没有 SOCKS 配置 → 配置丢失、已回退直连。
+	// RouteVerdictDirectConfigMissing 历史常量：免费层本应走代理池但无 SOCKS 配置。
 	RouteVerdictDirectConfigMissing = "direct_config_missing"
-	// RouteVerdictDirectUnexpected 免费层且 SOCKS 已配置，却仍然直连 → 异常，需排查。
+	// RouteVerdictDirectUnexpected 历史常量：免费层已配代理却直连。
 	RouteVerdictDirectUnexpected = "direct_unexpected"
-	// RouteVerdictNoHealthyNode 免费层已配置代理但无可用节点 → 池空，返回 503。
+	// RouteVerdictNoHealthyNode 历史常量：免费层已配代理但池空（本地 503）。
 	RouteVerdictNoHealthyNode = "no_healthy_node"
 )
 
-// socksProxyConfigured 报告本进程当前是否配置了 SOCKS 出站代理。
-//
-// 只看 active_socks5（实例级出站）与 socks5_proxies（网关级聚合）两键：
-// 「SOCKS 三键」中的 route_mode 默认值为 "smart"（socks.go 的 init 写入）恒非空，
-// 用它判定会永远判成「已配置」——计划 §6 术语表明确警告过的坑。
-//
-// 并发安全：socks5Mu 是 socks5Proxies / activeSocks5 的专属 RWMutex，本函数只取读锁，
-// 且锁内不再获取任何其它锁。applyConfig 的锁序为 configMu → socks5Mu → socks5CacheMu，
-// 本函数不持 configMu、不嵌套下游锁，与既有锁序同向无环，不构成死锁。
-func socksProxyConfigured() bool {
-	socks5Mu.RLock()
-	defer socks5Mu.RUnlock()
-	return strings.TrimSpace(activeSocks5) != "" || len(socks5Proxies) > 0
-}
+// socksProxyConfigured 恒为 false：v2.0.0 起本进程不再有全局 SOCKS 池，
+// 代理是「每个自定义源自己的 proxy 字段」，由 StaticProxyTransport 承担。
+func socksProxyConfigured() bool { return false }
 
 // routeVerdict 判定路由结论（纯函数：无锁、无全局状态，可单测）。
-//
-// nodes 必须是未被兜底改写的原始节点列表（recordCall 把空节点换成「直连」之前的值）；
-// tier 取值同 tierOfAuth："free" / "paid"，其它值（含空串）视为无法判定。
-//
-//	存在非空节点                    → proxied
-//	节点全空 + paid                 → direct_by_design
-//	节点全空 + free + SOCKS 未配置  → direct_config_missing
-//	节点全空 + free + SOCKS 已配置  → direct_unexpected
-//	其余（tier 为空等）            → ""（前端降级为 '-'）
-//
-// routeVerdict 判定路由结论（纯函数：无锁、无全局状态，可单测）。
-//
-// nodes 必须是未被兜底改写的原始节点列表（recordCall 把空节点换成「直连」之前的值）；
-// tier 取值同 tierOfAuth："free" / "paid"，其它值（含空串）视为无法判定。
-//
-//	存在非空节点                    → proxied
-//	节点全空 + paid                 → direct_by_design
-//	节点全空 + free + SOCKS 未配置  → direct_config_missing
-//	节点全空 + free + SOCKS 已配置  → direct_unexpected
-//	节点全空 + free + SOCKS 已配置 且 errMsg 含 no healthy proxy node → no_healthy_node
-//	其余（tier 为空等）            → ""（前端降级为 '-'）
+// nodes 必须是未被兜底改写的原始节点列表；tier 取值同 tierOfAuth。
 func routeVerdict(nodes []string, tier string, socksConfigured bool, errMsg string) string {
-	for _, n := range nodes {
-		if strings.TrimSpace(n) != "" {
-			return RouteVerdictProxied
-		}
+	if hasNonEmptyNode(nodes) {
+		return RouteVerdictProxied
 	}
-	switch tier {
-	case "paid":
+	if tier == "paid" || tier == "free" {
 		return RouteVerdictDirectByDesign
-	case "free":
-		if socksConfigured {
-			low := strings.ToLower(errMsg)
-			if strings.Contains(low, "no healthy proxy node") || strings.Contains(low, "no_healthy_node") {
-				return RouteVerdictNoHealthyNode
-			}
-			return RouteVerdictDirectUnexpected
-		}
-		return RouteVerdictDirectConfigMissing
-	default:
-		return ""
 	}
+	return ""
 }
 
 // hasNonEmptyNode 报告节点列表里是否存在真实节点（空/纯空白视为无节点）。

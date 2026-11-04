@@ -1,51 +1,57 @@
 // Part of the P1 (core split) refactor: code moved out of main.go.
 // Same package (main) - do not change package clause manually.
+//
+// 根进程配置加载 / 热重载。
+//
+// v2.0.0 精简：节点池（SOCKS5）、实例、订阅、竞速、429 退避、sidecar 等
+// 免费层相关全局状态全部移除——它们随 40080 自研网关一起消失。
+// 本文件只剩：别名 / 推理等级 / providers / routing / auto 模型。
 package main
 
 import (
-	"bytes"
 	"encoding/json"
 	"log/slog"
-	"net/http"
 	"os"
-	"path/filepath"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
-
-	"github.com/6Kmfi6HP/opencode2api/core/manager"
 )
 
-// freeSidecarURL 免费层 Bun sidecar 地址（applyConfig 原子写；空 = 回退旧行为）。
-// sidecar 只替换 TierFree 的 HTTP 客户端，节点选择/健康/重试仍由本包负责。
-var freeSidecarURL atomic.Value // string
+// 全局热变量（applyConfig 原子写、请求路径原子读）。
+var (
+	configMu             sync.RWMutex
+	configGen            atomic.Int64
+	modelAlias           map[string]string
+	reasoningEffortMap   map[string]string
+	forceDisableThinking bool
+	providersCfg         []ProviderCfg
+	routingCfg           RoutingCfg
+	adminPassword        string
+)
 
 func init() {
-	freeSidecarURL.Store("")
+	modelAlias = map[string]string{}
+	reasoningEffortMap = map[string]string{}
 }
 
-// currentFreeSidecarURL 返回当前 sidecar 地址（空 = 未启用）。
-func currentFreeSidecarURL() string {
-	v, _ := freeSidecarURL.Load().(string)
-	return v
-}
-
+// loadConfig 读取配置文件（缺失/损坏 → 零值配置）。
 func loadConfig(path string) AppConfig {
-	var cfg AppConfig
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return cfg
+		return AppConfig{}
 	}
+	var cfg AppConfig
 	if err := json.Unmarshal(data, &cfg); err != nil {
-		slog.Warn("config parse failed", "error", err)
+		slog.Warn("config parse failed", "path", path, "error", err)
+		return AppConfig{}
 	}
 	return cfg
 }
 
-// configStartupRewriteNeeded 启动回写判据（2026-08-28 审查缺口 2）：配置文件缺失
-// 或解析失败 → true（保留首次创建/损坏自愈回写）；文件健康 → false，跳过启动
-// saveConfig。子进程与管理器共用 main()：无条件回写会用启动瞬间解析的旧 providers
-// 覆掉并发落盘的 propagate 补丁；文件健康时磁盘已是最新，无需回写。
+// configStartupRewriteNeeded 判断启动时是否需要回写配置：
+// 文件缺失或损坏（无法解析）才回写，健康文件跳过（避免用启动瞬间的旧快照
+// 覆盖并发落盘的补丁）。
 func configStartupRewriteNeeded(path string) bool {
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -55,75 +61,26 @@ func configStartupRewriteNeeded(path string) bool {
 	return json.Unmarshal(data, &cfg) != nil
 }
 
+// saveConfig 落盘配置（原子替换）。
 func saveConfig(path string, cfg AppConfig) error {
-	return saveConfigWithWriter(path, cfg, "go-manager")
+	return saveConfigWithWriter(path, cfg, "")
 }
 
-// saveConfigWithWriter 落盘配置并追加溯源快照；writer 标识写入方（go-manager / custom-propagate）。
+// saveConfigWithWriter 落盘配置并记录写者（writer 便于排障；当前仅占位）。
 func saveConfigWithWriter(path string, cfg AppConfig, writer string) error {
-	// config.json 由本 AppConfig 与 core/manager.Config 双结构共用（同一物理文件）。
-	// 整体覆盖会抹掉 manager 结构独有字段（如 gateway_key——用户设的自定义网关
-	// 密码重启后失效的根因）。用读-合并-写保留对方字段。
-	data, err := manager.MergeConfigJSON(path, cfg)
+	_ = writer
+	data, err := json.MarshalIndent(cfg, "", "  ")
 	if err != nil {
 		return err
 	}
-	if err := writeFileAtomic(path, data, 0o644); err != nil {
-		return err
-	}
-	// 阶段6：配置溯源——落盘成功后追加脱敏快照（标注写入方）。
-	appendConfigHistory(writer, data)
-	return nil
+	return writeFileAtomic(path, data, 0o644)
 }
 
-// writeFileAtomic 临时文件+Rename 原子落盘：读者要么看到旧文件、要么看到完整新文件，
-// 崩溃/断电不会留半截 JSON（loadConfig 对损坏 JSON 静默回退默认值，半写会悄悄丢配置）。
-// 与 core/manager 的同名助手同款语义（跨包各自持有，暂不为此引公共包）。
-func writeFileAtomic(path string, data []byte, perm os.FileMode) error {
-	dir := filepath.Dir(path)
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return err
-	}
-	tmp, err := os.CreateTemp(dir, filepath.Base(path)+".*.tmp")
-	if err != nil {
-		return err
-	}
-	defer os.Remove(tmp.Name()) // 失败路径清理；成功 Rename 后目标已不存在，无副作用
-	if _, err := tmp.Write(data); err != nil {
-		_ = tmp.Close()
-		return err
-	}
-	if err := tmp.Close(); err != nil {
-		return err
-	}
-	if err := os.Chmod(tmp.Name(), perm); err != nil {
-		return err
-	}
-	return os.Rename(tmp.Name(), path)
-}
-
-// rateLimitCooldownSec / rateLimitBackoffBaseMS / rateLimitBackoffCapMS 429 感知（S2）：
-// 冷却秒 / 指数退避起点与上限毫秒（默认 30 / 1000 / 30000；<=0 回退默认）。
-// 声明于 config.go：socks_perf.go 由 S3 并行维护，不做 S2 改动。
-// G5：热重载（applyConfig）原子写、请求路径原子读，默认值写于 init。
-var (
-	rateLimitCooldownSec   atomic.Int64
-	rateLimitBackoffBaseMS atomic.Int64
-	rateLimitBackoffCapMS  atomic.Int64
-	// rateLimitMinIntervalMS 免费层请求最小间隔（毫秒；默认 1500，<0 关闭）。
-	rateLimitMinIntervalMS atomic.Int64
-)
-
-func init() {
-	rateLimitCooldownSec.Store(30)
-	rateLimitBackoffBaseMS.Store(1000)
-	rateLimitBackoffCapMS.Store(30000)
-	rateLimitMinIntervalMS.Store(1500)
-}
-
+// applyConfig 把配置应用到进程内全局状态（热重载与启动共用）。
 func applyConfig(cfg AppConfig) {
 	configMu.Lock()
 	defer configMu.Unlock()
+	configGen.Add(1)
 	if cfg.ModelAlias != nil {
 		modelAlias = cfg.ModelAlias
 	}
@@ -131,205 +88,55 @@ func applyConfig(cfg AppConfig) {
 		reasoningEffortMap = cfg.ReasoningEffortMap
 	}
 	forceDisableThinking = cfg.ForceDisableThinking
-	if cfg.ShowNodePrefix != nil {
-		showNodePrefix = *cfg.ShowNodePrefix
-	}
 	if cfg.Providers != nil {
 		providersCfg = append([]ProviderCfg(nil), cfg.Providers...)
 	}
 	routingCfg = cfg.Routing
-	// auto 虚拟模型配置（nil 回默认：关闭 + balanced；键被清除时热重载即时生效）。
-	if providerServiceMode {
-		// 供应商服务只承载 custom/插件，auto 是「实例池 × 模型」概念，必须关闭；
-		// 路由也清空，避免默认 provider 指向未注册的 opencode。
-		setAutoConfig(nil)
-		routingCfg = RoutingCfg{}
-	} else {
-		setAutoConfig(cfg.AutoModel)
-	}
-
-	if cfg.RouteMode == "round_robin" || cfg.RouteMode == "failover" || cfg.RouteMode == "smart" {
-		routeMode.Store(cfg.RouteMode)
-	}
-	// 免费层 sidecar：空串 = 回退旧行为；非空时 TierFree 请求改走 Bun。
-	if v := strings.TrimSpace(cfg.FreeSidecarURL); v != "" {
-		freeSidecarURL.Store(strings.TrimRight(v, "/"))
-	} else {
-		freeSidecarURL.Store("")
-	}
-	setTimeoutConfigFromApp(cfg)
-	applyBadStatusConfig(cfg)
-
-	// P2 性能模式：质量加权路由 + 熔断/半开（未设置保持当前值；关闭时路由行为与基线一致）。
-	if cfg.PoolPerformanceMode != nil {
-		poolPerfMode.Store(*cfg.PoolPerformanceMode)
-	}
-	if cfg.PoolBreakerThreshold > 0 {
-		poolBreakerThreshold.Store(int64(cfg.PoolBreakerThreshold))
-	}
-	if cfg.PoolHalfOpenIntervalSec > 0 {
-		poolHalfOpenIntervalSec.Store(int64(cfg.PoolHalfOpenIntervalSec))
-	}
-	// S3 链路类坏池自动恢复间隔（>0 才覆盖，未配置保持当前值/默认 300）。
-	if cfg.BadPoolResetSec > 0 {
-		badPoolResetSec.Store(int64(cfg.BadPoolResetSec))
-	}
-	if cfg.QuotaBadPoolResetSec > 0 {
-		v := cfg.QuotaBadPoolResetSec
-		if v < 10 {
-			v = 10
-		}
-		if v > 600 {
-			v = 600
-		}
-		quotaBadPoolResetSec.Store(int64(v))
-	}
-	if cfg.PoolRaceCopies > 0 {
-		poolRaceCopies.Store(int64(cfg.PoolRaceCopies))
-	}
-	if cfg.RaceBudgetMS > 0 {
-		raceBudgetMS.Store(int64(cfg.RaceBudgetMS))
-	}
-	// S5 压力系数分段阈值（>0 才覆盖，未配置保持当前值/默认）。
-	// G16：分段钳制——只接受 0 < Low < High 的单调分段（.Store 原子写，G5 不受影响）；
-	// 任一侧与另一侧（含默认值）倒挂时忽略该侧并告警，避免 raceCopies 分段判定反转
-	// （压力越大副本越多，与「高压退单发」的设计意图相反）。
-	if cfg.PoolRacePressureLow > 0 && cfg.PoolRacePressureHigh > 0 {
-		if cfg.PoolRacePressureHigh > cfg.PoolRacePressureLow {
-			poolRacePressureLow.Store(cfg.PoolRacePressureLow)
-			poolRacePressureHigh.Store(cfg.PoolRacePressureHigh)
-		} else {
-			slog.Warn("pool race pressure thresholds ignored (low >= high)", "low", cfg.PoolRacePressureLow, "high", cfg.PoolRacePressureHigh)
-		}
-	} else if cfg.PoolRacePressureLow > 0 {
-		if curr := poolRacePressureHigh.Load().(float64); cfg.PoolRacePressureLow < curr {
-			poolRacePressureLow.Store(cfg.PoolRacePressureLow)
-		} else {
-			slog.Warn("pool race pressure low ignored (low >= high)", "low", cfg.PoolRacePressureLow, "high", curr)
-		}
-	} else if cfg.PoolRacePressureHigh > 0 {
-		if curr := poolRacePressureLow.Load().(float64); cfg.PoolRacePressureHigh > curr {
-			poolRacePressureHigh.Store(cfg.PoolRacePressureHigh)
-		} else {
-			slog.Warn("pool race pressure high ignored (low >= high)", "low", curr, "high", cfg.PoolRacePressureHigh)
-		}
-	}
-	// S2 429 感知（>0 才覆盖，未配置保持当前值/默认）。
-	if cfg.RateLimitCooldownSec > 0 {
-		rateLimitCooldownSec.Store(int64(cfg.RateLimitCooldownSec))
-	}
-	if cfg.RateLimitBackoffBaseMS > 0 {
-		rateLimitBackoffBaseMS.Store(int64(cfg.RateLimitBackoffBaseMS))
-	}
-	if cfg.RateLimitBackoffCapMS > 0 {
-		rateLimitBackoffCapMS.Store(int64(cfg.RateLimitBackoffCapMS))
-	}
-	// 免费层最小请求间隔：0 = 保持默认 1500ms，<0 = 显式关闭。
-	if cfg.RateLimitMinIntervalMS != 0 {
-		rateLimitMinIntervalMS.Store(int64(cfg.RateLimitMinIntervalMS))
-	}
-	// 免费层 429 连续拒绝后的出口长冷却（钳制在 30~900s）。
-	if cfg.FingerprintBadCooldownSec > 0 {
-		v := cfg.FingerprintBadCooldownSec
-		if v < 30 {
-			v = 30
-		}
-		if v > fingerprintBadCooldownMaxSec {
-			v = fingerprintBadCooldownMaxSec
-		}
-		fingerprintBadCooldownSec.Store(int64(v))
-	}
-
-	socks5Mu.Lock()
-	proxiesChanged := false
-	if cfg.Socks5Proxies != nil {
-		proxiesChanged = !sameSocks5Proxies(socks5Proxies, cfg.Socks5Proxies)
-		socks5Proxies = append([]Socks5Proxy(nil), cfg.Socks5Proxies...)
-	}
-	if activeSocks5 != cfg.ActiveSocks5 || proxiesChanged {
-		activeSocks5 = cfg.ActiveSocks5
-		// 代理配置变化：清空整个客户端缓存（下一请求按新配置重建）。
-		socks5CacheMu.Lock()
-		socks5ClientCache = map[proxyCacheKey]*http.Client{}
-		socks5CacheMu.Unlock()
-		atomic.StoreUint32(&socks5RRIndex, 0)
-	}
-	socks5Mu.Unlock()
-	if proxiesChanged {
-		socks5HealthMu.Lock()
-		socks5Health = map[string]socks5HealthState{}
-		socks5HealthMu.Unlock()
-		// G17：代理列表重建时整体重置反馈/in-flight 计数——已移除节点的
-		// 死条目常驻 map 会随节点历史缓慢增长，重建即顺带驱逐全部旧 key。
-		poolFeedbackMu.Lock()
-		poolFeedback = map[string][]poolFbSample{}
-		poolFeedbackMu.Unlock()
-		proxyInFlightMu.Lock()
-		proxyInFlight = map[string]*atomic.Int64{}
-		proxyInFlightMu.Unlock()
-	}
-
+	setAutoConfig(cfg.AutoModel)
 }
 
-func sameSocks5Proxies(a, b []Socks5Proxy) bool {
-	if len(a) != len(b) {
-		return false
-	}
-	for i := range a {
-		if a[i] != b[i] {
-			return false
-		}
-	}
-	return true
-}
-
-func getSocks5ProxyCount() int {
-	socks5Mu.RLock()
-	defer socks5Mu.RUnlock()
-	return len(socks5Proxies)
-}
-
-// maxRouteRetries 返回同模型路由重试上限。
-// 历史实现会随代理池规模线性放大（proxyCount>3 时返回 proxyCount），
-// 上游故障时单请求可串行打上游数十次，形成重试风暴；现收敛为固定上限。
-func maxRouteRetries() int {
-	return maxUpstreamRetries
-}
-
-// startConfigWatcher applies config file changes without restarting the
-// process, because restarting a live HTTP server drops active SSE streams.
+// startConfigWatcher 监控配置文件变化并热应用（不重启进程，避免切断 SSE 流）。
 func startConfigWatcher(path string) {
 	go func() {
-		// 1s→3s：配置热加载属低频运维动作，3s 内生效足够；降低每进程每秒一次的文件读。
+		// 3s：配置热加载属低频运维动作，降低每进程每秒一次的文件读。
 		ticker := time.NewTicker(3 * time.Second)
 		defer ticker.Stop()
 		lastData, _ := os.ReadFile(path)
 		for range ticker.C {
 			data, err := os.ReadFile(path)
-			if err != nil || bytes.Equal(data, lastData) {
+			if err != nil {
 				continue
 			}
+			if string(data) == string(lastData) {
+				continue
+			}
+			lastData = data
 			var cfg AppConfig
 			if err := json.Unmarshal(data, &cfg); err != nil {
-				slog.Warn("config reload skipped", "path", path, "error", err)
+				slog.Warn("config reload parse failed", "path", path, "error", err)
 				continue
 			}
 			applyConfig(cfg)
-			// 诊断日志：记录热重载时的 providers 信息
-			cfgIDs := make([]string, 0, len(cfg.Providers))
-			for _, pc := range cfg.Providers {
-				if pc.ID != "" {
-					cfgIDs = append(cfgIDs, pc.ID+"("+pc.Type+")")
-				}
-			}
-			slog.Info("config hot-reloaded",
-				"path", path,
-				"gateway_mode", gatewayMode,
-				"providers", cfgIDs,
-			)
-			// providers 变化（如自定义模型源增删改）→ 原地重建厂商集合并刷新目录。
-			maybeRebuildVendors()
-			lastData = append(lastData[:0], data...)
+			slog.Info("config reloaded", "path", path)
 		}
 	}()
+}
+
+// maxRouteRetries 返回同模型路由重试上限（固定值，不随池规模放大）。
+func maxRouteRetries() int {
+	return maxUpstreamRetries
+}
+
+// splitTrimmed 按换行/逗号切分并去空（配置多行文本字段通用）。
+func splitTrimmed(raw string) []string {
+	fields := strings.FieldsFunc(raw, func(r rune) bool {
+		return r == '\n' || r == '\r' || r == ',' || r == ';' || r == '，' || r == '；'
+	})
+	out := make([]string, 0, len(fields))
+	for _, f := range fields {
+		if k := strings.TrimSpace(f); k != "" {
+			out = append(out, k)
+		}
+	}
+	return out
 }

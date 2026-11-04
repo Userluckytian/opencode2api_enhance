@@ -4,7 +4,6 @@ package manager
 
 import (
 	"encoding/json"
-	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -17,129 +16,53 @@ import (
 const DefaultPassword = "123456"
 
 // Config 应用级配置（字段与 Rust Config 一一对应，JSON 名一致）。
+//
+// v2.0.0 精简：免费层（实例池/节点池/订阅/扫描/竞速/sidecar/链路）全部配置项已移除，
+// 只剩管理域与服务端口、以及供应商/路由透传（50080 子进程需要）。
 type Config struct {
-	BaseURL                string `json:"base_url"`
-	DefaultPassword        string `json:"default_password"`
-	ClashExternalURL       string `json:"clash_external_url"`
-	ClashAuthToken         string `json:"clash_auth_token"`
-	TimeoutTTFTMinMS       int64  `json:"timeout_ttft_min_ms,omitempty"`
-	TimeoutTTFTMaxMS       int64  `json:"timeout_ttft_max_ms,omitempty"`
-	TimeoutSilenceMinMS    int64  `json:"timeout_silence_min_ms,omitempty"`
-	TimeoutSilenceMaxMS    int64  `json:"timeout_silence_max_ms,omitempty"`
-	PreContentSilenceMinMS int64  `json:"timeout_precontent_silence_min_ms,omitempty"`
-	PreContentSilenceMaxMS int64  `json:"timeout_precontent_silence_max_ms,omitempty"`
-	FailoverProbeMin       int64  `json:"failover_probe_min,omitempty"`
-	FailoverProbeMax       int64  `json:"failover_probe_max,omitempty"`
-	CallLogMax             int64  `json:"call_log_max,omitempty"`
-	ShowNodePrefix         bool   `json:"show_node_prefix,omitempty"`
-	// UiPollIntervalSec 界面轮询间隔（秒，U3）：nil = 未设置（默认 5），
-	// 显式 0 = 关闭轮询，1~60 可配。指针区分「未设置」与「显式 0」，
-	// 使 0 = 关轮询能落盘持久生效（ConfigGet/ConfigView 不再把 0 归一为默认 5）。
+	BaseURL         string `json:"base_url"`
+	DefaultPassword string `json:"default_password"`
+	// CallLogMax 调用日志读取上限（0 = 全部历史）。
+	CallLogMax int64 `json:"call_log_max,omitempty"`
+	// UiPollIntervalSec 界面轮询间隔（秒）：nil = 未设置（默认 5），
+	// 显式 0 = 关闭轮询，1~60 可配。
 	UiPollIntervalSec *int `json:"ui_poll_interval_sec,omitempty"`
 
-	// UpstreamProxy 上游代理出口（E1）：非空时实例/探针生成的 active_socks5 指向该代理
-	// （生成时剥离 socks5:// / http:// 前缀取 host:port），跳过 sing-box 出口，绕过本机
-	// 裸连 IP 被上游风控（429/超时）。留空 = 直连（现状）。
-	UpstreamProxy string `json:"upstream_proxy,omitempty"`
-
-	// SubscribeURL 订阅地址；SubscribeIntervalMin 自动拉取间隔（分钟，<=0 不自动拉）。
-	SubscribeURL         string `json:"subscribe_url,omitempty"`
-	SubscribeIntervalMin int    `json:"subscribe_interval_min,omitempty"`
-
-	// 健康巡检：检查间隔（秒，<=0 不巡检）与自动重启连续失败阈值（<=0 不重启）。
-	HealthCheckIntervalSec int `json:"health_check_interval_sec,omitempty"`
-	HealthRestartThreshold int `json:"health_restart_threshold,omitempty"`
-
-	// 实例池链路探活（性能模式 P1）：间隔（秒）、单次超时（秒）、质量窗口（分钟），
-	// <=0 时用默认值（45s / 3s / 10min）；
-	// PoolProbeEnabled 未设置（nil）默认开启。
-	PoolProbeIntervalSec int   `json:"pool_probe_interval_sec,omitempty"`
-	PoolProbeTimeoutSec  int   `json:"pool_probe_timeout_sec,omitempty"`
-	PoolQualityWindowMin int   `json:"pool_quality_window_min,omitempty"`
-	PoolProbeEnabled     *bool `json:"pool_probe_enabled,omitempty"`
-	// ProbeSoloEnabled 是否对独享实例（未入池）也做链路质量探测（默认 true；false = 只探测池成员）。
-	ProbeSoloEnabled *bool `json:"probe_solo_enabled,omitempty"`
-
-	// 性能模式（P2）：熔断阈值（连续失败达该次数 → open）、半开间隔（秒）、开关。
-	// PoolBreakerThreshold/PoolHalfOpenIntervalSec <=0 用默认值（3 / 60）；
-	// PoolPerformanceMode 未设置（nil）默认开启（关闭时路由行为与基线一致）。
-	PoolBreakerThreshold    int   `json:"pool_breaker_threshold,omitempty"`
-	PoolHalfOpenIntervalSec int   `json:"pool_halfopen_interval_sec,omitempty"`
-	PoolPerformanceMode     *bool `json:"pool_performance_mode,omitempty"`
-	// 链路类坏池自动恢复间隔（秒，S3，<=0 用默认 300）：链路类坏池（如 503）到期放行
-	// 1 次探测，成功清 / 失败重新坏池；认证类（401）永久禁用；
-	// 额度类（402/429）走 quota_bad_pool_reset_sec。
-	BadPoolResetSec int `json:"bad_pool_reset_sec,omitempty"`
-	// 额度类坏池（402/429）首次冷却秒数（秒，默认 600，允许 60~1800）。
-	QuotaBadPoolResetSec int `json:"quota_bad_pool_reset_sec,omitempty"`
-	// 请求级竞速并行数上限（P2b/S5）：一次请求并行扇出 N 个候选出口，首个成功者胜
-	// （<=0 用默认 2；1 = 关闭）。S5 起为上限，实际副本由压力系数动态决定。
-	PoolRaceCopies int `json:"pool_race_copies,omitempty"`
-	// 竞速整体预算（毫秒，S1）：一次竞速等待首个成功候选的上限，到期走单发续写（<=0 用默认 10000）。
-	RaceBudgetMS int `json:"race_budget_ms,omitempty"`
-	// 压力系数分段阈值（S5）：pressure = 活跃请求数/健康节点数，
-	// < Low（默认 0.5）→ 全速；Low ≤ p < High（默认 1.0）→ 2；≥ High → 单发。
-	PoolRacePressureLow  float64 `json:"pool_race_pressure_low,omitempty"`
-	PoolRacePressureHigh float64 `json:"pool_race_pressure_high,omitempty"`
-	// 429 感知（S2）：冷却内跳过竞速（秒，默认 30）与指数退避 base/cap（毫秒，默认 1000/30000）。
-	RateLimitCooldownSec   int `json:"rate_limit_cooldown_sec,omitempty"`
-	RateLimitBackoffBaseMS int `json:"rate_limit_backoff_base_ms,omitempty"`
-	RateLimitBackoffCapMS  int `json:"rate_limit_backoff_cap_ms,omitempty"`
-	// RateLimitMinIntervalMS 免费层相邻两次上游请求的最小间隔（毫秒，默认 1500，<0 关闭）。
-	RateLimitMinIntervalMS int `json:"rate_limit_min_interval_ms,omitempty"`
-	// FingerprintBadCooldownSec 免费层 429 连续拒绝后按出口长冷却的秒数（默认 300，30~900）。
-	FingerprintBadCooldownSec int `json:"fingerprint_bad_cooldown_sec,omitempty"`
-
-	// 并发设置（D3）：扫描 / 批量启停与释放 / 一键测试 / 池链路探活 的 worker 上限（<=0 用默认）。
-	ScanConcurrency      int `json:"scan_concurrency,omitempty"`
-	BatchConcurrency     int `json:"batch_concurrency,omitempty"`
-	TestConcurrency      int `json:"test_concurrency,omitempty"`
-	PoolProbeConcurrency int `json:"pool_probe_concurrency,omitempty"`
-	// StopScanConcurrency 停止扫描并发上限（N2，默认 4，<=0 用默认）。
-	StopScanConcurrency int `json:"stop_scan_concurrency,omitempty"`
-
-	// GatewayKey 统一网关鉴权密钥（空 = 回退默认 sk-unified-local；main 功能 M6）。
+	// GatewayKey 本进程管理的 API 密钥（空 = 回退默认 sk-unified-local）。
 	GatewayKey string `json:"gateway_key,omitempty"`
 
-	// FreeSidecarPort 免费层 Bun sidecar 端口（0 = 默认 40200）。
-	// sidecar 只负责用 Bun 的 TLS 指纹发免费层请求；节点/网关仍由 Go 负责。
-	FreeSidecarPort int `json:"free_sidecar_port,omitempty"`
-	// FreeSidecarEnabled 免费层 sidecar 开关（nil = 默认开启）。
-	// 关闭或 sidecar 缺失时回退现有直连/代理池行为。
-	FreeSidecarEnabled *bool `json:"free_sidecar_enabled,omitempty"`
+	// 服务端口（0 = 未设置，按 env > config > 编译默认 三源读取）：
+	// 桌面壳经环境变量按槽位表注入（优先于 config）。
+	GatewayPort  uint16 `json:"gateway_port,omitempty"`
+	ProviderPort uint16 `json:"provider_port,omitempty"`
 
-	// 链式代理（前置节点）：本地直连被阻断的节点经可达前置节点中转。
-	// ChainEnabled 总开关；ChainNodes 需要链式的具体节点（一键探测写入）；
-	// FrontCandidates 自动探测/规划选出的可用前置（优先于运行中节点）；
-	// FrontNode 手动前置（最高优先）；ChainAutoDetect 自动探测整条链。
-	// ChainGroups/FrontGroup 为旧分组语义，保留兼容；新 UI 不再使用。
-	ChainEnabled    *bool    `json:"chain_enabled,omitempty"`
-	ChainGroups     []string `json:"chain_groups,omitempty"`
-	ChainNodes      []string `json:"chain_nodes,omitempty"`
-	FrontCandidates []string `json:"front_candidates,omitempty"`
-	FrontGroup      string   `json:"front_group,omitempty"`
-	FrontNode       string   `json:"front_node,omitempty"`
-	ChainAutoDetect *bool    `json:"chain_auto_detect,omitempty"`
-
-	// 端口配置（0 = 未设置，按 env > config > 编译默认 三源读取）：
-	// 供 headless/Web 直跑与自定义部署使用；桌面壳经环境变量按槽位表注入（优先于 config）。
-	GatewayPort      uint16 `json:"gateway_port,omitempty"`
-	ProviderPort     uint16 `json:"provider_port,omitempty"`
-	InstanceBasePort uint16 `json:"instance_base_port,omitempty"`
-	ProbeAPIPort     uint16 `json:"probe_api_port,omitempty"`
-	ProbeSocksPort   uint16 `json:"probe_socks_port,omitempty"`
-
-	// Providers 厂商注册表（透传主程序 AppConfig 格式）：实例子进程/网关子进程
-	// 生成的 opencode2api.json 需要带上，才能像核心一样注册多厂商（如 custom）。
+	// Providers 厂商注册表（透传主程序 AppConfig 格式）：供应商服务子进程
+	// 生成的配置需要带上，才能像核心一样注册多厂商。
 	Providers []map[string]any `json:"providers,omitempty"`
 	// Routing 模型→厂商路由（透传，供子进程按模型路由到正确厂商）。
 	Routing map[string]any `json:"routing,omitempty"`
-	// AutoModel auto 虚拟模型配置（与根进程 AppConfig 双结构共用 auto_model 键，
-	// 任一写者重写 config.json 都不丢；详见 automodel.go）。
+	// AutoModel auto 虚拟模型配置（与根 AppConfig 双结构共用 auto_model 键）。
 	AutoModel *AutoModelCfg `json:"auto_model,omitempty"`
-}
 
-// configPath 返回配置文件路径。
+	// ---- 免费层引擎（40080，opencode2api-win）----
+	// EngineEnabled 未设置（nil）默认开启：管理进程自动拉起引擎并看护。
+	EngineEnabled *bool `json:"engine_enabled,omitempty"`
+	// EngineWarpEnabled 引擎的 WARP 出口池开关。
+	EngineWarpEnabled *bool `json:"engine_warp_enabled,omitempty"`
+	// EngineWarpPoolSize WARP 出口数上限（1~32；0 = 引擎默认 2）。
+	EngineWarpPoolSize int `json:"engine_warp_pool_size,omitempty"`
+	// EngineWarpSourceIPv6 外层源 IPv6 前缀（通常一个路由到本机的 /64）。
+	EngineWarpSourceIPv6 string `json:"engine_warp_source_ipv6,omitempty"`
+	// EngineProxies 引擎出口代理列表（每项 http/https/socks5/socks5h 或 direct）。
+	EngineProxies []string `json:"engine_proxies,omitempty"`
+	// EngineZenKeys / EngineGoKeys 引擎的可选付费密钥池（空 = 纯匿名免费层）。
+	EngineZenKeys []string `json:"engine_zen_keys,omitempty"`
+	EngineGoKeys  []string `json:"engine_go_keys,omitempty"`
+	// EngineRetryMaxAttempts 引擎单请求重试上限（0 = 默认 3）。
+	EngineRetryMaxAttempts int `json:"engine_retry_max_attempts,omitempty"`
+	// EngineModelsRefreshSec 引擎模型目录刷新间隔（秒，0 = 默认 300）。
+	EngineModelsRefreshSec int `json:"engine_models_refresh_sec,omitempty"`
+}
 func (m *Manager) configPath() string {
 	return filepath.Join(m.paths.DataDir, "config.json")
 }
@@ -256,78 +179,6 @@ func mergeProviderEntries(existing, customs []map[string]any) []map[string]any {
 	return append(kept, customs...)
 }
 
-// OpencodeClientVersionOf 读 providers 中 type=opencode 条目的 params.client_version。
-// 空串 = 未配置 = 走自动探测（npm 最新版，失败回落兜底版本）。
-// 免费通道上报的 User-Agent 版本由该值决定，上游抬高下限时在此跟进。
-func OpencodeClientVersionOf(cfg Config) string {
-	for _, p := range cfg.Providers {
-		if t, _ := p["type"].(string); t != "opencode" {
-			continue
-		}
-		params, ok := p["params"].(map[string]any)
-		if !ok {
-			continue
-		}
-		if v, ok := params["client_version"].(string); ok {
-			return strings.TrimSpace(v)
-		}
-	}
-	return ""
-}
-
-// SetOpencodeClientVersion 写入（或删除）providers 中 type=opencode 条目的
-// params.client_version。空串 = 删除该键，回到自动探测。
-// 找不到 opencode 条目时物化一个：providers 为空时是「只认 opencode」的隐式列表，
-// 无处落盘会让用户设置丢失。
-func SetOpencodeClientVersion(cfg *Config, value string) error {
-	if value != "" && !validClientVersion(value) {
-		return fmt.Errorf("invalid opencode_client_version %q: 期望 x.y.z 三段数字（如 1.99.0）", value)
-	}
-	idx := -1
-	for i, p := range cfg.Providers {
-		if t, _ := p["type"].(string); t == "opencode" {
-			idx = i
-			break
-		}
-	}
-	if idx < 0 {
-		cfg.Providers = append(cfg.Providers, map[string]any{
-			"id": "opencode", "type": "opencode", "enabled": true,
-		})
-		idx = len(cfg.Providers) - 1
-	}
-	params, _ := cfg.Providers[idx]["params"].(map[string]any)
-	if params == nil {
-		params = map[string]any{}
-	}
-	if value == "" {
-		delete(params, "client_version")
-	} else {
-		params["client_version"] = value
-	}
-	cfg.Providers[idx]["params"] = params
-	return nil
-}
-
-// validClientVersion 校验 x.y.z 三段数字：上游只比较三段数值，格式写错会静默降级为 403/426。
-func validClientVersion(v string) bool {
-	parts := strings.Split(v, ".")
-	if len(parts) != 3 {
-		return false
-	}
-	for _, p := range parts {
-		if p == "" {
-			return false
-		}
-		for _, c := range p {
-			if c < '0' || c > '9' {
-				return false
-			}
-		}
-	}
-	return true
-}
-
 // effectiveDefaultPassword 生效默认密码：未设置 → "123456"。
 func (m *Manager) effectiveDefaultPassword() string {
 	pw := m.loadConfig().DefaultPassword
@@ -338,6 +189,8 @@ func (m *Manager) effectiveDefaultPassword() string {
 }
 
 // ConfigGet 返回配置键值（字符串形态，与 Rust get 一致；未知键报错）。
+// ConfigGet 读取单个配置键的当前值（字符串形态；布尔为 true/false，端口为十进制）。
+// v2.0.0：免费层配置项全部移除，只剩管理域与服务端口、引擎参数。
 func (m *Manager) ConfigGet(key string) (string, error) {
 	cfg := m.loadConfig()
 	switch key {
@@ -345,754 +198,263 @@ func (m *Manager) ConfigGet(key string) (string, error) {
 		return cfg.BaseURL, nil
 	case "default_password":
 		return cfg.DefaultPassword, nil
-	case "clash_external_url":
-		return cfg.ClashExternalURL, nil
-	case "clash_auth_token":
-		return cfg.ClashAuthToken, nil
-	case "timeout_ttft_min_ms":
-		return strconv.FormatInt(cfg.TimeoutTTFTMinMS, 10), nil
-	case "timeout_ttft_max_ms":
-		return strconv.FormatInt(cfg.TimeoutTTFTMaxMS, 10), nil
-	case "timeout_silence_min_ms":
-		return strconv.FormatInt(cfg.TimeoutSilenceMinMS, 10), nil
-	case "timeout_silence_max_ms":
-		return strconv.FormatInt(cfg.TimeoutSilenceMaxMS, 10), nil
-	case "timeout_precontent_silence_min_ms":
-		return strconv.FormatInt(cfg.PreContentSilenceMinMS, 10), nil
-	case "timeout_precontent_silence_max_ms":
-		return strconv.FormatInt(cfg.PreContentSilenceMaxMS, 10), nil
-	case "failover_probe_min":
-		return strconv.FormatInt(cfg.FailoverProbeMin, 10), nil
-	case "failover_probe_max":
-		return strconv.FormatInt(cfg.FailoverProbeMax, 10), nil
 	case "call_log_max":
 		return strconv.FormatInt(cfg.CallLogMax, 10), nil
-	case "show_node_prefix":
-		return strconv.FormatBool(cfg.ShowNodePrefix), nil
-	case "opencode_client_version":
-		return OpencodeClientVersionOf(cfg), nil
 	case "ui_poll_interval_sec":
-		if cfg.UiPollIntervalSec == nil {
-			return strconv.Itoa(defaultUiPollIntervalSec), nil
-		}
-		return strconv.Itoa(*cfg.UiPollIntervalSec), nil
-	case "upstream_proxy":
-		return cfg.UpstreamProxy, nil
-	case "subscribe_url":
-		return cfg.SubscribeURL, nil
-	case "subscribe_interval_min":
-		return strconv.Itoa(cfg.SubscribeIntervalMin), nil
-	case "health_check_interval_sec":
-		return strconv.Itoa(cfg.HealthCheckIntervalSec), nil
-	case "health_restart_threshold":
-		return strconv.Itoa(cfg.HealthRestartThreshold), nil
-	case "pool_probe_interval_sec":
-		return strconv.Itoa(cfg.PoolProbeIntervalSec), nil
-	case "pool_probe_timeout_sec":
-		return strconv.Itoa(cfg.PoolProbeTimeoutSec), nil
-	case "pool_quality_window_min":
-		return strconv.Itoa(cfg.PoolQualityWindowMin), nil
-	case "pool_probe_enabled":
-		return strconv.FormatBool(poolProbeEnabled(cfg)), nil
-	case "probe_solo_enabled":
-		return strconv.FormatBool(probeSoloEnabled(cfg)), nil
-	case "pool_breaker_threshold":
-		return strconv.Itoa(cfg.PoolBreakerThreshold), nil
-	case "pool_halfopen_interval_sec":
-		return strconv.Itoa(cfg.PoolHalfOpenIntervalSec), nil
-	case "bad_pool_reset_sec":
-		return strconv.Itoa(cfg.BadPoolResetSec), nil
-	case "quota_bad_pool_reset_sec":
-		return strconv.Itoa(quotaBadPoolResetSecOf(cfg)), nil
-	case "pool_performance_mode":
-		return strconv.FormatBool(poolPerfModeEnabled(cfg)), nil
-	case "pool_race_copies":
-		return strconv.Itoa(cfg.PoolRaceCopies), nil
-	case "race_budget_ms":
-		return strconv.Itoa(cfg.RaceBudgetMS), nil
-	case "pool_race_pressure_low":
-		return strconv.FormatFloat(cfg.PoolRacePressureLow, 'f', -1, 64), nil
-	case "pool_race_pressure_high":
-		return strconv.FormatFloat(cfg.PoolRacePressureHigh, 'f', -1, 64), nil
-	case "rate_limit_cooldown_sec":
-		return strconv.Itoa(cfg.RateLimitCooldownSec), nil
-	case "rate_limit_backoff_base_ms":
-		return strconv.Itoa(cfg.RateLimitBackoffBaseMS), nil
-	case "rate_limit_backoff_cap_ms":
-		return strconv.Itoa(cfg.RateLimitBackoffCapMS), nil
-	case "rate_limit_min_interval_ms":
-		return strconv.Itoa(cfg.RateLimitMinIntervalMS), nil
-	case "fingerprint_bad_cooldown_sec":
-		return strconv.Itoa(cfg.FingerprintBadCooldownSec), nil
-	case "scan_concurrency":
-		return strconv.Itoa(cfg.ScanConcurrency), nil
-	case "stop_scan_concurrency":
-		return strconv.Itoa(stopScanConcurrencyOf(cfg)), nil
-	case "batch_concurrency":
-		return strconv.Itoa(cfg.BatchConcurrency), nil
-	case "test_concurrency":
-		return strconv.Itoa(cfg.TestConcurrency), nil
-	case "pool_probe_concurrency":
-		return strconv.Itoa(cfg.PoolProbeConcurrency), nil
+		return strconv.Itoa(uiPollIntervalSecOf(cfg)), nil
 	case "gateway_key":
-		// 密钥不回显：设置过返回掩码，未设置返回空（main 语义一致）。
-		if cfg.GatewayKey == "" {
-			return "", nil
-		}
-		return "******", nil
+		return effectiveGatewayKey(cfg), nil
 	case "gateway_port":
-		return strconv.FormatUint(uint64(cfg.GatewayPort), 10), nil
-	case "instance_base_port":
-		return strconv.FormatUint(uint64(cfg.InstanceBasePort), 10), nil
-	case "probe_api_port":
-		return strconv.FormatUint(uint64(cfg.ProbeAPIPort), 10), nil
-	case "probe_socks_port":
-		return strconv.FormatUint(uint64(cfg.ProbeSocksPort), 10), nil
-	case "free_sidecar_port":
-		return strconv.Itoa(m.freeSidecarPort()), nil
-	case "free_sidecar_enabled":
-		return strconv.FormatBool(freeSidecarEnabled(cfg)), nil
-	case "chain_enabled":
-		return strconv.FormatBool(chainEnabled(cfg)), nil
-	case "chain_groups":
-		return strings.Join(cfg.ChainGroups, ","), nil
-	case "chain_nodes":
-		return strings.Join(cfg.ChainNodes, ","), nil
-	case "front_candidates":
-		return strings.Join(cfg.FrontCandidates, ","), nil
-	case "front_group":
-		return cfg.FrontGroup, nil
-	case "front_node":
-		return cfg.FrontNode, nil
-	case "chain_auto_detect":
-		return strconv.FormatBool(chainAutoDetect(cfg)), nil
-	default:
-		return "", fmt.Errorf("Unknown config key: %s", key)
+		return strconv.Itoa(int(cfg.GatewayPort)), nil
+	case "provider_port":
+		return strconv.Itoa(int(cfg.ProviderPort)), nil
+	case "engine_enabled":
+		return strconv.FormatBool(engineEnabled(cfg)), nil
+	case "engine_warp_enabled":
+		return strconv.FormatBool(engineWarpEnabled(cfg)), nil
+	case "engine_warp_pool_size":
+		return strconv.Itoa(cfg.EngineWarpPoolSize), nil
+	case "engine_warp_source_ipv6":
+		return cfg.EngineWarpSourceIPv6, nil
+	case "engine_proxies":
+		return strings.Join(cfg.EngineProxies, "\n"), nil
+	case "engine_zen_keys":
+		return strings.Join(cfg.EngineZenKeys, "\n"), nil
+	case "engine_go_keys":
+		return strings.Join(cfg.EngineGoKeys, "\n"), nil
+	case "engine_retry_max_attempts":
+		return strconv.Itoa(cfg.EngineRetryMaxAttempts), nil
+	case "engine_models_refresh_sec":
+		return strconv.Itoa(cfg.EngineModelsRefreshSec), nil
 	}
+	return "", fmt.Errorf("unknown config key: %s", key)
 }
 
 // ConfigSet 设置配置键（int/bool 自动解析；未知键报错）并落盘。
 func (m *Manager) ConfigSet(key, value string) error {
 	cfg := m.loadConfig()
 	parseInt := func() (int64, error) {
-		v, err := strconv.ParseInt(value, 10, 64)
+		v, err := strconv.ParseInt(strings.TrimSpace(value), 10, 64)
 		if err != nil {
 			return 0, fmt.Errorf("invalid integer for %s: %s", key, value)
 		}
 		return v, nil
 	}
-	// parsePort 解析端口（空/"0"=未设置=0；合法 1-65535）。
 	parsePort := func() (uint16, error) {
-		if value == "" || value == "0" {
+		s := strings.TrimSpace(value)
+		if s == "" || s == "0" {
 			return 0, nil
 		}
-		v, err := strconv.ParseUint(value, 10, 16)
-		if err != nil || v == 0 || v > 65535 {
+		n, err := strconv.ParseUint(s, 10, 16)
+		if err != nil {
 			return 0, fmt.Errorf("invalid port for %s: %s", key, value)
 		}
-		return uint16(v), nil
+		return uint16(n), nil
 	}
+	parseBool := func() (bool, error) {
+		switch strings.ToLower(strings.TrimSpace(value)) {
+		case "1", "true", "yes", "on":
+			return true, nil
+		case "0", "false", "no", "off", "":
+			return false, nil
+		}
+		return false, fmt.Errorf("invalid bool for %s: %s", key, value)
+	}
+
 	switch key {
 	case "base_url":
-		cfg.BaseURL = value
+		cfg.BaseURL = strings.TrimSpace(value)
 	case "default_password":
-		cfg.DefaultPassword = value
-	case "clash_external_url":
-		cfg.ClashExternalURL = value
-	case "clash_auth_token":
-		cfg.ClashAuthToken = value
-	case "timeout_ttft_min_ms":
-		v, err := parseInt()
-		if err != nil {
-			return err
-		}
-		cfg.TimeoutTTFTMinMS = v
-	case "timeout_ttft_max_ms":
-		v, err := parseInt()
-		if err != nil {
-			return err
-		}
-		cfg.TimeoutTTFTMaxMS = v
-	case "timeout_silence_min_ms":
-		v, err := parseInt()
-		if err != nil {
-			return err
-		}
-		cfg.TimeoutSilenceMinMS = v
-	case "timeout_silence_max_ms":
-		v, err := parseInt()
-		if err != nil {
-			return err
-		}
-		cfg.TimeoutSilenceMaxMS = v
-	case "timeout_precontent_silence_min_ms":
-		v, err := parseInt()
-		if err != nil {
-			return err
-		}
-		cfg.PreContentSilenceMinMS = v
-	case "timeout_precontent_silence_max_ms":
-		v, err := parseInt()
-		if err != nil {
-			return err
-		}
-		cfg.PreContentSilenceMaxMS = v
-	case "failover_probe_min":
-		v, err := parseInt()
-		if err != nil {
-			return err
-		}
-		cfg.FailoverProbeMin = v
-	case "failover_probe_max":
-		v, err := parseInt()
-		if err != nil {
-			return err
-		}
-		cfg.FailoverProbeMax = v
+		cfg.DefaultPassword = strings.TrimSpace(value)
 	case "call_log_max":
 		v, err := parseInt()
 		if err != nil {
 			return err
 		}
 		cfg.CallLogMax = v
-	case "show_node_prefix":
-		b, err := strconv.ParseBool(value)
-		if err != nil {
-			return fmt.Errorf("invalid boolean for show_node_prefix: %s", value)
-		}
-		cfg.ShowNodePrefix = b
-	case "opencode_client_version":
-		if err := SetOpencodeClientVersion(&cfg, strings.TrimSpace(value)); err != nil {
-			return err
-		}
 	case "ui_poll_interval_sec":
 		v, err := parseInt()
 		if err != nil {
 			return err
 		}
-		// nil = 未设置（回退默认 5）；0 = 显式关闭轮询；负数/超界（>60）非法回退默认。
 		if v < 0 || v > 60 {
-			cfg.UiPollIntervalSec = nil
-		} else {
-			n := int(v)
-			cfg.UiPollIntervalSec = &n
+			return fmt.Errorf("ui_poll_interval_sec 需在 0~60 之间")
 		}
-	case "upstream_proxy":
-		// 原样存储（生成子进程配置时才剥离 scheme / 校验端口，非法值回退直连）。
-		cfg.UpstreamProxy = strings.TrimSpace(value)
-	case "subscribe_url":
-		cfg.SubscribeURL = strings.TrimSpace(value)
-	case "subscribe_interval_min":
-		v, err := parseInt()
-		if err != nil {
-			return err
-		}
-		cfg.SubscribeIntervalMin = int(v)
-	case "health_check_interval_sec":
-		v, err := parseInt()
-		if err != nil {
-			return err
-		}
-		cfg.HealthCheckIntervalSec = int(v)
-	case "health_restart_threshold":
-		v, err := parseInt()
-		if err != nil {
-			return err
-		}
-		cfg.HealthRestartThreshold = int(v)
-	case "pool_probe_interval_sec":
-		v, err := parseInt()
-		if err != nil {
-			return err
-		}
-		if v < 0 {
-			return errors.New("pool_probe_interval_sec 需 >= 0")
-		}
-		cfg.PoolProbeIntervalSec = int(v)
-	case "pool_probe_timeout_sec":
-		v, err := parseInt()
-		if err != nil {
-			return err
-		}
-		if v < 0 {
-			return errors.New("pool_probe_timeout_sec 需 >= 0")
-		}
-		cfg.PoolProbeTimeoutSec = int(v)
-	case "pool_quality_window_min":
-		v, err := parseInt()
-		if err != nil {
-			return err
-		}
-		if v < 0 {
-			return errors.New("pool_quality_window_min 需 >= 0")
-		}
-		cfg.PoolQualityWindowMin = int(v)
-	case "pool_probe_enabled":
-		b, err := strconv.ParseBool(value)
-		if err != nil {
-			return fmt.Errorf("invalid boolean for pool_probe_enabled: %s", value)
-		}
-		cfg.PoolProbeEnabled = &b
-	case "probe_solo_enabled":
-		b, err := strconv.ParseBool(value)
-		if err != nil {
-			return fmt.Errorf("invalid boolean for probe_solo_enabled: %s", value)
-		}
-		cfg.ProbeSoloEnabled = &b
-	case "pool_breaker_threshold":
-		v, err := parseInt()
-		if err != nil {
-			return err
-		}
-		if v < 0 {
-			return errors.New("pool_breaker_threshold 需 >= 0")
-		}
-		cfg.PoolBreakerThreshold = int(v)
-	case "pool_halfopen_interval_sec":
-		v, err := parseInt()
-		if err != nil {
-			return err
-		}
-		if v < 0 {
-			return errors.New("pool_halfopen_interval_sec 需 >= 0")
-		}
-		cfg.PoolHalfOpenIntervalSec = int(v)
-	case "bad_pool_reset_sec":
-		v, err := parseInt()
-		if err != nil {
-			return err
-		}
-		if v < 0 {
-			return errors.New("bad_pool_reset_sec 需 >= 0")
-		}
-		cfg.BadPoolResetSec = int(v)
-	case "quota_bad_pool_reset_sec":
-		v, err := parseInt()
-		if err != nil {
-			return err
-		}
-		if v < 0 {
-			return errors.New("quota_bad_pool_reset_sec 需 >= 0")
-		}
-		if v > 0 && (v < 10 || v > 600) {
-			return errors.New("quota_bad_pool_reset_sec 需为 0（默认 60）或 10~600")
-		}
-		cfg.QuotaBadPoolResetSec = int(v)
-	case "pool_performance_mode":
-		b, err := strconv.ParseBool(value)
-		if err != nil {
-			return fmt.Errorf("invalid boolean for pool_performance_mode: %s", value)
-		}
-		cfg.PoolPerformanceMode = &b
-	case "pool_race_copies":
-		v, err := parseInt()
-		if err != nil {
-			return err
-		}
-		if v < 1 || v > 4 {
-			return errors.New("pool_race_copies 需在 1~4 之间（1 = 关闭竞速）")
-		}
-		cfg.PoolRaceCopies = int(v)
-	case "race_budget_ms":
-		v, err := parseInt()
-		if err != nil {
-			return err
-		}
-		if v < 0 {
-			return errors.New("race_budget_ms 需 >= 0")
-		}
-		cfg.RaceBudgetMS = int(v)
-	case "pool_race_pressure_low":
-		v, err := strconv.ParseFloat(value, 64)
-		if err != nil || v < 0 {
-			return errors.New("pool_race_pressure_low 需为非负浮点数")
-		}
-		cfg.PoolRacePressureLow = v
-	case "pool_race_pressure_high":
-		v, err := strconv.ParseFloat(value, 64)
-		if err != nil || v < 0 {
-			return errors.New("pool_race_pressure_high 需为非负浮点数")
-		}
-		cfg.PoolRacePressureHigh = v
-	case "rate_limit_cooldown_sec":
-		v, err := parseInt()
-		if err != nil {
-			return err
-		}
-		if v < 0 {
-			return errors.New("rate_limit_cooldown_sec 需 >= 0")
-		}
-		cfg.RateLimitCooldownSec = int(v)
-	case "rate_limit_backoff_base_ms":
-		v, err := parseInt()
-		if err != nil {
-			return err
-		}
-		if v < 0 {
-			return errors.New("rate_limit_backoff_base_ms 需 >= 0")
-		}
-		cfg.RateLimitBackoffBaseMS = int(v)
-	case "rate_limit_backoff_cap_ms":
-		v, err := parseInt()
-		if err != nil {
-			return err
-		}
-		if v < 0 {
-			return errors.New("rate_limit_backoff_cap_ms 需 >= 0")
-		}
-		cfg.RateLimitBackoffCapMS = int(v)
-	case "rate_limit_min_interval_ms":
-		v, err := parseInt()
-		if err != nil {
-			return err
-		}
-		// 负值 = 关闭最小间隔（显式允许）；正值上限 30s，避免误配成分钟级拖死请求。
-		if v > 30000 {
-			return errors.New("rate_limit_min_interval_ms 需在 -1~30000 之间")
-		}
-		cfg.RateLimitMinIntervalMS = int(v)
-	case "fingerprint_bad_cooldown_sec":
-		v, err := parseInt()
-		if err != nil {
-			return err
-		}
-		if v < 30 || v > 900 {
-			return errors.New("fingerprint_bad_cooldown_sec 需在 30~900 之间")
-		}
-		cfg.FingerprintBadCooldownSec = int(v)
-	case "scan_concurrency":
-		v, err := parseInt()
-		if err != nil {
-			return err
-		}
-		if v < 1 || v > 16 {
-			return errors.New("scan_concurrency 需在 1~16 之间")
-		}
-		cfg.ScanConcurrency = int(v)
-	case "stop_scan_concurrency":
-		v, err := parseInt()
-		if err != nil {
-			return err
-		}
-		if v < 1 || v > 8 {
-			// 非法值回退默认 4（不落盘，stopScanConcurrencyOf 兜底）。
-			cfg.StopScanConcurrency = 0
-		} else {
-			cfg.StopScanConcurrency = int(v)
-		}
-	case "batch_concurrency":
-		v, err := parseInt()
-		if err != nil {
-			return err
-		}
-		if v < 1 || v > 16 {
-			return errors.New("batch_concurrency 需在 1~16 之间")
-		}
-		cfg.BatchConcurrency = int(v)
-	case "test_concurrency":
-		v, err := parseInt()
-		if err != nil {
-			return err
-		}
-		if v < 1 || v > 16 {
-			return errors.New("test_concurrency 需在 1~16 之间")
-		}
-		cfg.TestConcurrency = int(v)
-	case "pool_probe_concurrency":
-		v, err := parseInt()
-		if err != nil {
-			return err
-		}
-		if v < 1 || v > 16 {
-			return errors.New("pool_probe_concurrency 需在 1~16 之间")
-		}
-		cfg.PoolProbeConcurrency = int(v)
+		n := int(v)
+		cfg.UiPollIntervalSec = &n
 	case "gateway_key":
-		// 空串 = 重置为默认（gatewayKey() 回退 sk-unified-local）；非空需至少 8 字符（main 校验一致）。
-		if value == "" {
-			cfg.GatewayKey = ""
-		} else if len(value) < 8 {
-			return errors.New("网关密钥至少 8 个字符")
-		} else {
-			cfg.GatewayKey = value
-		}
+		cfg.GatewayKey = strings.TrimSpace(value)
 	case "gateway_port":
-		port, err := parsePort()
+		p, err := parsePort()
 		if err != nil {
 			return err
 		}
-		cfg.GatewayPort = port
-	case "instance_base_port":
-		port, err := parsePort()
+		cfg.GatewayPort = p
+	case "provider_port":
+		p, err := parsePort()
 		if err != nil {
 			return err
 		}
-		cfg.InstanceBasePort = port
-	case "probe_api_port":
-		port, err := parsePort()
+		cfg.ProviderPort = p
+	case "engine_enabled":
+		b, err := parseBool()
 		if err != nil {
 			return err
 		}
-		cfg.ProbeAPIPort = port
-	case "probe_socks_port":
-		port, err := parsePort()
+		cfg.EngineEnabled = &b
+	case "engine_warp_enabled":
+		b, err := parseBool()
 		if err != nil {
 			return err
 		}
-		cfg.ProbeSocksPort = port
-	case "free_sidecar_port":
+		cfg.EngineWarpEnabled = &b
+	case "engine_warp_pool_size":
 		v, err := parseInt()
 		if err != nil {
 			return err
 		}
-		if v != 0 && (v < 1024 || v > 65535) {
-			return errors.New("free_sidecar_port 需在 1024~65535（0 = 默认 40200）")
+		if v < 0 || v > 32 {
+			return fmt.Errorf("engine_warp_pool_size 需在 0~32 之间")
 		}
-		cfg.FreeSidecarPort = int(v)
-	case "free_sidecar_enabled":
-		b, err := strconv.ParseBool(value)
+		cfg.EngineWarpPoolSize = int(v)
+	case "engine_warp_source_ipv6":
+		cfg.EngineWarpSourceIPv6 = strings.TrimSpace(value)
+	case "engine_proxies":
+		cfg.EngineProxies = splitLinesOrCommas(value)
+	case "engine_zen_keys":
+		cfg.EngineZenKeys = splitLinesOrCommas(value)
+	case "engine_go_keys":
+		cfg.EngineGoKeys = splitLinesOrCommas(value)
+	case "engine_retry_max_attempts":
+		v, err := parseInt()
 		if err != nil {
-			return fmt.Errorf("invalid boolean for free_sidecar_enabled: %s", value)
+			return err
 		}
-		cfg.FreeSidecarEnabled = &b
-	case "chain_enabled":
-		b, err := strconv.ParseBool(value)
+		if v < 0 || v > 20 {
+			return fmt.Errorf("engine_retry_max_attempts 需在 0~20 之间")
+		}
+		cfg.EngineRetryMaxAttempts = int(v)
+	case "engine_models_refresh_sec":
+		v, err := parseInt()
 		if err != nil {
-			return fmt.Errorf("invalid boolean for chain_enabled: %s", value)
+			return err
 		}
-		cfg.ChainEnabled = &b
-		m.invalidateChainCache()
-	case "chain_groups":
-		var groups []string
-		for _, g := range strings.Split(value, ",") {
-			if g = strings.TrimSpace(g); g != "" {
-				groups = append(groups, g)
-			}
+		if v < 0 {
+			return fmt.Errorf("engine_models_refresh_sec 不能为负")
 		}
-		cfg.ChainGroups = groups
-		m.invalidateChainCache()
-	case "chain_nodes":
-		var nodes []string
-		for _, n := range strings.Split(value, ",") {
-			if n = strings.TrimSpace(n); n != "" {
-				nodes = append(nodes, n)
-			}
-		}
-		cfg.ChainNodes = nodes
-		m.invalidateChainCache()
-	case "front_candidates":
-		var nodes []string
-		for _, n := range strings.Split(value, ",") {
-			if n = strings.TrimSpace(n); n != "" {
-				nodes = append(nodes, n)
-			}
-		}
-		cfg.FrontCandidates = nodes
-		m.invalidateChainCache()
-	case "front_group":
-		cfg.FrontGroup = strings.TrimSpace(value)
-		m.invalidateChainCache()
-	case "front_node":
-		cfg.FrontNode = strings.TrimSpace(value)
-		m.invalidateChainCache()
-	case "chain_auto_detect":
-		b, err := strconv.ParseBool(value)
-		if err != nil {
-			return fmt.Errorf("invalid boolean for chain_auto_detect: %s", value)
-		}
-		cfg.ChainAutoDetect = &b
-		m.invalidateChainCache()
+		cfg.EngineModelsRefreshSec = int(v)
 	default:
-		return errors.New("Unknown config key: " + key)
+		return fmt.Errorf("unknown config key: %s", key)
 	}
+
 	if err := m.saveConfig(cfg); err != nil {
 		return err
 	}
-	// T4: 网关密钥立即生效——更新内存密码并热重启网关进程（若正在运行）；
-	// 不触碰任何实例，也不等待下次网关自然重启。
-	// 显式把刚保存的 cfg.GatewayKey 传给 ApplyKey（与落盘值一致），避免被环境变量
-	// OPCODE2API_GATEWAY_KEY 压过（env 固化教训，同 gateway_port 处理）；
-	// 仅重置（空串 = 回退默认）时经 effectiveGatewayKey 解析 env > config > 默认。
-	if key == "gateway_key" {
-		eff := cfg.GatewayKey
-		if eff == "" {
-			eff = effectiveGatewayKey(cfg)
-		}
-		if err := m.Gateway().ApplyKey(eff, m.Run()); err != nil {
-			return fmt.Errorf("密钥已保存，但网关热重启失败: %w", err)
-		}
-	}
-	// T5: 网关端口立即生效——更新内存端口并热重启网关进程（若正在运行）。
-	// 端口 = 0（恢复默认/未设置）时按 managerGatewayPort 的 env > config > 默认
-	// 优先级解析生效端口（注意：此处显式把 cfg.GatewayPort 传给 ApplyPort，
-	// 与 ConfigSet 保存后的落盘值一致，避免被已注入的 OPCODE2API_GATEWAY_PORT env 压过）。
-	if key == "gateway_port" {
-		eff := cfg.GatewayPort
-		if eff == 0 {
-			eff = m.managerGatewayPort()
-		}
-		if err := m.Gateway().ApplyPort(eff, m.Run()); err != nil {
-			return fmt.Errorf("端口已保存，但网关热重启失败: %w", err)
-		}
-	}
+	// 端口变更由主进程看门狗在下一轮（≤30s）应用；此处不主动重启，
+	// 避免与看门狗并发启停同一进程。
 	return nil
 }
 
-// ConfigView 是前端 /api/admin/config 的响应形态（密码脱敏）。
-type ConfigView struct {
-	BaseURL                string `json:"base_url"`
-	DefaultPassword        string `json:"default_password"`
-	HasPassword            bool   `json:"has_password"`
-	ClashExternalURL       string `json:"clash_external_url"`
-	HasClashToken          bool   `json:"has_clash_token"`
-	TimeoutTTFTMinMS       int64  `json:"timeout_ttft_min_ms"`
-	TimeoutTTFTMaxMS       int64  `json:"timeout_ttft_max_ms"`
-	TimeoutSilenceMinMS    int64  `json:"timeout_silence_min_ms"`
-	TimeoutSilenceMaxMS    int64  `json:"timeout_silence_max_ms"`
-	PreContentSilenceMinMS int64  `json:"timeout_precontent_silence_min_ms"`
-	PreContentSilenceMaxMS int64  `json:"timeout_precontent_silence_max_ms"`
-	FailoverProbeMin       int64  `json:"failover_probe_min"`
-	FailoverProbeMax       int64  `json:"failover_probe_max"`
-	CallLogMax             int64  `json:"call_log_max"`
-	ShowNodePrefix         bool   `json:"show_node_prefix"`
-	// OpencodeClientVersion 免费通道上报的客户端版本（空 = 自动探测）
-	OpencodeClientVersion     string  `json:"opencode_client_version"`
-	UiPollIntervalSec         int     `json:"ui_poll_interval_sec"`
-	UpstreamProxy             string  `json:"upstream_proxy"`
-	SubscribeURL              string  `json:"subscribe_url"`
-	SubscribeIntervalMin      int     `json:"subscribe_interval_min"`
-	HealthCheckIntervalSec    int     `json:"health_check_interval_sec"`
-	HealthRestartThreshold    int     `json:"health_restart_threshold"`
-	PoolProbeIntervalSec      int     `json:"pool_probe_interval_sec"`
-	PoolProbeTimeoutSec       int     `json:"pool_probe_timeout_sec"`
-	PoolQualityWindowMin      int     `json:"pool_quality_window_min"`
-	PoolProbeEnabled          bool    `json:"pool_probe_enabled"`
-	ProbeSoloEnabled          bool    `json:"probe_solo_enabled"`
-	PoolBreakerThreshold      int     `json:"pool_breaker_threshold"`
-	PoolHalfOpenIntervalSec   int     `json:"pool_halfopen_interval_sec"`
-	BadPoolResetSec           int     `json:"bad_pool_reset_sec"`
-	QuotaBadPoolResetSec      int     `json:"quota_bad_pool_reset_sec"`
-	PoolPerformanceMode       bool    `json:"pool_performance_mode"`
-	PoolRaceCopies            int     `json:"pool_race_copies"`
-	RaceBudgetMS              int     `json:"race_budget_ms"`
-	PoolRacePressureLow       float64 `json:"pool_race_pressure_low"`
-	PoolRacePressureHigh      float64 `json:"pool_race_pressure_high"`
-	RateLimitCooldownSec      int     `json:"rate_limit_cooldown_sec"`
-	RateLimitBackoffBaseMS    int     `json:"rate_limit_backoff_base_ms"`
-	RateLimitBackoffCapMS     int     `json:"rate_limit_backoff_cap_ms"`
-	RateLimitMinIntervalMS    int     `json:"rate_limit_min_interval_ms"`
-	FingerprintBadCooldownSec int     `json:"fingerprint_bad_cooldown_sec"`
-	ScanConcurrency           int     `json:"scan_concurrency"`
-	StopScanConcurrency       int     `json:"stop_scan_concurrency"`
-	BatchConcurrency          int     `json:"batch_concurrency"`
-	TestConcurrency           int     `json:"test_concurrency"`
-	PoolProbeConcurrency      int     `json:"pool_probe_concurrency"`
-	HasGatewayKey             bool    `json:"has_gateway_key"`
-	GatewayKey                string  `json:"gateway_key"`
-	// 免费层 Bun sidecar
-	FreeSidecarPort    int  `json:"free_sidecar_port"`
-	FreeSidecarEnabled bool `json:"free_sidecar_enabled"`
-	// 链式代理（前置节点）
-	ChainEnabled    bool     `json:"chain_enabled"`
-	ChainGroups     []string `json:"chain_groups"`
-	ChainNodes      []string `json:"chain_nodes"`
-	FrontCandidates []string `json:"front_candidates"`
-	FrontGroup      string   `json:"front_group"`
-	FrontNode       string   `json:"front_node"`
-	ChainAutoDetect bool     `json:"chain_auto_detect"`
-	// 统一网关监听端口（0 = 未设置，用环境槽位/默认 40080）
-	GatewayPort uint16 `json:"gateway_port"`
+// splitLinesOrCommas 把多行/逗号（中英文）混排文本切成有序去重列表。
+func splitLinesOrCommas(raw string) []string {
+	fields := strings.FieldsFunc(raw, func(r rune) bool {
+		return r == '\n' || r == '\r' || r == ',' || r == ';' || r == '，' || r == '；'
+	})
+	seen := make(map[string]bool, len(fields))
+	out := make([]string, 0, len(fields))
+	for _, f := range fields {
+		k := strings.TrimSpace(f)
+		if k == "" || seen[k] {
+			continue
+		}
+		seen[k] = true
+		out = append(out, k)
+	}
+	return out
 }
 
-// ConfigViewOf 生成前端视图（密码与 clash token 脱敏为掩码）。
-// 默认值与 Rust config_get 一致：未设置时返回默认超时区间/探测数/日志上限，
-// 避免前端拿到 0 导致输入框空白、校验拦截（min ≤ 0 非法）而"按钮不可用"。
+// engineEnabled 引擎总开关（nil = 默认开启）。
+func engineEnabled(cfg Config) bool {
+	if cfg.EngineEnabled == nil {
+		return true
+	}
+	return *cfg.EngineEnabled
+}
+
+// engineWarpEnabled 引擎 WARP 开关（nil = 默认开启）。
+func engineWarpEnabled(cfg Config) bool {
+	if cfg.EngineWarpEnabled == nil {
+		return true
+	}
+	return *cfg.EngineWarpEnabled
+}
+
+// ConfigView 是前端 /api/admin/config 的响应形态（密码脱敏）。
+// ConfigView 前端视图（v2.0.0 精简：免费层配置项已移除）。
+type ConfigView struct {
+	BaseURL         string `json:"base_url"`
+	DefaultPassword string `json:"default_password"`
+	HasPassword     bool   `json:"has_password"`
+	CallLogMax      int64  `json:"call_log_max"`
+	UiPollIntervalSec int  `json:"ui_poll_interval_sec"`
+	HasGatewayKey   bool   `json:"has_gateway_key"`
+	GatewayKey      string `json:"gateway_key"`
+
+	// 服务端口
+	GatewayPort  uint16 `json:"gateway_port"`
+	ProviderPort uint16 `json:"provider_port"`
+	// 生效值（含环境槽位/默认值），供设置页「端口占用」展示
+	GatewayPortEffective  uint16 `json:"gateway_port_effective"`
+	ProviderPortEffective uint16 `json:"provider_port_effective"`
+
+	// 免费层引擎（40080）
+	EngineEnabled          bool     `json:"engine_enabled"`
+	EngineWarpEnabled      bool     `json:"engine_warp_enabled"`
+	EngineWarpPoolSize     int      `json:"engine_warp_pool_size"`
+	EngineWarpSourceIPv6   string   `json:"engine_warp_source_ipv6"`
+	EngineProxies          []string `json:"engine_proxies"`
+	EngineZenKeys          []string `json:"engine_zen_keys"`
+	EngineGoKeys           []string `json:"engine_go_keys"`
+	EngineZenKeyCount      int      `json:"engine_zen_key_count"`
+	EngineGoKeyCount       int      `json:"engine_go_key_count"`
+	EngineRetryMaxAttempts int      `json:"engine_retry_max_attempts"`
+	EngineModelsRefreshSec int      `json:"engine_models_refresh_sec"`
+}
+
+// ConfigViewOf 生成前端视图（密码脱敏为掩码）。
 func (m *Manager) ConfigViewOf() ConfigView {
 	cfg := m.loadConfig()
-	def := func(v, d int64) int64 {
-		if v <= 0 {
-			return d
-		}
-		return v
+	callLogMax := cfg.CallLogMax
+	if callLogMax <= 0 {
+		callLogMax = 5000
 	}
 	return ConfigView{
-		BaseURL:                   cfg.BaseURL,
-		DefaultPassword:           maskSecret(cfg.DefaultPassword),
-		HasPassword:               cfg.DefaultPassword != "",
-		ClashExternalURL:          cfg.ClashExternalURL,
-		HasClashToken:             cfg.ClashAuthToken != "",
-		TimeoutTTFTMinMS:          def(cfg.TimeoutTTFTMinMS, 10000),
-		TimeoutTTFTMaxMS:          def(cfg.TimeoutTTFTMaxMS, 10000),
-		TimeoutSilenceMinMS:       def(cfg.TimeoutSilenceMinMS, 5000),
-		TimeoutSilenceMaxMS:       def(cfg.TimeoutSilenceMaxMS, 5000),
-		PreContentSilenceMinMS:    def(cfg.PreContentSilenceMinMS, 30000),
-		PreContentSilenceMaxMS:    def(cfg.PreContentSilenceMaxMS, 30000),
-		FailoverProbeMin:          def(cfg.FailoverProbeMin, 2),
-		FailoverProbeMax:          def(cfg.FailoverProbeMax, 3),
-		CallLogMax:                def(cfg.CallLogMax, 5000),
-		ShowNodePrefix:            cfg.ShowNodePrefix,
-		OpencodeClientVersion:     OpencodeClientVersionOf(cfg),
-		UiPollIntervalSec:         uiPollIntervalSecOf(cfg),
-		UpstreamProxy:             cfg.UpstreamProxy,
-		SubscribeURL:              cfg.SubscribeURL,
-		SubscribeIntervalMin:      cfg.SubscribeIntervalMin,
-		HealthCheckIntervalSec:    cfg.HealthCheckIntervalSec,
-		HealthRestartThreshold:    cfg.HealthRestartThreshold,
-		PoolProbeIntervalSec:      poolProbeInterval(cfg),
-		PoolProbeTimeoutSec:       int(poolProbeTimeout(cfg).Seconds()),
-		PoolQualityWindowMin:      int(poolQualityWindowSec(cfg) / 60),
-		PoolProbeEnabled:          poolProbeEnabled(cfg),
-		ProbeSoloEnabled:          probeSoloEnabled(cfg),
-		PoolBreakerThreshold:      poolBreakerThresholdOf(cfg),
-		PoolHalfOpenIntervalSec:   poolHalfOpenIntervalOf(cfg),
-		BadPoolResetSec:           badPoolResetSecOf(cfg),
-		QuotaBadPoolResetSec:      quotaBadPoolResetSecOf(cfg),
-		PoolPerformanceMode:       poolPerfModeEnabled(cfg),
-		PoolRaceCopies:            poolRaceCopiesOf(cfg),
-		RaceBudgetMS:              poolRaceBudgetMSOf(cfg),
-		PoolRacePressureLow:       poolRacePressureLowOf(cfg),
-		PoolRacePressureHigh:      poolRacePressureHighOf(cfg),
-		RateLimitCooldownSec:      rateLimitCooldownSecOf(cfg),
-		RateLimitBackoffBaseMS:    rateLimitBackoffBaseMSOf(cfg),
-		RateLimitBackoffCapMS:     rateLimitBackoffCapMSOf(cfg),
-		RateLimitMinIntervalMS:    cfg.RateLimitMinIntervalMS,
-		FingerprintBadCooldownSec: cfg.FingerprintBadCooldownSec,
-		ScanConcurrency:           scanConcurrencyOf(cfg),
-		StopScanConcurrency:       stopScanConcurrencyOf(cfg),
-		BatchConcurrency:          batchConcurrencyOf(cfg),
-		TestConcurrency:           testConcurrencyOf(cfg),
-		PoolProbeConcurrency:      poolProbeConcurrencyOf(cfg),
-		HasGatewayKey:             cfg.GatewayKey != "",
-		GatewayKey:                maskSecret(cfg.GatewayKey),
-		FreeSidecarPort:           m.freeSidecarPort(),
-		FreeSidecarEnabled:        freeSidecarEnabled(cfg),
-		ChainEnabled:              chainEnabled(cfg),
-		ChainGroups:               cfg.ChainGroups,
-		ChainNodes:                cfg.ChainNodes,
-		FrontCandidates:           cfg.FrontCandidates,
-		FrontGroup:                cfg.FrontGroup,
-		FrontNode:                 cfg.FrontNode,
-		ChainAutoDetect:           chainAutoDetect(cfg),
-		GatewayPort:               cfg.GatewayPort,
+		BaseURL:           cfg.BaseURL,
+		DefaultPassword:   maskSecret(cfg.DefaultPassword),
+		HasPassword:       cfg.DefaultPassword != "",
+		CallLogMax:        callLogMax,
+		UiPollIntervalSec: uiPollIntervalSecOf(cfg),
+		HasGatewayKey:     cfg.GatewayKey != "",
+		GatewayKey:        maskSecret(cfg.GatewayKey),
+
+		GatewayPort:           cfg.GatewayPort,
+		ProviderPort:          cfg.ProviderPort,
+		GatewayPortEffective:  m.managerGatewayPort(),
+		ProviderPortEffective: m.managerProviderPort(),
+
+		EngineEnabled:          engineEnabled(cfg),
+		EngineWarpEnabled:      engineWarpEnabled(cfg),
+		EngineWarpPoolSize:     cfg.EngineWarpPoolSize,
+		EngineWarpSourceIPv6:   cfg.EngineWarpSourceIPv6,
+		EngineProxies:          cfg.EngineProxies,
+		EngineZenKeys:          cfg.EngineZenKeys,
+		EngineGoKeys:           cfg.EngineGoKeys,
+		EngineZenKeyCount:      len(cfg.EngineZenKeys),
+		EngineGoKeyCount:       len(cfg.EngineGoKeys),
+		EngineRetryMaxAttempts: cfg.EngineRetryMaxAttempts,
+		EngineModelsRefreshSec: cfg.EngineModelsRefreshSec,
 	}
 }
-
-// defaultFreeSidecarPort 免费层 Bun sidecar 默认端口。
-const defaultFreeSidecarPort = 40200
-
-// freeSidecarPortOf 生效的 sidecar 端口（0 = 默认 40200）。
-func freeSidecarPortOf(cfg Config) int {
-	if cfg.FreeSidecarPort > 0 {
-		return cfg.FreeSidecarPort
-	}
-	return defaultFreeSidecarPort
-}
-
-// freeSidecarEnabled 生效的 sidecar 开关（nil = 默认开启）。
-func freeSidecarEnabled(cfg Config) bool {
-	return cfg.FreeSidecarEnabled == nil || *cfg.FreeSidecarEnabled
-}
-
 // defaultUiPollIntervalSec 界面轮询间隔默认值（秒，U3）。
 const defaultUiPollIntervalSec = 5
 

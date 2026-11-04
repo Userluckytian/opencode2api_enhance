@@ -58,7 +58,7 @@ func initLogger() *slog.Logger {
 		},
 	})
 
-	logger := slog.New(newContextHandler(handler, lvl))
+	logger := slog.New(withLevelFilter(handler, lvl))
 	slog.SetDefault(logger)
 	return logger
 }
@@ -70,9 +70,9 @@ func loggingMiddleware(next http.HandlerFunc) http.HandlerFunc {
 		ctx := context.WithValue(r.Context(), reqIDKey, reqID)
 		// 阶段 3：种入 trace_id——入站 X-Trace-ID 复用、否则 env、否则复用 req_id；
 		// 回写响应头，便于客户端与下游进程串联同一条链路。
-		traceID := resolveTraceID(r.Header.Get(traceHeader), reqID)
+		traceID := resolveTraceID(r.Header.Get(traceHeaderHeader), reqID)
 		ctx = withTraceID(ctx, traceID)
-		w.Header().Set(traceHeader, traceID)
+		w.Header().Set(traceHeaderHeader, traceID)
 		r = r.WithContext(ctx)
 
 		slog.DebugContext(ctx, "request started",
@@ -95,29 +95,19 @@ func getReqID(ctx context.Context) string {
 // ======================== 配置 ========================
 
 var (
-	port                 string
-	configPath           = "config.json"
-	modelAlias           = map[string]string{}
-	reasoningEffortMap   = map[string]string{}
-	forceDisableThinking bool
-	showNodePrefix       bool
-	debugMode            bool
-	gatewayMode          bool
-	callLogFlag          bool // -call-log：实例子进程显式启用调用日志写盘
-	configMu             sync.RWMutex
-	storedResponses      = map[string]storedResponseEntry{}
-	storedResponsesMu    sync.RWMutex
-	storedSeq            uint64    // storedResponses 插入序号（L5 淘汰最旧用）
-	storedLastPurge      time.Time // 上次批量清理时间（L5 节流）
-	// 厂商注册表与路由（配置驱动；applyConfig 写入）
-	providersCfg []ProviderCfg
-	routingCfg   RoutingCfg
+	port       string
+	configPath = "config.json"
+	debugMode  bool
+	callLogFlag bool // -call-log：供应商服务进程显式启用调用日志写盘
+	storedResponses   = map[string]storedResponseEntry{}
+	storedResponsesMu sync.RWMutex
+	storedSeq         uint64    // storedResponses 插入序号（L5 淘汰最旧用）
+	storedLastPurge   time.Time // 上次批量清理时间（L5 节流）
 )
 
 // ======================== 管理面板认证 ========================
 
 var (
-	adminPassword string
 	sessions      = map[string]sessionEntry{}
 	sessionsMu    sync.Mutex
 )

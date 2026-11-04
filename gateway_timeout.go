@@ -10,7 +10,6 @@ import (
 	"math/rand/v2"
 	"net/http"
 	"os"
-	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -625,35 +624,13 @@ func recordCall(rec CallRecord) {
 }
 
 // setTimeoutConfigFromApp 从 AppConfig 读取区间配置并应用（热加载）
+// setTimeoutConfigFromApp 从 AppConfig 读取区间配置并应用（热加载）。
+// v2.0.0：TTFT/静默/探针区间随免费层网关移除，只保留日志上限热加载。
 func setTimeoutConfigFromApp(cfg AppConfig) {
-	timeoutCfgMu.Lock()
-	if cfg.TTFTMinMS > 0 && cfg.TTFTMaxMS >= cfg.TTFTMinMS {
-		timeoutCfg.TTFTRange = [2]time.Duration{
-			time.Duration(cfg.TTFTMinMS) * time.Millisecond,
-			time.Duration(cfg.TTFTMaxMS) * time.Millisecond,
-		}
-	}
-	if cfg.SilenceMinMS > 0 && cfg.SilenceMaxMS >= cfg.SilenceMinMS {
-		timeoutCfg.SilenceRange = [2]time.Duration{
-			time.Duration(cfg.SilenceMinMS) * time.Millisecond,
-			time.Duration(cfg.SilenceMaxMS) * time.Millisecond,
-		}
-	}
-	if cfg.ProbeMin > 0 && cfg.ProbeMax >= cfg.ProbeMin {
-		timeoutCfg.ProbeRange = [2]int{cfg.ProbeMin, cfg.ProbeMax}
-	}
-	if cfg.PreContentSilenceMinMS > 0 && cfg.PreContentSilenceMaxMS >= cfg.PreContentSilenceMinMS {
-		timeoutCfg.PreContentSilenceRange = [2]time.Duration{
-			time.Duration(cfg.PreContentSilenceMinMS) * time.Millisecond,
-			time.Duration(cfg.PreContentSilenceMaxMS) * time.Millisecond,
-		}
-	}
-	timeoutCfgMu.Unlock()
 	if cfg.CallLogMax > 0 {
 		callLogMu.Lock()
-		// CONC-3（M4 写侧）热加载迁移：就地改上限，不整体替换对象——
-		// 保留已聚合内存记录与写者生命周期（原整批丢失问题随整体替换消除）
-		callLog.SetMaxRecords(cfg.CallLogMax)
+		// 就地改上限，不整体替换对象——保留已聚合内存记录与写者生命周期。
+		callLog.SetMaxRecords(int(cfg.CallLogMax))
 		callLogMu.Unlock()
 	}
 }
@@ -1094,13 +1071,7 @@ func streamWithResume(w http.ResponseWriter, r *http.Request, upstreamBody []byt
 		// 中断：记录续写重连事件；是否真正切换节点由下一次重连结果决定。
 		res.Switched = true
 		attempt++
-		// 标记当前节点冷却（20s），强制下一次重连选择其他健康节点——
-		// failover 模式"成功不动游标"，若流中断但连接曾 2xx，健康表仍认为它可用，
-		// 不标记冷却会导致重连永远命中同一节点（用户实测的 28110→28110→... 死循环）。
-		if proxyAddr != "" {
-			markSocks5Result(proxyAddr, http.StatusServiceUnavailable, nil)
-			sseDebugf("[%s] 节点 %s 流中断，标记冷却以强制换节点", reqID, proxyAddr)
-		}
+		// 节点冷却标记随节点池移除，此处只记事件。
 		if attempt > maxResume {
 			res.OK = false
 			// 保留最后一次中断的真实根因（如 unexpected EOF / 超时）：
@@ -1204,42 +1175,8 @@ func buildResumeBody(body []byte, accumulated string) []byte {
 	return b
 }
 
-// applyBadStatusConfig 从配置读取坏状态码组与坏池阈值并应用（热加载）。
-// 配置为 "状态码"→"原因文案" 的 map；未配置的项保留默认值。
-func applyBadStatusConfig(cfg AppConfig) {
-	socks5HealthMu.Lock()
-	defer socks5HealthMu.Unlock()
-	if cfg.BadStatusCodes != nil {
-		newMap := map[int]string{}
-		for codeStr, reason := range cfg.BadStatusCodes {
-			code, err := strconv.Atoi(codeStr)
-			if err != nil {
-				continue
-			}
-			newMap[code] = reason
-		}
-		if len(newMap) > 0 {
-			badStatusCodes = newMap
-		}
-	}
-	// badThreshold 用全局 const（badThreshold），配置暂不覆盖（保持简单）；
-	// 如需可配置可在此读取 cfg.BadThreshold。
-	_ = cfg.BadThreshold
-}
+// applyBadStatusConfig 兼容占位：坏状态码组随节点池移除，配置项保留解析不上报。
+func applyBadStatusConfig(cfg AppConfig) { _ = cfg }
 
-// proxyDisplayName 按 SOCKS5 地址反查实例名（用于流式前缀「🤖 实例名 · 模型」）。
-// Rust 生成网关配置时把 socks5_proxies[].name 填为真实实例名；
-// 查不到时回退返回地址本身。纯内存查询，无网络开销。
-func proxyDisplayName(addr string) string {
-	if addr == "" {
-		return ""
-	}
-	socks5Mu.RLock()
-	defer socks5Mu.RUnlock()
-	for _, p := range socks5Proxies {
-		if p.Addr == addr && p.Name != "" {
-			return p.Name
-		}
-	}
-	return addr
-}
+// proxyDisplayName 兼容占位：节点池移除后无地址到实例名的映射，原样返回。
+func proxyDisplayName(addr string) string { return addr }

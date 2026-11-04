@@ -1,13 +1,10 @@
-// Package manager 承载原 Tauri 管理域（35 command）的 Go 移植：
-// 实例生命周期 / 端口 / clash 解析 / sing-box 配置 / 探针扫描 / 网关 / 统计聚合 /
-// 调用日志 / 应用配置。HTTP 层经 /api/admin/* 暴露（P4）。
+// Package manager 承载管理域（配置/供应商服务/免费层引擎/统计/调用日志）。
 //
-// 目录约定（与 Rust 侧一致）：
+// 目录约定：
 //
 //	dataDir    = OPCODE2API_DATA_DIR（非空）| <UserConfigDir>/opencode2api-manager
-//	instances  = dataDir/instances.json
-//	runtime    = dataDir/runtime/…（各实例目录 + _unified-gateway + _probe）
-//	binDir     = <当前可执行文件目录>/bin（内嵌/外置二进制）
+//	runtime    = dataDir/runtime/…（free-tier 引擎目录 + _provider-service）
+//	binDir     = <当前可执行文件所在目录>（内嵌/外置二进制同目录）
 package manager
 
 import (
@@ -16,7 +13,7 @@ import (
 	"runtime"
 )
 
-// DefaultDataDir 计算管理数据目录（Rust config.rs 语义）。
+// DefaultDataDir 计算管理数据目录。
 func DefaultDataDir() string {
 	if dir := os.Getenv("OPCODE2API_DATA_DIR"); dir != "" {
 		_ = os.MkdirAll(dir, 0o755)
@@ -35,9 +32,8 @@ func DefaultDataDir() string {
 type Paths struct {
 	DataDir    string
 	Config     string // dataDir/config.json
-	Instances  string // dataDir/instances.json
 	RuntimeDir string // dataDir/runtime
-	BinDir     string // <exe>/bin
+	BinDir     string // <exe> 所在目录
 }
 
 // ResolvePaths 计算全部路径。dataDir 为空时用 DefaultDataDir。
@@ -49,41 +45,25 @@ func ResolvePaths(dataDir string) Paths {
 	if p, e := os.Executable(); e == nil {
 		exeDir = filepath.Dir(p)
 	}
-	// 约定：Go core 由壳（Rust）释放到 <壳exe>/bin/ 下运行，sing-box 与 core 同目录。
-	// 因此 binDir 默认 = core 所在目录（filepath.Dir(os.Executable())），无需再拼 "bin"。
-	binDir := exeDir
-	// 兼容旧形态：若 core 目录下没有 sing-box，但父级存在 bin/ 子目录，则回退（如单文件 Web 直跑）。
-	// 平台后缀：Windows 为 .exe，其余平台无后缀。
-	sbName := "sing-box"
-	if runtime.GOOS == "windows" {
-		sbName = "sing-box.exe"
-	}
-	if _, err := os.Stat(filepath.Join(exeDir, sbName)); err != nil {
-		alt := filepath.Join(exeDir, "bin")
-		if fi, e := os.Stat(filepath.Join(alt, sbName)); e == nil && !fi.IsDir() {
-			binDir = alt
-		}
-	}
 	return Paths{
 		DataDir:    dataDir,
 		Config:     filepath.Join(dataDir, "config.json"),
-		Instances:  filepath.Join(dataDir, "instances.json"),
 		RuntimeDir: filepath.Join(dataDir, "runtime"),
-		BinDir:     binDir,
+		BinDir:     exeDir,
 	}
 }
 
-// RuntimeDirOf 返回某实例的运行目录（runtime/<name>）。
-// 目录名做文件系统安全化：实例名可能来自节点名（含 | : 等 Windows 非法字符），
-// 直接 join 会在 MkdirAll 时失败（The filename ... syntax is incorrect）。
-func (p Paths) RuntimeDirOf(name string) string {
-	return filepath.Join(p.RuntimeDir, sanitizeInstanceName(name))
+// FreeTierEngineDir 免费层引擎（40080）的工作目录。
+// 引擎会在 config.json 同目录写 models.catalog / rotation / availability 等状态文件，
+// 因此必须给它一个独立可写目录（不能与 dataDir 混用，也不能放 Program Files）。
+func (p Paths) FreeTierEngineDir() string {
+	return filepath.Join(p.RuntimeDir, "free-tier")
 }
 
 // prepareRuntimes 确保 runtime 目录存在。
 func (p Paths) prepareRuntimes() error {
-	if err := os.MkdirAll(p.RuntimeDir, 0o755); err != nil {
-		return err
-	}
-	return os.MkdirAll(filepath.Join(p.RuntimeDir, "_unified-gateway"), 0o755)
+	return os.MkdirAll(p.RuntimeDir, 0o755)
 }
+
+// isWindows 报告当前是否为 Windows（用于二进制后缀判断）。
+func isWindows() bool { return runtime.GOOS == "windows" }

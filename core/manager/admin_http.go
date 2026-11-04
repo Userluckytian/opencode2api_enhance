@@ -14,7 +14,6 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
-	"strings"
 )
 
 // writeJSON 统一 JSON 输出。
@@ -74,47 +73,6 @@ func (m *Manager) ConfigSetHandler() http.HandlerFunc {
 	}
 }
 
-// ChainCheckHandler POST {node}：检测目标节点经前置组的整条链。
-func (m *Manager) ChainCheckHandler() http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		if !requireMethod(w, r, http.MethodPost) {
-			return
-		}
-		var req struct {
-			Node string `json:"node"`
-		}
-		if json.NewDecoder(r.Body).Decode(&req) != nil || strings.TrimSpace(req.Node) == "" {
-			writeErr(w, http.StatusBadRequest, "请求体需含 node")
-			return
-		}
-		writeJSON(w, m.CheckChain(strings.TrimSpace(req.Node)))
-	}
-}
-
-// StatsHandler GET 统计聚合。
-func (m *Manager) StatsHandler() http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		if !requireMethod(w, r, http.MethodGet) {
-			return
-		}
-		writeJSON(w, m.AggregateStats())
-	}
-}
-
-// ResetStatsHandler POST 重置统计（?clearDeleted=bool）。
-func (m *Manager) ResetStatsHandler() http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		if !requireMethod(w, r, http.MethodPost) {
-			return
-		}
-		clearDeleted := true
-		if q := r.URL.Query().Get("clearDeleted"); q != "" {
-			clearDeleted = q == "true" || q == "1"
-		}
-		writeJSON(w, m.ResetStats(clearDeleted))
-	}
-}
-
 // CallLogHandler GET 调用日志（?limit=；缺省 0 = 全部历史）。
 func (m *Manager) CallLogHandler() http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
@@ -147,10 +105,9 @@ func (m *Manager) ClearCallLogHandler() http.HandlerFunc {
 
 // BinariesInfo 二进制信息（前端契约）。
 type BinariesInfo struct {
-	BinDir        string `json:"bin_dir"`
-	OCExists      bool   `json:"oc_exists"`
-	SBExists      bool   `json:"sb_exists"`
-	SidecarExists bool   `json:"sidecar_exists"`
+	BinDir       string `json:"bin_dir"`
+	OCExists     bool   `json:"oc_exists"`
+	EngineExists  bool   `json:"engine_exists"`
 }
 
 // BinariesHandler GET 二进制信息。
@@ -161,19 +118,8 @@ func (m *Manager) BinariesHandler() http.HandlerFunc {
 		}
 		info := BinariesInfo{BinDir: m.paths.BinDir}
 		info.OCExists = existsInBin(m.paths.BinDir, "opencode2api")
-		info.SBExists = existsInBin(m.paths.BinDir, "sing-box")
-		info.SidecarExists = existsInBin(m.paths.BinDir, "free-sidecar")
+		info.EngineExists = existsInBin(m.paths.BinDir, freeTierEngineBinName)
 		writeJSON(w, info)
-	}
-}
-
-// InstancesHandler GET 实例列表。
-func (m *Manager) InstancesHandler() http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		if !requireMethod(w, r, http.MethodGet) {
-			return
-		}
-		writeJSON(w, m.ListInstances())
 	}
 }
 

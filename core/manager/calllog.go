@@ -111,48 +111,21 @@ func (r CallLogRecord) HasIssue() bool {
 	return false
 }
 
-// CallLogPath 返回统一网关日志路径。
-func (m *Manager) CallLogPath() string {
-	return filepath.Join(m.paths.RuntimeDir, "_unified-gateway", "call_log.jsonl")
-}
-
-// InstanceCallLogPath 返回某实例运行目录（cwd）下的调用日志路径。
-func (m *Manager) InstanceCallLogPath(name string) string {
-	return filepath.Join(m.paths.RuntimeDirOf(name), "call_log.jsonl")
-}
-
 // ProviderServiceCallLogPath 返回供应商服务运行目录（cwd）下的调用日志路径。
-// 自定义源 + 插件的请求在 50080 处理，日志与网关/实例分开落盘后由日志页聚合。
+// v2.0.0 起这是**唯一**的调用日志来源（实例池/统一网关已移除）。
 func (m *Manager) ProviderServiceCallLogPath() string {
 	return filepath.Join(m.paths.RuntimeDir, providerServiceDirBase, "call_log.jsonl")
 }
 
-// ReadCallLog 聚合读取调用日志：统一网关日志 + 各 Running 实例（含独享）
-// call_log.jsonl，按实例名标注 Source、按时间合并升序（旧→新，与既有 API 语义一致）。
-// max<=0 = 全部历史；max>0 = 只取最近 max 条。缺失/损坏 → 跳过。
-// 多文件并发读取（semaphore ≤8），结果按下标收集后按「网关 → 实例顺序」拼接，
-// 保证同时间戳记录的稳定排序 tie-break 语义不因并发完成顺序而乱。
+// ReadCallLog 读取供应商服务调用日志（v2.0.0 起唯一来源）。
+// max<=0 = 全部历史；max>0 = 只取最近 max 条。缺失/损坏 → 空数组。
 func (m *Manager) ReadCallLog(max int) []CallLogRecord {
 	allRequested := max <= 0
 	tail := max
 	if allRequested {
 		tail = 0
 	}
-	// 待读文件列表：下标 0 = 统一网关；其后按 ListInstances 顺序的 Running 实例。
-	type logFile struct {
-		path   string // 主文件
-		source string // 来源标注（"" = 统一网关）
-	}
-	var files []logFile
-	files = append(files, logFile{path: m.CallLogPath()})
-	// 供应商服务（自定义源 + 插件）独立日志：与网关/实例一起聚合。
-	files = append(files, logFile{path: m.ProviderServiceCallLogPath(), source: "供应商服务"})
-	for _, inst := range m.ListInstances() {
-		if inst.Status.State != "Running" {
-			continue
-		}
-		files = append(files, logFile{path: m.InstanceCallLogPath(inst.Name), source: inst.Name})
-	}
+	files := []struct{ path, source string }{{m.ProviderServiceCallLogPath(), "供应商服务"}}
 	// 并发读各文件尾部：每 goroutine 只写下标 i 自己的槽位（无共享写竞态）。
 	parts := make([][]CallLogRecord, len(files))
 	var wg sync.WaitGroup
@@ -324,19 +297,7 @@ func callLogTime(ts string) time.Time {
 // 失败按来源收集合并为单个 error（前端 toast 展示）。
 func (m *Manager) ClearCallLog() error {
 	var errs []string
-	defaultPW := m.effectiveDefaultPassword()
-
-	// 统一网关
-	gwPort := m.managerGatewayPort()
-	if probePort(gwPort, statsResetProbeTimeout) {
-		if err := clearLogHTTP(gwPort, effectiveGatewayKey(m.loadConfig()), "统一网关"); err != nil {
-			errs = append(errs, err.Error())
-		}
-	} else if err := removeLogFileRetry(m.CallLogPath()); err != nil {
-		errs = append(errs, "统一网关: "+err.Error())
-	}
-
-	// 供应商服务（自定义源 + 插件）
+	// 供应商服务（自定义源 + 插件）——v2.0.0 起唯一日志来源
 	psPort := m.managerProviderPort()
 	if probePort(psPort, statsResetProbeTimeout) {
 		if err := clearLogHTTP(psPort, effectiveGatewayKey(m.loadConfig()), "供应商服务"); err != nil {
@@ -344,25 +305,6 @@ func (m *Manager) ClearCallLog() error {
 		}
 	} else if err := removeLogFileRetry(m.ProviderServiceCallLogPath()); err != nil {
 		errs = append(errs, "供应商服务: "+err.Error())
-	}
-
-	// 各实例（含独享实例 cwd 下的 call_log.jsonl）
-	for _, inst := range m.ListInstances() {
-		path := m.InstanceCallLogPath(inst.Name)
-		if _, err := os.Stat(path); err != nil {
-			continue // 无日志文件：无需处理
-		}
-		if probePort(inst.Port, statsResetProbeTimeout) || inst.Status.State == "Running" {
-			pw := inst.Password
-			if pw == "" {
-				pw = defaultPW
-			}
-			if err := clearLogHTTP(inst.Port, pw, inst.Name); err != nil {
-				errs = append(errs, err.Error())
-			}
-		} else if err := removeLogFileRetry(path); err != nil {
-			errs = append(errs, inst.Name+": "+err.Error())
-		}
 	}
 	if len(errs) > 0 {
 		return fmt.Errorf("清空日志失败: %s", strings.Join(errs, "；"))

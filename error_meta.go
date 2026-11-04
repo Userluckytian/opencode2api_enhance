@@ -66,31 +66,11 @@ func localPoolErrorCode(status int, body []byte) (string, bool) {
 }
 
 // attachPoolSnapshot 记录失败时的池状态与所选节点状态。
+// attachPoolSnapshot 记录失败时的池状态。
+// v2.0.0：节点池已移除，只保留 selected 字段供历史日志格式兼容。
 func attachPoolSnapshot(rec *CallRecord, selected string) {
-	snap := snapshotPoolHealth()
-	rec.Pool = &contract.PoolSnapshot{
-		Total:       snap.Total,
-		Available:   snap.Available,
-		Cooling:     snap.Cooling,
-		BadQuota:    snap.BadQuota,
-		BadAuth:     snap.BadAuth,
-		BadLink:     snap.BadLink,
-		BreakerOpen: snap.BreakerOpen,
-		Selected:    selected,
+	if rec == nil {
+		return
 	}
-	for _, n := range snap.Nodes {
-		if n.Addr != selected {
-			continue
-		}
-		rec.Pool.SelectedState = n.State
-		rec.Pool.SelectedUntil = n.Until
-		rec.NodeState = &contract.NodeState{
-			Addr:          n.Addr,
-			Class:         n.State,
-			Reason:        n.Reason,
-			BadCount:      n.BadCount,
-			CooldownUntil: n.Until,
-		}
-		break
-	}
+	rec.Pool = &contract.PoolSnapshot{Selected: selected}
 }

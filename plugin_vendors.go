@@ -65,7 +65,7 @@ func syncPlugins() {
 			// 模型暴露白名单（主进程侧过滤；ExposeAll=false 时只暴露 ExposedModels）。
 			AllowedModels: allowedOf(rp),
 			// 与 custom 同款：注入网关传输（直连 TierPaid 语义，子进程仅监听 127.0.0.1）。
-			Transport: rootTransport{},
+			Transport: contract.DirectTransport{},
 		})
 		if err != nil {
 			slog.Warn("remote vendor create failed, skipped", "id", rp.ID, "error", err)

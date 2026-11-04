@@ -1,5 +1,5 @@
 // 数据清理（Rust commands.rs data_clean 移植）。
-// 级别：1=清理运行数据（runtime/）；2=+清空实例记录；3=+删除配置（先备份 .bak）。
+// 级别：1=清理运行数据（runtime/）；2=+清空调用日志；3=+删除配置（先备份 .bak）。
 package manager
 
 import (
@@ -11,19 +11,11 @@ import (
 )
 
 // DataClean 执行三级数据清理。
-// 先停后清：停网关 → 停全部实例 → 等 300ms → 清理数据目录。
-func (m *Manager) DataClean(runner Runner, gw *Gateway, level int) error {
+// 先停后清：停供应商服务 → 等 300ms → 清理数据目录。
+func (m *Manager) DataClean(level int) error {
 	if level < 1 || level > 3 {
 		return fmt.Errorf("无效的清理级别: %d", level)
 	}
-	if runner == nil {
-		runner = &realRunner{}
-	}
-	if gw != nil {
-		gw.stop(runner)
-	}
-	m.StopAllInstances(runner)
-	time.Sleep(300 * time.Millisecond)
 	// 供应商服务（50080）持有 runtime/_provider-service 下的日志/统计文件句柄，
 	// 不先停掉会导致 Windows 上 RemoveAll 失败。它由主进程看护，清理后会自动重启。
 	m.stopProviderServiceForClean()
@@ -32,14 +24,6 @@ func (m *Manager) DataClean(runner Runner, gw *Gateway, level int) error {
 		return err
 	}
 
-	// 清空内存态实例（前端刷新即见空）
-	if level >= 2 {
-		m.mu.Lock()
-		defer m.mu.Unlock()
-		if err := writeFileAtomic(m.Paths().Instances, []byte("[]")); err != nil {
-			return err
-		}
-	}
 	return nil
 }
 
@@ -50,13 +34,6 @@ func (m *Manager) cleanDataAt(level int) error {
 	// 1) 删除 runtime 目录（运行数据）
 	if err := os.RemoveAll(p.RuntimeDir); err != nil {
 		return fmt.Errorf("删除运行数据失败: %w", err)
-	}
-
-	// 2) 清空实例记录
-	if level >= 2 {
-		if err := writeFileAtomic(p.Instances, []byte("[]")); err != nil {
-			return fmt.Errorf("清空实例记录失败: %w", err)
-		}
 	}
 
 	// 3) 删除配置（备份 .bak）——但保留 providers/routing：

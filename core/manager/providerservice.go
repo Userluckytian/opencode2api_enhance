@@ -20,6 +20,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strconv"
 	"sync"
 	"time"
 )
@@ -198,7 +199,7 @@ func (p *ProviderService) refreshModels() {
 	key := p.APIKey()
 
 	go func() {
-		models, err := fetchGatewayModels(port, key)
+		models, err := fetchProviderModels(port, key)
 		p.mu.Lock()
 		p.modelsLoading = false
 		if err != nil {
@@ -216,7 +217,7 @@ func (p *ProviderService) refreshModels() {
 func (p *ProviderService) ForceRefreshModels() ProviderServiceStatus {
 	port := p.Port()
 	key := p.APIKey()
-	models, err := fetchGatewayModels(port, key)
+	models, err := fetchProviderModels(port, key)
 	p.mu.Lock()
 	if err != nil {
 		p.modelsErr = err.Error()
@@ -254,7 +255,7 @@ func (p *ProviderService) Start(runner Runner) error {
 	pid, err := runner.Start(ExecSpec{
 		Bin: p.m.binPath("opencode2api"),
 		Args: []string{
-			"-port", itoa(port),
+			"-port", strconv.Itoa(int(port)),
 			"-config", p.configPath,
 			"-password", key,
 			"-provider-service",

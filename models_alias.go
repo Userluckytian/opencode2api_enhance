@@ -39,7 +39,7 @@ func resolveModel(model string, preferFree bool) string {
 func modelInCaches(id string) bool {
 	modelMu.RLock()
 	defer modelMu.RUnlock()
-	return containsModelWithID(modelsCache, id) || containsModelWithID(goModelsCache, id)
+	return containsModelWithID(modelsCache, id)
 }
 
 // displayModelName 返回模型名的展示形式（用于前缀/UI 展示，不含 -free 标记）：
@@ -67,11 +67,8 @@ func getForceDisableThinking() bool {
 	return forceDisableThinking
 }
 
-func getShowNodePrefix() bool {
-	configMu.RLock()
-	defer configMu.RUnlock()
-	return showNodePrefix
-}
+// getShowNodePrefix 恒返回 false：节点池移除后没有「节点前缀」可展示。
+func getShowNodePrefix() bool { return false }
 
 func getReasoningEffortMap() map[string]string {
 	configMu.RLock()
