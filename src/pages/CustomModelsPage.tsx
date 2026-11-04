@@ -1,7 +1,8 @@
 import { useEffect, useRef, useState } from 'react'
 import clsx from 'clsx'
-import { Loader2, Pencil, Plus, PlugZap, Activity, Trash2, X, Plug, RefreshCw, ListChecks, Search, Globe, Copy, Play, Square, Server } from 'lucide-react'
+import { Loader2, Pencil, Plus, PlugZap, Activity, Trash2, Plug, RefreshCw, ListChecks, Search, Globe, Copy, Play, Square, Server } from 'lucide-react'
 import { api, type CustomKeyStrategy, type CustomProviderInput, type CustomProviderTestResult, type CustomProviderView, type CustomProtocol, type PluginModelDetail, type PluginProviderView, type PluginStatus, type ProviderServiceStatus } from '../lib/api'
+import Modal from '../components/Modal'
 
 // 自定义模型源表单（新增/编辑共用）。编辑时 key 留空 = 保留原 key。
 type FormState = {
@@ -167,6 +168,8 @@ export default function CustomModelsPage({ toast }: { toast: (msg: string, ok?: 
   const [confirmClear, setConfirmClear] = useState(false)
   const [clearing, setClearing] = useState(false)
   const [resetKeysId, setResetKeysId] = useState<string | null>(null)
+  // 启停乐观更新：点击立即翻转本地开关并显示行内 spinner，失败回滚（问题 3②）
+  const [togglingId, setTogglingId] = useState<string | null>(null)
   // 供应商服务（自定义源 + 插件供应商的独立入口，默认 50080）
   const [provSvc, setProvSvc] = useState<ProviderServiceStatus | null>(null)
   const [provBusy, setProvBusy] = useState(false)
@@ -180,6 +183,8 @@ export default function CustomModelsPage({ toast }: { toast: (msg: string, ok?: 
   const [pluginExposing, setPluginExposing] = useState<PluginExposeState | null>(null)
   const [pluginConfirmDelete, setPluginConfirmDelete] = useState<string | null>(null)
   const [pluginBusy, setPluginBusy] = useState(false)
+  // 插件启停行内反馈：仅当前行显示 spinner（问题 3② 同款）
+  const [pluginTogglingId, setPluginTogglingId] = useState<string | null>(null)
   const [modelSearch, setModelSearch] = useState('')
   const [modelRefreshBusy, setModelRefreshBusy] = useState(false)
   // 启停/保存后子进程状态异步推进（starting→running/need_config），延迟刷新让状态落定
@@ -423,6 +428,8 @@ export default function CustomModelsPage({ toast }: { toast: (msg: string, ok?: 
       setModelSearch('')
       setTestResult(null)
       toast(`已保存：模型名前缀 ${input.id}/，网关约 3 秒内热生效；未生效请重启网关`, true)
+      // 后端目录刷新已异步化（保存秒回）：稍后重拉一次，补上新源的模型数/目录。
+      window.setTimeout(() => { void reload() }, 1500)
     } catch (e) {
       console.error('保存失败', e)
       toast(`保存失败：${String(e)}`, false)
@@ -468,11 +475,31 @@ export default function CustomModelsPage({ toast }: { toast: (msg: string, ok?: 
     await saveAll(toInputs((list ?? []).filter((p) => p.id !== id)), `已删除 ${id}`)
   }
 
+  // 启停（问题 3②）：乐观更新——点击立即翻转本地开关并显示行内 spinner，
+  // 失败回滚；后端整表保存成功后以服务端视图为准（避免并发点击互相覆盖）。
   const toggleEnabled = async (p: CustomProviderView) => {
-    await saveAll(
-      toInputs((list ?? []).map((x) => (x.id === p.id ? { ...x, enabled: !x.enabled } : x))),
-      p.enabled ? `已停用 ${p.id}（模型不再出现在 /v1/models）` : `已启用 ${p.id}`,
-    )
+    if (togglingId) return
+    const nextEnabled = !p.enabled
+    const nextList = (list ?? []).map((x) => (x.id === p.id ? { ...x, enabled: nextEnabled } : x))
+    setList(nextList)
+    setTogglingId(p.id)
+    try {
+      const r = await api.customProvidersSave(toInputs(nextList))
+      setList(r.providers ?? [])
+      toast(
+        nextEnabled
+          ? `已启用 ${p.id}（网关约 3 秒内热生效；未生效请重启网关）`
+          : `已停用 ${p.id}（模型不再出现在 /v1/models）`,
+        true,
+      )
+    } catch (e) {
+      console.error('保存失败', e)
+      // 回滚到点击前的开关状态
+      setList((prev) => prev?.map((x) => (x.id === p.id ? { ...x, enabled: p.enabled } : x)) ?? null)
+      toast(`保存失败：${String(e)}`, false)
+    } finally {
+      setTogglingId(null)
+    }
   }
 
   // ── 插件式供应商（R4）：列表 / 重扫 / 启停 / 编辑保存 / 删除 ──
@@ -515,8 +542,10 @@ export default function CustomModelsPage({ toast }: { toast: (msg: string, ok?: 
 
   // 启停：enabled=true 拉起子进程+注册厂商；false 停进程+注销（模型移出 /v1/models，不删文件）
   const doPluginToggle = async (p: PluginProviderView) => {
+    if (pluginBusy || pluginTogglingId) return
     const turningOn = p.status === 'disabled'
     setPluginBusy(true)
+    setPluginTogglingId(p.id)
     try {
       const r = await api.pluginToggle(p.id, turningOn)
       setPlugins((prev) => prev?.map((x) => (x.id === p.id ? r.plugin : x)) ?? null)
@@ -529,6 +558,7 @@ export default function CustomModelsPage({ toast }: { toast: (msg: string, ok?: 
       toast(`${turningOn ? '启用' : '停用'}失败：${String(e)}`, false)
     } finally {
       setPluginBusy(false)
+      setPluginTogglingId(null)
     }
   }
 
@@ -939,23 +969,30 @@ export default function CustomModelsPage({ toast }: { toast: (msg: string, ok?: 
                       {resetKeysId === p.id ? '恢复中' : '恢复全部 Key'}
                     </button>
                   )}
-                  {/* 启停 */}
+                  {/* 启停：乐观更新 + 行内 spinner（问题 3②） */}
                   <button
                     type="button"
                     onClick={() => void toggleEnabled(p)}
-                    disabled={saving}
+                    disabled={saving || togglingId !== null}
                     className={clsx(
                       'relative inline-flex h-6 w-11 items-center rounded-full transition-colors disabled:opacity-50',
                       p.enabled ? 'bg-zinc-900' : 'bg-zinc-200',
                     )}
                     aria-label={p.enabled ? '停用' : '启用'}
+                    title={togglingId === p.id ? '保存中…' : p.enabled ? '停用' : '启用'}
                   >
-                    <span
-                      className={clsx(
-                        'inline-block h-5 w-5 transform rounded-full bg-white border border-zinc-300 transition-transform',
-                        p.enabled ? 'translate-x-[22px]' : 'translate-x-[2px]',
-                      )}
-                    />
+                    {togglingId === p.id ? (
+                      <span className="absolute inset-0 flex items-center justify-center">
+                        <Loader2 size={13} className={clsx('animate-spin', p.enabled ? 'text-white' : 'text-zinc-500')} />
+                      </span>
+                    ) : (
+                      <span
+                        className={clsx(
+                          'inline-block h-5 w-5 transform rounded-full bg-white border border-zinc-300 transition-transform',
+                          p.enabled ? 'translate-x-[22px]' : 'translate-x-[2px]',
+                        )}
+                      />
+                    )}
                   </button>
                   <button
                     type="button"
@@ -993,16 +1030,36 @@ export default function CustomModelsPage({ toast }: { toast: (msg: string, ok?: 
         </div>
       )}
 
-      {/* 新增/编辑弹层 */}
+      {/* 新增/编辑弹层（标题与保存动作常驻，仅表单区滚动） */}
       {form && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-zinc-900/40 p-4">
-          <div className="bg-white rounded-2xl shadow-xl w-full max-w-[722px] max-h-[90vh] overflow-y-auto p-6 space-y-4" onClick={(e) => e.stopPropagation()}>
-            <div className="flex items-center justify-between">
-              <div className="text-[15px] font-semibold text-zinc-900">{form.editing ? `编辑模型源 · ${form.editing}` : '添加模型源'}</div>
-              <button type="button" onClick={() => { setForm(null); setModelSearch('') }} className="p-1.5 rounded-lg text-zinc-400 hover:bg-zinc-100">
-                <X size={16} />
+        <Modal
+          open
+          title={form.editing ? `编辑模型源 · ${form.editing}` : '添加模型源'}
+          onClose={() => { setForm(null); setModelSearch('') }}
+          footer={
+            <>
+              <button
+                type="button"
+                onClick={() => void doTest()}
+                disabled={testing || saving}
+                className="flex items-center gap-1.5 px-4 py-2 rounded-lg border border-zinc-300 text-[13px] text-zinc-700 hover:bg-zinc-50 disabled:opacity-60 disabled:cursor-not-allowed"
+              >
+                {testing ? <Loader2 size={14} className="animate-spin" /> : <PlugZap size={14} />}
+                {testing ? '测试中…' : '测试并获取模型'}
               </button>
-            </div>
+              <div className="flex-1" />
+              <button
+                type="button"
+                onClick={() => void doSave()}
+                disabled={testing || saving}
+                className="flex items-center gap-1.5 bg-zinc-900 text-white rounded-lg px-4 py-2 text-[13px] hover:bg-zinc-700 disabled:opacity-60 disabled:cursor-not-allowed"
+              >
+                {saving ? <Loader2 size={14} className="animate-spin" /> : null}
+                {saving ? '保存中…' : '保存'}
+              </button>
+            </>
+          }
+        >
 
             <div className="space-y-2">
               <label className="block text-sm font-medium text-zinc-700">源 ID</label>
@@ -1265,30 +1322,7 @@ export default function CustomModelsPage({ toast }: { toast: (msg: string, ok?: 
                 </div>
               </div>
             )}
-
-            <div className="flex items-center gap-2 pt-1">
-              <button
-                type="button"
-                onClick={() => void doTest()}
-                disabled={testing || saving}
-                className="flex items-center gap-1.5 px-4 py-2 rounded-lg border border-zinc-300 text-[13px] text-zinc-700 hover:bg-zinc-50 disabled:opacity-60 disabled:cursor-not-allowed"
-              >
-                {testing ? <Loader2 size={14} className="animate-spin" /> : <PlugZap size={14} />}
-                {testing ? '测试中…' : '测试并获取模型'}
-              </button>
-              <div className="flex-1" />
-              <button
-                type="button"
-                onClick={() => void doSave()}
-                disabled={testing || saving}
-                className="flex items-center gap-1.5 bg-zinc-900 text-white rounded-lg px-4 py-2 text-[13px] hover:bg-zinc-700 disabled:opacity-60 disabled:cursor-not-allowed"
-              >
-                {saving ? <Loader2 size={14} className="animate-spin" /> : null}
-                {saving ? '保存中…' : '保存'}
-              </button>
-            </div>
-          </div>
-        </div>
+        </Modal>
       )}
         </>
       ) : (
@@ -1355,7 +1389,7 @@ export default function CustomModelsPage({ toast }: { toast: (msg: string, ok?: 
                       </div>
                     </div>
                     <div className="flex items-center gap-1.5 shrink-0">
-                      {/* 启停（与自定义源同款 switch；disabled 状态 = 已停用） */}
+                      {/* 启停（与自定义源同款 switch；行内 spinner 反馈） */}
                       <button
                         type="button"
                         onClick={() => void doPluginToggle(p)}
@@ -1365,13 +1399,20 @@ export default function CustomModelsPage({ toast }: { toast: (msg: string, ok?: 
                           p.status !== 'disabled' ? 'bg-zinc-900' : 'bg-zinc-200',
                         )}
                         aria-label={p.status === 'disabled' ? '启用' : '停用'}
+                        title={pluginTogglingId === p.id ? '处理中…' : p.status === 'disabled' ? '启用' : '停用'}
                       >
-                        <span
-                          className={clsx(
-                            'inline-block h-5 w-5 transform rounded-full bg-white border border-zinc-300 transition-transform',
-                            p.status !== 'disabled' ? 'translate-x-[22px]' : 'translate-x-[2px]',
-                          )}
-                        />
+                        {pluginTogglingId === p.id ? (
+                          <span className="absolute inset-0 flex items-center justify-center">
+                            <Loader2 size={13} className={clsx('animate-spin', p.status !== 'disabled' ? 'text-white' : 'text-zinc-500')} />
+                          </span>
+                        ) : (
+                          <span
+                            className={clsx(
+                              'inline-block h-5 w-5 transform rounded-full bg-white border border-zinc-300 transition-transform',
+                              p.status !== 'disabled' ? 'translate-x-[22px]' : 'translate-x-[2px]',
+                            )}
+                          />
+                        )}
                       </button>
                       {(() => {
                         // 面板入口（球形图标）：插件声明 panel="sidecar"（动态端口）
@@ -1445,28 +1486,39 @@ export default function CustomModelsPage({ toast }: { toast: (msg: string, ok?: 
         </div>
       )}
 
-      {/* 插件式供应商「暴露模型」弹层（对齐自定义源表单交互） */}
+      {/* 插件式供应商「暴露模型」弹层（标题常驻，仅模型清单滚动） */}
       {pluginExposing && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-zinc-900/40 p-4">
-          <div className="bg-white rounded-2xl shadow-xl w-full max-w-[722px] max-h-[90vh] overflow-y-auto p-6 space-y-4" onClick={(e) => e.stopPropagation()}>
-            <div className="flex items-center justify-between">
-              <div className="text-[15px] font-semibold text-zinc-900">暴露模型 · {pluginExposing.name}</div>
-              <div className="flex items-center gap-2">
-                <button
-                  type="button"
-                  onClick={() => void refreshPluginModels()}
-                  disabled={modelRefreshBusy}
-                  className="flex items-center gap-1.5 border border-zinc-200 text-zinc-600 rounded-lg px-3 py-1.5 text-[13px] hover:bg-zinc-50 disabled:opacity-50"
-                  title="从官网重新拉取该插件最新模型列表"
-                >
-                  <RefreshCw size={14} className={modelRefreshBusy ? 'animate-spin' : ''} />
-                  刷新模型
-                </button>
-                <button type="button" onClick={() => { setPluginExposing(null); setModelSearch('') }} className="p-1.5 rounded-lg text-zinc-400 hover:bg-zinc-100">
-                  <X size={16} />
-                </button>
-              </div>
-            </div>
+        <Modal
+          open
+          title={`暴露模型 · ${pluginExposing.name}`}
+          onClose={() => { setPluginExposing(null); setModelSearch('') }}
+          headerExtra={
+            <button
+              type="button"
+              onClick={() => void refreshPluginModels()}
+              disabled={modelRefreshBusy}
+              className="flex items-center gap-1.5 border border-zinc-200 text-zinc-600 rounded-lg px-3 py-1.5 text-[13px] hover:bg-zinc-50 disabled:opacity-50"
+              title="从官网重新拉取该插件最新模型列表"
+            >
+              <RefreshCw size={14} className={modelRefreshBusy ? 'animate-spin' : ''} />
+              刷新模型
+            </button>
+          }
+          footer={
+            <>
+              <div className="flex-1" />
+              <button
+                type="button"
+                onClick={() => void savePluginExpose()}
+                disabled={pluginBusy}
+                className="flex items-center gap-1.5 bg-zinc-900 text-white rounded-lg px-4 py-2 text-[13px] hover:bg-zinc-700 disabled:opacity-60 disabled:cursor-not-allowed"
+              >
+                {pluginBusy ? <Loader2 size={14} className="animate-spin" /> : null}
+                {pluginBusy ? '保存中…' : '保存'}
+              </button>
+            </>
+          }
+        >
 
             <div className="space-y-2">
               <div className="flex items-center justify-between">
@@ -1539,33 +1591,40 @@ export default function CustomModelsPage({ toast }: { toast: (msg: string, ok?: 
               )}
               <p className="text-zinc-500 text-xs">未勾选的模型不会出现在 /v1/models，也无法经网关调用</p>
             </div>
+        </Modal>
+      )}
 
-            <div className="flex items-center gap-2 pt-1">
+      {/* 插件式供应商编辑弹层（provider.json 全文 JSON 编辑；id/路径只读，标题常驻） */}
+      {pluginEditing && (
+        <Modal
+          open
+          title={`编辑插件 · ${pluginEditing.id}`}
+          onClose={() => setPluginEditing(null)}
+          footer={
+            <>
+              <button
+                type="button"
+                onClick={() =>
+                  setPluginEditing((prev) => (prev ? { ...prev, content: prev.disk, name: jsonName(prev.disk) } : prev))
+                }
+                className="px-4 py-2 rounded-lg border border-zinc-300 text-[13px] text-zinc-700 hover:bg-zinc-50"
+                title="丢弃本次编辑，重新加载磁盘上的 provider.json"
+              >
+                重置为磁盘内容
+              </button>
               <div className="flex-1" />
               <button
                 type="button"
-                onClick={() => void savePluginExpose()}
+                onClick={() => void savePlugin()}
                 disabled={pluginBusy}
                 className="flex items-center gap-1.5 bg-zinc-900 text-white rounded-lg px-4 py-2 text-[13px] hover:bg-zinc-700 disabled:opacity-60 disabled:cursor-not-allowed"
               >
                 {pluginBusy ? <Loader2 size={14} className="animate-spin" /> : null}
                 {pluginBusy ? '保存中…' : '保存'}
               </button>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* 插件式供应商编辑弹层（provider.json 全文 JSON 编辑；id/路径只读） */}
-      {pluginEditing && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-zinc-900/40 p-4">
-          <div className="bg-white rounded-2xl shadow-xl w-full max-w-[722px] max-h-[90vh] overflow-y-auto p-6 space-y-4" onClick={(e) => e.stopPropagation()}>
-            <div className="flex items-center justify-between">
-              <div className="text-[15px] font-semibold text-zinc-900">编辑插件 · {pluginEditing.id}</div>
-              <button type="button" onClick={() => setPluginEditing(null)} className="p-1.5 rounded-lg text-zinc-400 hover:bg-zinc-100">
-                <X size={16} />
-              </button>
-            </div>
+            </>
+          }
+        >
 
             <div className="space-y-2">
               <label className="block text-sm font-medium text-zinc-700">显示名称</label>
@@ -1614,31 +1673,7 @@ export default function CustomModelsPage({ toast }: { toast: (msg: string, ok?: 
                 顶层 <code className="bg-zinc-100 px-1 rounded">id</code> / <code className="bg-zinc-100 px-1 rounded">entry</code> 由系统管理，请勿修改；provider_private_configs 内部结构由供应商自行校验。
               </p>
             </div>
-
-            <div className="flex items-center gap-2 pt-1">
-              <button
-                type="button"
-                onClick={() =>
-                  setPluginEditing((prev) => (prev ? { ...prev, content: prev.disk, name: jsonName(prev.disk) } : prev))
-                }
-                className="px-4 py-2 rounded-lg border border-zinc-300 text-[13px] text-zinc-700 hover:bg-zinc-50"
-                title="丢弃本次编辑，重新加载磁盘上的 provider.json"
-              >
-                重置为磁盘内容
-              </button>
-              <div className="flex-1" />
-              <button
-                type="button"
-                onClick={() => void savePlugin()}
-                disabled={pluginBusy}
-                className="flex items-center gap-1.5 bg-zinc-900 text-white rounded-lg px-4 py-2 text-[13px] hover:bg-zinc-700 disabled:opacity-60 disabled:cursor-not-allowed"
-              >
-                {pluginBusy ? <Loader2 size={14} className="animate-spin" /> : null}
-                {pluginBusy ? '保存中…' : '保存'}
-              </button>
-            </div>
-          </div>
-        </div>
+        </Modal>
       )}
     </div>
   )
