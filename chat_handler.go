@@ -295,8 +295,8 @@ func listModelsHandler(w http.ResponseWriter, r *http.Request) {
 	combinedModels := append([]ModelInfo(nil), models...)
 
 	allModels := replaceModelIDsWithAliases(combinedModels, aliases)
-	// 多厂商聚合：把其它厂商（非 opencode）的免费模型并入列表（同名加厂商前缀）。
-	allModels = appendOtherFreeModels(allModels, globalAgg)
+	// v2.0.0：modelsCache 已由 syncModelsFromAggregator 收录全部厂商，
+	// 不再调用 appendOtherFreeModels（否则同一模型会被二次追加并加前缀）。
 
 	// 空判定放在合并自定义源之后：仅有自定义源（基础目录为空）时也应正常返回。
 	if len(allModels) == 0 {
