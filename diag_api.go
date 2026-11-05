@@ -316,11 +316,18 @@ type FailBucket struct {
 	LastAt string `json:"last_at,omitempty"`
 }
 
-// failAggregateHandler GET /api/admin/fail-aggregate → 从调用日志按「厂商 × 错误码」现算。
+// failAggregateHandler GET /api/admin/fail-aggregate → 按「厂商 × 错误类别」现算失败分布。
 //
 // 与 /api/admin/fail-stats 的区别：fail-stats 是进程内存态（重启清零、只统计本进程
-// 见过的失败）；这里直接读磁盘调用日志，跨重启都有数据。
-func failAggregateHandler() http.HandlerFunc {
+// 见过的失败）；这里直接读磁盘日志，跨重启都有数据。
+//
+// 两个来源合并（与调用日志页保持同一口径）：
+//   - 本进程 callLog（供应商服务/管理面写盘的 call_log.jsonl）；
+//   - manager.ReadCallLog：供应商服务 JSONL + OpenCode 引擎 stdout 事件。
+//
+// 只有合并引擎侧，失败分布才反映真实流量 —— 免费层推理全在引擎进程里，
+// 管理面自己几乎不产生失败记录。
+func failAggregateHandler(m *manager.Manager) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -333,31 +340,15 @@ func failAggregateHandler() http.HandlerFunc {
 			}
 		}
 
-		var records []CallRecord
-		if callLog != nil {
-			records = callLog.ReadAll()
-		}
-		// 只看尾部 limit 条
-		if len(records) > limit {
-			records = records[len(records)-limit:]
-		}
-
 		type key struct{ vendor, reason string }
 		agg := map[key]*FailBucket{}
 		total := 0
-		for _, rec := range records {
-			if rec.Status == "ok" || rec.Status == "" {
-				continue
-			}
-			vendor := strings.TrimSpace(rec.Vendor)
+		scanned := 0
+		bump := func(vendor, reason, ts string) {
+			vendor = strings.TrimSpace(vendor)
 			if vendor == "" {
-				if prefix, _, ok := strings.Cut(rec.Model, "/"); ok && prefix != "" {
-					vendor = prefix
-				} else {
-					vendor = "(unknown)"
-				}
+				vendor = "(unknown)"
 			}
-			reason := failReasonForRecord(rec)
 			k := key{vendor, reason}
 			b := agg[k]
 			if b == nil {
@@ -365,10 +356,38 @@ func failAggregateHandler() http.HandlerFunc {
 				agg[k] = b
 			}
 			b.Count++
-			if rec.TS > b.LastAt {
-				b.LastAt = rec.TS
+			if ts > b.LastAt {
+				b.LastAt = ts
 			}
 			total++
+		}
+		// 来源一：本进程内存 callLog（启动时已从磁盘加载历史）。
+		var records []CallRecord
+		if callLog != nil {
+			records = callLog.ReadAll()
+		}
+		if len(records) > limit {
+			records = records[len(records)-limit:]
+		}
+		scanned += len(records)
+		for _, rec := range records {
+			if rec.Status == "ok" || rec.Status == "" {
+				continue
+			}
+			bump(failVendorOf(rec), failReasonOf(rec), rec.TS)
+		}
+
+		// 来源二：磁盘侧（供应商服务 JSONL + OpenCode 引擎 stdout 事件）。
+		// 记录类型是 manager.CallLogRecord，与 main.CallRecord 不同，需用配套的判定函数。
+		if m != nil {
+			extra := m.ReadCallLog(limit)
+			scanned += len(extra)
+			for _, rec := range extra {
+				if rec.Status == "ok" || rec.Status == "" {
+					continue
+				}
+				bump(failLogVendorOf(rec), failLogReasonOf(rec), rec.TS)
+			}
 		}
 
 		out := make([]FailBucket, 0, len(agg))
@@ -388,39 +407,70 @@ func failAggregateHandler() http.HandlerFunc {
 		writeJSONResp(w, map[string]any{
 			"buckets":     out,
 			"total_fails": total,
-			"scanned":     len(records),
+			"scanned":     scanned,
 		})
 	}
 }
 
-// failReasonForRecord 从调用记录判定错误类别（结构化字段优先）。
-func failReasonForRecord(rec CallRecord) string {
-	if cls := strings.TrimSpace(rec.ErrorClass); cls != "" {
+// failLogVendorOf 取磁盘日志记录的厂商归属（优先 Vendor，回退模型前缀）。
+func failLogVendorOf(rec manager.CallLogRecord) string {
+	if v := strings.TrimSpace(rec.Vendor); v != "" {
+		return v
+	}
+	if prefix, _, ok := strings.Cut(rec.Model, "/"); ok && prefix != "" {
+		return prefix
+	}
+	if strings.TrimSpace(rec.Model) != "" {
+		return "(unknown)"
+	}
+	return ""
+}
+
+// failLogReasonOf 从磁盘日志记录判定错误类别（结构化字段优先，再回退文本匹配）。
+//
+// 引擎侧记录由 calllog_engine.go 映射，ErrorClass 已归一为同一套取值；
+// 供应商服务侧可能只有 err_msg，故保留文本兜底。
+func failLogReasonOf(rec manager.CallLogRecord) string {
+	switch cls := strings.TrimSpace(rec.ErrorClass); cls {
+	case FailReasonRateLimit, FailReasonQuota, FailReasonAuth,
+		FailReasonUpstream, FailReasonTransport, FailReasonProtocol,
+		FailReasonTimeout, FailReasonOther:
 		return cls
 	}
+	// 状态码兜底（旧记录或上游未给结构化错误时）。
 	switch rec.UpstreamStatus {
 	case 429:
-		return "rate_limit"
+		return FailReasonRateLimit
+	case 402:
+		return FailReasonQuota
 	case 401, 403:
-		return "auth"
-	case 408, 504:
-		return "timeout"
+		return FailReasonAuth
+	case 408, 499, 504:
+		return FailReasonTimeout
 	}
-	blob := strings.ToLower(rec.ErrMsg)
+	var sb strings.Builder
+	sb.WriteString(strings.ToLower(rec.ErrMsg))
+	for _, ev := range rec.Events {
+		sb.WriteByte(' ')
+		sb.WriteString(strings.ToLower(ev.Type))
+		sb.WriteByte(' ')
+		sb.WriteString(strings.ToLower(ev.Detail))
+	}
+	blob := sb.String()
 	switch {
 	case strings.Contains(blob, "429"), strings.Contains(blob, "rate limit"):
-		return "rate_limit"
+		return FailReasonRateLimit
 	case strings.Contains(blob, "quota"), strings.Contains(blob, "额度"):
-		return "quota"
+		return FailReasonQuota
 	case strings.Contains(blob, "401"), strings.Contains(blob, "403"), strings.Contains(blob, "unauthorized"):
-		return "auth"
+		return FailReasonAuth
 	case strings.Contains(blob, "timeout"), strings.Contains(blob, "deadline"), strings.Contains(blob, "超时"):
-		return "timeout"
+		return FailReasonTimeout
 	case strings.Contains(blob, "connect"), strings.Contains(blob, "dial"), strings.Contains(blob, "refused"):
-		return "transport"
+		return FailReasonTransport
 	case strings.Contains(blob, "503"), strings.Contains(blob, "502"), strings.Contains(blob, "upstream"):
-		return "upstream"
+		return FailReasonUpstream
 	default:
-		return "other"
+		return FailReasonOther
 	}
 }

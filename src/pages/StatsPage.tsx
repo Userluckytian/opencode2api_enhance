@@ -68,15 +68,30 @@ function Card({
 
 const FAIL_REASONS = ['rate_limit', 'quota', 'auth', 'upstream', 'transport', 'timeout', 'other'] as const
 
-/** 失败原因分布卡片（厂商 × 错误类别，内存态·重启清零）；自轮询 5s */
+/** 失败原因分布卡片（厂商 × 错误类别）；自轮询 5s。
+ *
+ * 数据源是 /api/admin/fail-aggregate（读磁盘调用日志）而不是 /api/admin/fail-stats
+ * （进程内存态）。原因：v2.0 之后管理面不再代理推理，内存计数器永远看不到免费层
+ * 的真实失败 —— 那些请求全在 OpenCode 引擎进程里。fail-aggregate 同时合并了
+ * 供应商服务 JSONL 与引擎 stdout 事件，重启也不丢。 */
 function FailStatsCard() {
   const [counts, setCounts] = useState<FailCounts>({})
+  const [scanned, setScanned] = useState(0)
   useEffect(() => {
     let alive = true
     const tick = async () => {
       try {
-        const r = await api.failStats()
-        if (alive) setCounts(r.fail_counts ?? {})
+        const r = await api.failAggregate(5000)
+        if (!alive) return
+        // buckets: [{vendor, reason, count}] → {vendor: {reason: count}}
+        const next: FailCounts = {}
+        for (const b of r.buckets ?? []) {
+          const v = b.vendor || '(unknown)'
+          if (!next[v]) next[v] = {}
+          next[v][b.reason] = (next[v][b.reason] ?? 0) + b.count
+        }
+        setCounts(next)
+        setScanned(r.scanned ?? 0)
       } catch {
         /* 忽略：无数据或后端未就绪 */
       }
@@ -91,7 +106,9 @@ function FailStatsCard() {
   const nodes = Object.keys(counts).sort()
   return (
     <div className="bg-white rounded-[16px] border border-zinc-200 shadow-sm p-5">
-      <div className="text-[13px] font-semibold text-zinc-800 mb-2">失败原因分布（厂商 × 错误类别 · 内存态，重启清零）</div>
+      <div className="text-[13px] font-semibold text-zinc-800 mb-2">
+        失败原因分布（厂商 × 错误类别 · 来自调用日志{scanned > 0 ? `，已扫描 ${scanned} 条` : ''}）
+      </div>
       {nodes.length === 0 ? (
         <p className="text-[12px] text-zinc-400">暂无失败记录</p>
       ) : (

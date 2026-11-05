@@ -383,7 +383,7 @@ func registerHTTPRoutes(mux *http.ServeMux, managerInst *manager.Manager, plugin
 	// 诊断：三端口自检 + 配置/二进制检查
 	mux.HandleFunc("/api/admin/diag", loggingMiddleware(requireAuth(diagHandler(managerInst))))
 	// 失败聚合：从调用日志现算「厂商 × 错误码」
-	mux.HandleFunc("/api/admin/fail-aggregate", loggingMiddleware(requireAuth(failAggregateHandler())))
+	mux.HandleFunc("/api/admin/fail-aggregate", loggingMiddleware(requireAuth(failAggregateHandler(managerInst))))
 
 	// 自定义模型源
 	mux.HandleFunc("/api/admin/custom-providers", loggingMiddleware(requireAuth(customProvidersHandler())))
