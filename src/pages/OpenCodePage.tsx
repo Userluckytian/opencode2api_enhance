@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import clsx from 'clsx'
 import {
+  Activity,
   AlertCircle,
   Copy,
   Key,
@@ -60,6 +61,9 @@ export default function OpenCodePage({ toast }: { toast: (msg: string, ok?: bool
   // 可用模型列表（合并引擎 /v1/models 与 availability 探测结果）
   const [models, setModels] = useState<FreeTierModelsView | null>(null)
   const [showAllModels, setShowAllModels] = useState(false)
+  // 单模型探测：只记最后一次结果，行内直接显示状态码
+  const [probingModel, setProbingModel] = useState<string | null>(null)
+  const [probeResult, setProbeResult] = useState<{ model: string; ok: boolean; status: number } | null>(null)
 
   // 付费密钥草稿（zen = 免费层 v1 通道；go = Go 订阅通道）
   const [zenDraft, setZenDraft] = useState('')
@@ -178,6 +182,26 @@ export default function OpenCodePage({ toast }: { toast: (msg: string, ok?: bool
       toast((e as Error).message, false)
     } finally {
       setSavingProxy(false)
+    }
+  }
+
+  // probeOne 对单个模型发一次最小请求，用真实状态码判定可用性。
+  //
+  // 为什么放在每行：引擎的 availability 探测是周期性的（每模型 ~1 小时一轮），
+  // 用户想「现在就确认这个模型能不能用」时需要手动触发。
+  const probeOne = async (modelId: string) => {
+    setProbingModel(modelId)
+    setProbeResult(null)
+    try {
+      const r = await api.freeTierProbe(modelId)
+      const first = r.results[0]
+      if (first) setProbeResult({ model: modelId, ok: first.ok, status: first.status })
+      if (r.note) toast(r.note, false)
+      else toast(`${modelId} → ${first?.status ?? 'ERR'}（${first?.latency_ms ?? 0}ms）`, first?.ok)
+    } catch (e) {
+      toast((e as Error).message, false)
+    } finally {
+      if (aliveRef.current) setProbingModel(null)
     }
   }
 
@@ -402,6 +426,7 @@ export default function OpenCodePage({ toast }: { toast: (msg: string, ok?: bool
                     <th className="text-left font-medium px-3 py-2">最近结果</th>
                     <th className="text-right font-medium px-3 py-2 w-20">上下文</th>
                     <th className="text-left font-medium px-3 py-2 w-32">下次探测</th>
+                    <th className="text-center font-medium px-3 py-2 w-16">操作</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -438,6 +463,31 @@ export default function OpenCodePage({ toast }: { toast: (msg: string, ok?: bool
                         </td>
                         <td className="px-3 py-1.5 text-zinc-400 text-[11px]">
                           {fmtRelTime(m.next_check)}
+                        </td>
+                        <td className="px-3 py-1.5 text-center">
+                          <button
+                            onClick={() => void probeOne(m.id)}
+                            disabled={probingModel !== null || !status?.healthy}
+                            title="对引擎发一次最小请求，看真实状态码"
+                            className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[11px] text-teal-700 bg-teal-50 hover:bg-teal-100 disabled:opacity-40"
+                          >
+                            {probingModel === m.id ? (
+                              <Loader2 size={11} className="animate-spin" />
+                            ) : (
+                              <Activity size={11} />
+                            )}
+                            探测
+                          </button>
+                          {probeResult?.model === m.id && (
+                            <span
+                              className={clsx(
+                                'ml-1 px-1 rounded text-[10px] font-mono',
+                                probeResult.ok ? 'bg-green-100 text-green-700' : 'bg-amber-100 text-amber-700',
+                              )}
+                            >
+                              {probeResult.status || "ERR"}
+                            </span>
+                          )}
                         </td>
                       </tr>
                     ))}

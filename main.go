@@ -114,7 +114,11 @@ func main() {
 
 	loadTokenStats()
 	initCallLog()
-	callLogEnabled = callLogFlag || providerServiceMode
+	// v2.1：管理进程也必须记录调用日志。
+	// 此前只有 -gateway / -provider-service 才开，而 v2.0 之后管理面不再代理推理，
+	// 导致「日志页永远空白」。管理面虽然自己不转发请求，但它的日志页要读这份日志，
+	// 而且插件/自定义源直连 50080 时管理面也会产生少量记录（鉴权失败、探活等）。
+	callLogEnabled = true
 	slog.Info("config loaded", "path", configPath)
 
 	globalAgg = newAggregator()

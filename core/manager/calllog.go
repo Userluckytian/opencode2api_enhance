@@ -112,22 +112,31 @@ func (r CallLogRecord) HasIssue() bool {
 }
 
 // ProviderServiceCallLogPath 返回供应商服务运行目录（cwd）下的调用日志路径。
-// v2.0.0 起这是**唯一**的调用日志来源（实例池/统一网关已移除）。
 func (m *Manager) ProviderServiceCallLogPath() string {
 	return filepath.Join(m.paths.RuntimeDir, providerServiceDirBase, "call_log.jsonl")
 }
 
-// ReadCallLog 读取供应商服务调用日志（v2.0.0 起唯一来源）。
+// ReadCallLog 读取调用日志（当前唯一来源：供应商服务）。
 // max<=0 = 全部历史；max>0 = 只取最近 max 条。缺失/损坏 → 空数组。
+//
+// 注意：OpenCode 引擎（40080）不写 call_log.jsonl —— 它只把调用事件放在
+// 进程内的 ring buffer 里，经 WebUI 的 /api/logs 暴露（且需登录）。因此
+// 免费模型的调用明细在当前架构下无法通过本函数读到，日志页只覆盖供应商服务。
 func (m *Manager) ReadCallLog(max int) []CallLogRecord {
 	allRequested := max <= 0
 	tail := max
 	if allRequested {
 		tail = 0
 	}
-	files := []struct{ path, source string }{{m.ProviderServiceCallLogPath(), "供应商服务"}}
+	// v2.1：两个真正承接推理的进程各有不同日志形态：
+	//   - 供应商服务：写 JSONL（call_log.jsonl），直接按行解析；
+	//   - OpenCode 引擎：不写 JSONL，只把 request_routed 事件打进 stdout，
+	//     由 readEngineCallLog 解析（见 calllog_engine.go）。
+	files := []struct{ path, source string }{
+		{m.ProviderServiceCallLogPath(), "供应商服务"},
+	}
 	// 并发读各文件尾部：每 goroutine 只写下标 i 自己的槽位（无共享写竞态）。
-	parts := make([][]CallLogRecord, len(files))
+	parts := make([][]CallLogRecord, len(files)+1)
 	var wg sync.WaitGroup
 	sem := make(chan struct{}, callLogReadConcurrency)
 	for i := range files {
@@ -140,6 +149,14 @@ func (m *Manager) ReadCallLog(max int) []CallLogRecord {
 			parts[i] = readCallLogFileTail(f.path, f.source, tail)
 		}()
 	}
+	// 引擎 stdout 单独走一条分支（解析方式不同）。
+	wg.Add(1)
+	sem <- struct{}{}
+	go func() {
+		defer wg.Done()
+		defer func() { <-sem }()
+		parts[len(files)] = readEngineCallLog(m.EngineStdoutLogPath(), tail)
+	}()
 	wg.Wait()
 
 	var all []CallLogRecord
