@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import clsx from 'clsx'
-import { Loader2, RefreshCw, Search, Settings, Trash2 } from 'lucide-react'
+import { Globe, Loader2, RefreshCw, Search, Settings, Trash2 } from 'lucide-react'
 import { api, type OrphanProcess } from '../lib/api'
 import type { ConfigView, BinariesInfo } from '../lib/api'
 import type { UpdateInfo } from '../lib/updates'
@@ -30,6 +30,11 @@ export default function SettingsPage({
   const [autostart, setAutostart] = useState<boolean>(false)
   const [binariesInfo, setBinariesInfo] = useState<BinariesInfo | null>(null)
 
+  // 出口代理（全局唯一维护入口）：设置页编辑，其余页面只勾选「使用代理」
+  const [proxyDraft, setProxyDraft] = useState('')
+  const [proxyDirty, setProxyDirty] = useState(false)
+  const [savingProxy, setSavingProxy] = useState(false)
+
   // 残留进程清理
   const [orphans, setOrphans] = useState<OrphanProcess[]>([])
   const [orphanBusy, setOrphanBusy] = useState(false)
@@ -53,6 +58,7 @@ export default function SettingsPage({
           api.getBinariesInfo(),
         ])
         setConfig(cfg)
+        setProxyDraft((cfg.engine_proxies ?? []).join('\n'))
         setAutostart(as)
         setBinariesInfo(bin)
       } catch (e) {
@@ -73,6 +79,21 @@ export default function SettingsPage({
       toast('设置失败：' + (e as Error).message, false)
     } finally {
       setAutostartBusy(false)
+    }
+  }
+
+  const saveProxy = async () => {
+    setSavingProxy(true)
+    try {
+      await api.configSet('engine_proxies', proxyDraft)
+      setProxyDirty(false)
+      const cfg = await api.configGet()
+      setConfig(cfg)
+      toast('出口代理已保存（引擎下次重载生效；已勾选「使用代理」的自定义源自动跟随）')
+    } catch (e) {
+      toast('保存失败：' + (e as Error).message, false)
+    } finally {
+      setSavingProxy(false)
     }
   }
 
@@ -163,6 +184,51 @@ export default function SettingsPage({
               </tr>
             </tbody>
           </table>
+        </div>
+      </section>
+
+      {/* 出口代理（全局唯一维护入口） */}
+      <section className="bg-white rounded-2xl border border-zinc-200 shadow-sm p-5">
+        <div className="flex items-center gap-2">
+          <Globe size={16} className="text-teal-700" />
+          <h2 className="text-lg font-semibold text-zinc-900">出口代理</h2>
+        </div>
+        <p className="mt-1 text-[12px] text-zinc-500">
+          全局唯一维护入口：免费层引擎直接使用本列表；自定义供应商只需勾选「使用代理」即可引用（取第一个非 direct 项）。
+        </p>
+        <textarea
+          value={proxyDraft}
+          onChange={(e) => {
+            setProxyDraft(e.target.value)
+            setProxyDirty(true)
+          }}
+          rows={4}
+          placeholder={'direct\nsocks5://127.0.0.1:7897\nhttp://127.0.0.1:7890'}
+          spellCheck={false}
+          className="mt-3 w-full px-3 py-2 rounded-lg border border-zinc-200 text-[13px] font-mono focus:outline-none focus:ring-2 focus:ring-teal-500/30"
+        />
+        <div className="mt-2 flex items-center gap-2">
+          <button
+            onClick={() => void saveProxy()}
+            disabled={!proxyDirty || savingProxy}
+            className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-[13px] text-white bg-zinc-900 hover:bg-zinc-800 disabled:opacity-40"
+          >
+            {savingProxy ? <Loader2 size={14} className="animate-spin" /> : null}
+            保存
+          </button>
+          <button
+            onClick={() => {
+              setProxyDraft((config?.engine_proxies ?? []).join('\n'))
+              setProxyDirty(false)
+            }}
+            disabled={!proxyDirty}
+            className="px-3 py-1.5 rounded-lg text-[13px] text-zinc-600 hover:bg-zinc-100 disabled:opacity-40"
+          >
+            撤销
+          </button>
+          <span className="text-[11px] text-zinc-400">
+            每行一个：http / https / socks5 / socks5h；direct 或留空 = 直连
+          </span>
         </div>
       </section>
 
