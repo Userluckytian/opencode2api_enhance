@@ -31,6 +31,11 @@ import (
 type FreeTierModel struct {
 	// ID 模型 ID（如 big-pickle）。
 	ID string `json:"id"`
+	// Free 引擎口径下是否免费（模型 ID 含 "free"，或元数据声明
+	// input/output 成本均为 0 且未废弃）。见 pricing.go:Decide。
+	Free bool `json:"free"`
+	// Deprecated 元数据标记为已废弃/下线（免费但不再推荐）。
+	Deprecated bool `json:"deprecated,omitempty"`
 	// Available 当前是否对外暴露（在引擎 /v1/models 里 = true）。
 	Available bool `json:"available"`
 	// Channel 探测通道：anonymous（匿名免费层）/ zen（带 key）/ go（订阅）。
@@ -61,11 +66,32 @@ type FreeTierModelsView struct {
 	Total int `json:"total"`
 	// Shown 对外暴露的数量。
 	Shown int `json:"shown"`
+	// FreeOnly 面板当前是否开启「只使用免费模型」（对应引擎 models.free_only）。
+	FreeOnly bool `json:"free_only"`
+	// FreeTotal 判定为免费的模型数（与 FreeOnly 无关，始终统计）。
+	FreeTotal int `json:"free_total"`
+	// FreeShown 免费且对外暴露的数量。
+	FreeShown int `json:"free_shown"`
 	// CatalogSource / AvailabilitySource 数据文件路径（排障用；空 = 未找到）。
 	CatalogSource      string `json:"catalog_source,omitempty"`
 	AvailabilitySource string `json:"availability_source,omitempty"`
 	// Error 拉取失败时的说明（部分失败仍返回已拿到的数据）。
 	Error string `json:"error,omitempty"`
+}
+
+// pricingCache 引擎的定价元数据缓存（`*.models.dev.json`），用于判定免费。
+// 引擎自己每小时刷新它；我们只读，拿不到就退回「名字含 free」规则。
+type pricingCache struct {
+	UpdatedAt string                    `json:"updated_at"`
+	Models    map[string]modelPriceInfo `json:"models"`
+}
+
+// modelPriceInfo 单个模型的定价（指针 = 元数据未声明该成本）。
+type modelPriceInfo struct {
+	ID         string   `json:"id"`
+	InputCost  *float64 `json:"input_cost,omitempty"`
+	OutputCost *float64 `json:"output_cost,omitempty"`
+	Deprecated bool     `json:"deprecated"`
 }
 
 // availabilityEntry availability.json 里单个模型的记录（只声明我们用到的字段）。
@@ -115,7 +141,8 @@ type engineModelsPayload struct {
 // 引擎未运行时仍返回 catalog（如果文件存在），只是 Available 全为 false
 // 且 Error 说明引擎不可达——面板据此可以显示「引擎未启动，N 个模型待激活」。
 func (m *Manager) FreeTierModels(ctx context.Context) FreeTierModelsView {
-	out := FreeTierModelsView{}
+	cfg := m.loadConfig()
+	out := FreeTierModelsView{FreeOnly: engineFreeOnly(cfg)}
 	dir := m.Paths().FreeTierEngineDir()
 
 	// 1) 读完整目录（全集来源）。
@@ -125,10 +152,13 @@ func (m *Manager) FreeTierModels(ctx context.Context) FreeTierModelsView {
 		out.Total = len(catalog.Zen) + len(catalog.Go)
 	}
 
+	// 1b) 读定价缓存（免费判定的第二来源；缺失时只按名字规则判）。
+	pricing, _ := readEnginePricing(dir)
+
 	// 2) 拉 /v1/models（当前暴露 = 可用）。
 	shown := map[string]FreeTierModel{}
 	base := fmt.Sprintf("http://127.0.0.1:%d", m.managerGatewayPort())
-	if data, err := fetchEngineModels(ctx, base, effectiveGatewayKey(m.loadConfig())); err != nil {
+	if data, err := fetchEngineModels(ctx, base, effectiveGatewayKey(cfg)); err != nil {
 		out.Error = err.Error()
 	} else {
 		for _, d := range data.Data {
@@ -227,12 +257,24 @@ func (m *Manager) FreeTierModels(ctx context.Context) FreeTierModelsView {
 		merged[id] = v
 	}
 
-	// 5. 排序：可用优先 → ID 升序
+	// 4d. 免费标记（与引擎 free_only 判定同口径）
+	for id, v := range merged {
+		v.Free, v.Deprecated = engineIsFreeModel(id, pricing)
+		merged[id] = v
+	}
+
+	// 5. 排序：免费优先 → 可用优先 → ID 升序
+	//
+	// 为什么免费排最前：面板默认勾了「只使用免费模型」，用户打开卡片想看的就是
+	// 那十几个免费模型。把付费的排在前面会让人以为「怎么全是收费的」。
 	list := make([]FreeTierModel, 0, len(merged))
 	for _, v := range merged {
 		list = append(list, v)
 	}
 	sort.Slice(list, func(i, j int) bool {
+		if list[i].Free != list[j].Free {
+			return list[i].Free
+		}
 		if list[i].Available != list[j].Available {
 			return list[i].Available
 		}
@@ -244,6 +286,12 @@ func (m *Manager) FreeTierModels(ctx context.Context) FreeTierModelsView {
 	for _, v := range list {
 		if v.Available {
 			out.Shown++
+		}
+		if v.Free {
+			out.FreeTotal++
+			if v.Available {
+				out.FreeShown++
+			}
 		}
 	}
 	return out
@@ -273,6 +321,48 @@ func fetchEngineModels(ctx context.Context, base, apiKey string) (engineModelsPa
 		return out, fmt.Errorf("解析引擎模型列表失败：%w", err)
 	}
 	return out, nil
+}
+
+// readEnginePricing 读引擎的定价缓存（`*.models.dev.json`）。
+//
+// 这是「免费」判定的第二来源：引擎 Decide() 的规则是
+//   name_free       —— 模型 ID 含 "free"（大小写不敏感）
+//   metadata_free   —— 元数据显示 input/output 成本均为 0 且未废弃
+// 只靠名字会漏掉 big-pickle 这类「名字没 free 但成本为 0」的模型。
+func readEnginePricing(engineDir string) (*pricingCache, string) {
+	p := newestMatch(engineDir, "*models.dev.json")
+	if p == "" {
+		return nil, ""
+	}
+	data, err := os.ReadFile(p)
+	if err != nil {
+		return nil, p
+	}
+	var c pricingCache
+	if json.Unmarshal(data, &c) != nil {
+		return nil, p
+	}
+	return &c, p
+}
+
+// engineIsFreeModel 复刻引擎的免费判定（internal/models/pricing.go:Decide）。
+//
+// 与引擎保持同一口径很重要：面板显示「免费」、引擎按 free_only 过滤，两边
+// 若判定不一致，用户会看到「勾了只使用免费模型，列表却少了/多了几个」。
+func engineIsFreeModel(id string, price *pricingCache) (free, deprecated bool) {
+	nameFree := strings.Contains(strings.ToLower(id), "free")
+	if price == nil {
+		// 定价缓存缺失（引擎首次启动尚未拉取）：只按名字规则判，
+		// 与引擎 metadata_pending 时的 fallback 一致。
+		return nameFree, false
+	}
+	info, ok := price.Models[id]
+	if !ok {
+		return nameFree, false
+	}
+	metadataFree := !info.Deprecated && info.InputCost != nil && info.OutputCost != nil &&
+		*info.InputCost == 0 && *info.OutputCost == 0
+	return nameFree || metadataFree, info.Deprecated
 }
 
 // readEngineCatalog 读引擎的完整模型目录文件（`*.models.catalog.json`）。

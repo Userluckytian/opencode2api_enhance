@@ -16,6 +16,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/6Kmfi6HP/opencode2api/core/manager"
@@ -203,7 +204,12 @@ type ModelProbeResult struct {
 
 // modelProbeHandler POST /api/admin/free-tier/probe
 //
-// 对引擎发起一次最小 chat 请求（max_tokens=8），用真实状态码判定模型是否可用。
+// 对引擎发起一次最小 chat 请求（max_tokens=32），用真实状态码判定模型是否可用。
+//
+// 为什么不是更小的值：有些模型（如 crouton-alpha-free）对 max_output_tokens
+// 有下限要求（上游报 max_output_tokens must be at least 16），用 8 会被直接
+// 400 拒绝 —— 那是**探测参数**的问题、不是模型不可用，会在调用日志里留下
+// 一批假的「上游 400」记录，误导排障。32 高于已知下限又不浪费额度。
 // 这是引擎自带 availability 探测之外的**手动复核**：点一下就知道当下的真实结果。
 func modelProbeHandler(m *manager.Manager) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
@@ -219,10 +225,17 @@ func modelProbeHandler(m *manager.Manager) http.HandlerFunc {
 			targets = []string{model}
 		} else {
 			view := m.FreeTierModels(r.Context())
+			// 全量探测跟随「只使用免费模型」：开了 free_only 时引擎本来就不会
+			// 暴露付费模型，此时挨个去探付费模型既浪费上游配额、又会得到一堆
+			// 无意义的失败（引擎按 free_only 直接拒绝），对排障没有帮助。
 			for _, it := range view.Models {
-				if it.Available {
-					targets = append(targets, it.ID)
+				if !it.Available {
+					continue
 				}
+				if view.FreeOnly && !it.Free {
+					continue
+				}
+				targets = append(targets, it.ID)
 			}
 			// 全量探测上限：避免一次点出几十个上游请求
 			const maxBatch = 20
@@ -256,10 +269,23 @@ func modelProbeHandler(m *manager.Manager) http.HandlerFunc {
 		}
 
 		base := fmt.Sprintf("http://127.0.0.1:%d", st.Port)
-		results := make([]ModelProbeResult, 0, len(targets))
-		for _, id := range targets {
-			results = append(results, probeOneModel(r.Context(), base, st.APIKey, id))
+		// 并发探测：每个模型是一次真实 chat 请求，单模型可能耗时数秒；串行
+		// 跑 20 个会把「全量探测」变成等两三分钟。这里限并发 6，既不压垮
+		// 引擎（免费层对并发敏感）又把总耗时压到最长的那一个。
+		results := make([]ModelProbeResult, len(targets))
+		const probeConcurrency = 6
+		sem := make(chan struct{}, probeConcurrency)
+		var wg sync.WaitGroup
+		for i, id := range targets {
+			wg.Add(1)
+			sem <- struct{}{}
+			go func(idx int, modelID string) {
+				defer wg.Done()
+				defer func() { <-sem }()
+				results[idx] = probeOneModel(r.Context(), base, st.APIKey, modelID)
+			}(i, id)
 		}
+		wg.Wait()
 		writeJSONResp(w, map[string]any{"results": results})
 	}
 }
@@ -269,7 +295,7 @@ func probeOneModel(ctx context.Context, base, apiKey, model string) ModelProbeRe
 	res := ModelProbeResult{Model: model}
 	body, _ := json.Marshal(map[string]any{
 		"model":      model,
-		"max_tokens": 8,
+		"max_tokens": 32,
 		"stream":     false,
 		"messages":   []map[string]string{{"role": "user", "content": "hi"}},
 	})
