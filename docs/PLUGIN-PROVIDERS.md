@@ -420,3 +420,22 @@ bash scripts/plugin-smoke-test.sh <插件exe> <provider.json> [就绪等待秒�
 判定项：stdout 就绪行（port / auth 一次性令牌原样回显 / id 与目录一致）；
 `/v1/models` 无令牌 401、带令牌 200（503=账号未就绪，警告级）；`/v1/chat/completions`
 无令牌 401；面板可达（按 panel/panel_port 声明自动选择检查方式）。退出码 0=全部通过。
+
+### 11.5 包装型插件：内核版本要与外壳对齐
+
+有些插件只是"外壳"，真正的账号池/轮询/额度在另一个独立服务里（典型：**grok 插件 → grok2api**）。
+这类插件有**两层版本**，且都容易踩坑：
+
+| 版本 | 位置 | 改了会怎样 |
+|---|---|---|
+| 插件版本 | `provider.json` 的 `version` + 代码里的 `pluginVersion` | 宿主卡片与插件自报；**必须双写**，否则显示错位 |
+| 内核版本 | `provider.json` 的 `grok2api_version` + `runtime/grok2api-<ver>/` 目录名 | `resolveBinary` 按目录名找二进制，对不上就"未找到可执行文件" |
+
+**外壳与内核之间是 HTTP admin API 契约**，内核升级后必须重跑端点验证，
+不能只看"进程起来了"。详见 [plugin-grok2api-upgrade.md](plugin-grok2api-upgrade.md)。
+
+**已踩过的坑（2026-11-05）**：`external_base_url` 配成字面量 `"auto"`（意为"读端口文件"），
+但 `startExternal` 把 `"auto"` 当真实地址拼 URL，报 `Post "auto/api/...": unsupported protocol scheme ""`，
+面板长期显示 `grok2api · error`。这类回归的特征是**功能曾经能用、某次改动后失效**——
+排查时先比对新旧源码（本例：仓库版 `runtime.go` 19715 字节有 `resolveExternalBase()`，
+部署版 16455 字节没有），不要急着下"从未实现"的结论。
