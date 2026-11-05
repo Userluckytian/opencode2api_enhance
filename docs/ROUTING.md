@@ -1,5 +1,8 @@
 # 路由机制说明（Route Modes）
 
+> **历史文档（v1.9 及以前）**：实例池与节点池已在 v2.0.0 移除，本文仅作历史参考。
+> 现行架构与路由口径见 `CHANGELOG.md` v2.0.0 与 `docs/PLUGIN-PROVIDERS.md`。
+
 > 本文档说明 opencode2api 统一网关的路由模式：**智能模式（smart，默认推荐）**、**负载均衡（round_robin）** 和 **故障转移（failover）**。
 > 面向使用者与开发者，涵盖各模式的行为、参数与配置方式。
 

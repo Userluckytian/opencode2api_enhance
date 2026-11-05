@@ -245,8 +245,13 @@ type customProviderView struct {
 	KeyStrategy string   `json:"key_strategy"` // round_robin | failover
 	// Key403Cooldown 401/403 失效冷却时长（秒）；0 = 永久禁用（旧行为）；>0 到期自动回池重试。
 	Key403Cooldown int `json:"key_403_cooldown"`
-	// Proxy 本源出站代理（http/https/socks5/socks5h）；空 = 直连。
-	Proxy         string   `json:"proxy"`
+	// Proxy 本源显式配置的代理地址（http/https/socks5/socks5h）；空 = 未单独配置。
+	// 原样返回、编辑时原样带回，避免整表保存把仅通过配置写入的代理洗掉。
+	Proxy string `json:"proxy"`
+	// ProxyEffective 实际生效的代理（use_proxy=true 时为全局代理解析结果；空 = 直连）。
+	ProxyEffective string `json:"proxy_effective"`
+	// UseProxy 是否使用设置页维护的全局出口代理；出站时解析为列表首个可用项。
+	UseProxy      bool     `json:"use_proxy"`
 	Enabled       bool     `json:"enabled"`
 	Models        int      `json:"models"`                 // 聚合目录中该源模型数（实时，经白名单过滤）
 	ModelsAll     []string `json:"models_all"`             // 全量模型清单（上游 ID，编辑勾选用）
@@ -276,6 +281,9 @@ type customProviderInput struct {
 	AllowedModels  []string `json:"allowed_models"` // 暴露白名单（空 = 全部暴露）
 	// Proxy 本源出站代理（http/https/socks5/socks5h）；空 = 直连。
 	Proxy string `json:"proxy"`
+	// UseProxy 勾选「使用代理」：出站走设置页维护的全局出口代理。配置里只存该
+	// 布尔值，具体地址在厂商装配时解析（改全局代理无需逐个重存）。Proxy 优先。
+	UseProxy bool `json:"use_proxy"`
 	// UseLocalProxy 测试专用：测试拉取模型走本机系统代理（http.ProxyFromEnvironment），
 	// 优先于 Proxy 字段；默认 false = 直连或按 Proxy 走指定代理。
 	UseLocalProxy bool  `json:"use_local_proxy"`
@@ -284,7 +292,7 @@ type customProviderInput struct {
 
 // localProxyTransport 测试专用的 Transport：经本机系统代理（默认 http.ProxyFromEnvironment，
 // 读 HTTP_PROXY/HTTPS_PROXY/NO_PROXY）出站，不经过节点池。仅测试「测试并获取模型」
-// 使用；生产出站仍走 via_proxy（节点池）或直连。
+// 使用；生产出站仍走 proxy（或 use_proxy 解析的全局代理）或直连。
 //
 // localProxyFunc 独立变量（默认 http.ProxyFromEnvironment）：http.ProxyFromEnvironment
 // 内部用 sync.Once 缓存进程级环境快照，测试里 t.Setenv 无法刷新该缓存——独立变量让
@@ -345,7 +353,13 @@ func customProviderViews() []customProviderView {
 		if p == nil {
 			p = map[string]any{}
 		}
-		proxyURL, _ := p[custom.ParamProxy].(string)
+		rawProxy, _ := p[custom.ParamProxy].(string)
+		rawProxy = strings.TrimSpace(rawProxy)
+		useProxy := customUseProxyFromParams(p)
+		effectiveProxy := rawProxy
+		if effectiveProxy == "" && useProxy {
+			effectiveProxy = globalEgressProxy()
+		}
 		proto, _ := p[custom.ParamProtocol].(string)
 		if proto == "" {
 			proto = custom.ProtoOpenAI
@@ -376,7 +390,7 @@ func customProviderViews() []customProviderView {
 			ID: pc.ID, Name: pc.Name, Protocol: proto, BaseURL: baseURL,
 			APIKeys: keys, APIKey: firstKey, APIKeySet: len(keys) > 0,
 			KeyStrategy: strategy, Key403Cooldown: key403,
-			Proxy: proxyURL, Enabled: enabled,
+			Proxy: rawProxy, ProxyEffective: effectiveProxy, UseProxy: useProxy, Enabled: enabled,
 			Models: counts[pc.ID], LastError: vendorLastErr(pc.ID),
 			ModelsAll: vendorFullModels(pc.ID), AllowedModels: allowedIDs,
 			LastSuccess: vendorLastSuccess(pc.ID),
@@ -398,7 +412,8 @@ func customProvidersHandler() http.HandlerFunc {
 			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 			return
 		}
-		writeAdminJSON(w, map[string]any{"providers": customProviderViews()})
+		// global_proxy：设置页「出口代理」的解析结果，供「使用代理」提示与新建表单复用。
+		writeAdminJSON(w, map[string]any{"providers": customProviderViews(), "global_proxy": globalEgressProxy()})
 	}
 }
 
@@ -423,7 +438,7 @@ func customProvidersSaveHandler(m *manager.Manager) http.HandlerFunc {
 			writeAdminErr(w, http.StatusBadRequest, err.Error())
 			return
 		}
-		writeAdminJSON(w, map[string]any{"status": "ok", "providers": views})
+		writeAdminJSON(w, map[string]any{"status": "ok", "providers": views, "global_proxy": globalEgressProxy()})
 	}
 }
 
@@ -443,7 +458,7 @@ func customProvidersClearHandler(m *manager.Manager) http.HandlerFunc {
 		if err := custom.PurgeAllModelCaches(); err != nil {
 			slog.Warn("purge custom model caches failed", "error", err)
 		}
-		writeAdminJSON(w, map[string]any{"status": "ok", "cleared": true, "providers": views})
+		writeAdminJSON(w, map[string]any{"status": "ok", "cleared": true, "providers": views, "global_proxy": globalEgressProxy()})
 	}
 }
 
@@ -527,6 +542,11 @@ func applyCustomProvidersSave(m *manager.Manager, inputs []customProviderInput) 
 			custom.ParamKeyStrategy:    strategy,
 			custom.ParamProxy:          strings.TrimSpace(in.Proxy),
 			custom.ParamKey403Cooldown: key403,
+		}
+		if in.UseProxy {
+			// 只存布尔：具体地址在出站装配时解析全局代理列表，
+			// 因此在设置页改代理即可对全部勾选源生效，无需逐个重存。
+			params[custom.ParamUseProxy] = true
 		}
 		if len(keys) > 0 {
 			params[custom.ParamAPIKeys] = keys
@@ -635,6 +655,16 @@ func customProvidersTestHandler() http.HandlerFunc {
 		if len(keys) == 0 {
 			keys = []string{""} // 无 key（本地网关）也测
 		}
+		// 与出站装配同口径：勾选「使用代理」时解析全局代理；没配就别静默直连，
+		// 否则用户会以为「测试通了 = 代理配好了」。
+		proxyURL := strings.TrimSpace(in.Proxy)
+		if proxyURL == "" && in.UseProxy && !in.UseLocalProxy {
+			proxyURL = globalEgressProxy()
+			if proxyURL == "" {
+				writeAdminErr(w, http.StatusBadRequest, "已勾选使用代理，但设置页「出口代理」为空，请先配置再测试")
+				return
+			}
+		}
 		type keyResult struct {
 			KeyTail   string `json:"key_tail"` // 末 4 位（明文不整段回显）
 			OK        bool   `json:"ok"`
@@ -648,9 +678,14 @@ func customProvidersTestHandler() http.HandlerFunc {
 		for _, key := range keys {
 			cfg := custom.Config{
 				ID: in.ID, Name: in.Name, BaseURL: in.BaseURL,
-				APIKey: key, Protocol: in.Protocol, Proxy: in.Proxy,
+				APIKey: key, Protocol: in.Protocol, Proxy: proxyURL,
 				// 连通测试必须真实触达上游：禁用目录缓存（防不可达时拿旧缓存误报成功）。
 				NoModelCache: true,
+			}
+			if proxyURL != "" {
+				// 与出站装配同款：custom.New 自身不建 client，代理必须显式注入 Transport，
+				// 否则「测试通了」只能说明直连通，不能说明勾选的代理真在用。
+				cfg.Transport = contract.StaticProxyTransport{ProxyURL: proxyURL}
 			}
 			if in.UseLocalProxy {
 				// 走本机系统代理（http.ProxyFromEnvironment），优先于 Proxy 字段。
@@ -708,6 +743,14 @@ func writeAdminErr(w http.ResponseWriter, status int, msg string) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(map[string]any{"error": msg})
+}
+
+// customUseProxyFromParams 读 params 的 use_proxy；兼容旧配置里的 via_proxy 布尔。
+// v2.0 重构后 via_proxy 只作为「该源曾要求走代理」的历史标记，不再直接生效。
+func customUseProxyFromParams(p map[string]any) bool {
+	useProxy, _ := p[custom.ParamUseProxy].(bool)
+	legacy, _ := p[custom.ParamViaProxy].(bool)
+	return useProxy || legacy
 }
 
 // customKeyListFromParams 合并条目 params 里的 api_keys + api_key（去空去重）。

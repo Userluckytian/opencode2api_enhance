@@ -7,7 +7,7 @@
 //	          https://api.anthropic.com/v1、https://generativelanguage.googleapis.com/v1beta）
 //	api_key   上游密钥（由网关持有，客户端无需携带）
 //	protocol  出站协议："openai"（默认，OpenAI 兼容）| "anthropic" | "gemini"
-//	via_proxy 出站是否走代理池（默认 false 直连；true 时复用节点池出口）
+//	proxy 出站代理地址；use_proxy 表示改用设置页维护的全局出口代理（默认直连）
 //
 // 模型命名：目录恒带 "{id}/" 前缀（如 "myglm/glm-4.7"），与其它厂商同名模型
 // 天然隔离、路由与展示稳定；调用上游前剥掉前缀。请求经统一网关发出（Transport 注入），

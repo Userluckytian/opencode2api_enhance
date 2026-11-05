@@ -117,7 +117,12 @@ export type CustomProviderView = {
   key_strategy: CustomKeyStrategy
   /** 401/403 失效冷却时长（秒）：0=永久禁用；>0 到期自动回池重试 */
   key_403_cooldown: number
-  via_proxy: boolean
+  /** 本源显式配置的代理地址（编辑时原样带回，避免整表保存洗掉） */
+  proxy: string
+  /** 实际生效的代理（勾选「使用代理」时为全局代理解析结果；空 = 直连） */
+  proxy_effective: string
+  /** 是否使用设置页维护的全局出口代理 */
+  use_proxy: boolean
   enabled: boolean
   /** 聚合目录中该源模型数（实时，经白名单过滤） */
   models: number
@@ -153,7 +158,10 @@ export type CustomProviderInput = {
   key_strategy?: CustomKeyStrategy
   /** 401/403 失效冷却时长（秒）：0=永久禁用；>0 到期自动回池重试 */
   key_403_cooldown?: number
-  via_proxy?: boolean
+  /** 本源显式代理地址（优先于 use_proxy；仅 API/配置写入时使用） */
+  proxy?: string
+  /** 勾选「使用代理」：出站走设置页维护的全局出口代理（地址由后端解析） */
+  use_proxy?: boolean
   /** 仅「测试并获取模型」生效：走本机系统代理（http.ProxyFromEnvironment），不写入配置 */
   use_local_proxy?: boolean
   enabled?: boolean
@@ -1031,10 +1039,11 @@ export const api = {
   autoModelSave: (cfg: AutoModelConfig) => req<{ status: string; config: AutoModelConfig }>('POST', '/auto-model', cfg),
 
   // 自定义模型源（第七页「自定义模型」）：用户自带 key 接入第三方供应商
-  customProvidersList: () => req<{ providers: CustomProviderView[] }>('GET', '/custom-providers'),
+  customProvidersList: () =>
+    req<{ providers: CustomProviderView[]; global_proxy: string }>('GET', '/custom-providers'),
   /** 整表保存（增/改/删一次到位）；编辑时 api_key 留空 = 保留原 key */
   customProvidersSave: (providers: CustomProviderInput[]) =>
-    req<{ status: string; providers: CustomProviderView[] }>('POST', '/custom-providers/save', { providers }),
+    req<{ status: string; providers: CustomProviderView[]; global_proxy: string }>('POST', '/custom-providers/save', { providers }),
   /** 连通测试（不落盘）：拉取模型目录，返回模型列表与延迟 */
   customProvidersTest: (input: CustomProviderInput) =>
     req<CustomProviderTestResult>('POST', '/custom-providers/test', input),

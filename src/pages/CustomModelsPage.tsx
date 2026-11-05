@@ -15,7 +15,10 @@ type FormState = {
   key_strategy: CustomKeyStrategy
   /** 401/403 失效冷却时长（秒）：0=永久禁用；>0 到期自动回池重试 */
   key_403_cooldown: number
-  via_proxy: boolean
+  /** 使用设置页维护的全局出口代理（出站时后端解析为列表首个可用项） */
+  use_proxy: boolean
+  /** 本源显式代理地址（原样带回，避免整表保存洗掉） */
+  proxy: string
   /** 仅「测试并获取模型」生效：走本机系统代理（不落盘、不进配置） */
   use_local_proxy: boolean
   enabled: boolean
@@ -37,7 +40,8 @@ const emptyForm = (): FormState => ({
   api_keys: '',
   key_strategy: 'round_robin',
   key_403_cooldown: 600, // 默认：401/403 冷却 600s 后自动恢复
-  via_proxy: false,
+  use_proxy: false,
+  proxy: '',
   use_local_proxy: false,
   enabled: true,
   allModels: [],
@@ -210,6 +214,9 @@ export default function CustomModelsPage({ toast }: { toast: (msg: string, ok?: 
     pluginTogglingIdsRef.current = pluginTogglingIds
   }, [pluginTogglingIds])
   const [modelSearch, setModelSearch] = useState('')
+  // 设置页「出口代理」的解析结果（后端随列表一起返回）：用于「使用代理」提示，
+  // 不能取单个源的 proxy_effective——未勾选时它为空，会显示「未配置」误导用户。
+  const [globalProxy, setGlobalProxy] = useState('')
   const [modelRefreshBusy, setModelRefreshBusy] = useState(false)
   // 启停/保存后子进程状态异步推进（starting→running/need_config），延迟刷新让状态落定
   const pluginRefreshTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
@@ -222,6 +229,7 @@ export default function CustomModelsPage({ toast }: { toast: (msg: string, ok?: 
     try {
       const r = await api.customProvidersList()
       setList(r.providers ?? [])
+      setGlobalProxy(r.global_proxy ?? '')
     } catch (e) {
       console.error('加载自定义模型源失败', e)
       toastRef.current('加载自定义模型源失败', false)
@@ -302,7 +310,8 @@ export default function CustomModelsPage({ toast }: { toast: (msg: string, ok?: 
       key_strategy: p.key_strategy ?? 'round_robin',
       // 尊重实际存储值：旧配置无该键=0（永久禁用）原样回填，仅新建默认 600（自动恢复）。
       key_403_cooldown: p.key_403_cooldown >= 0 ? p.key_403_cooldown : 600,
-      via_proxy: p.via_proxy,
+      use_proxy: p.use_proxy,
+      proxy: p.proxy ?? '',
       use_local_proxy: false,
       enabled: p.enabled,
       allModels: p.models_all ?? [],
@@ -341,7 +350,8 @@ export default function CustomModelsPage({ toast }: { toast: (msg: string, ok?: 
       key_strategy: f.key_strategy,
       key_403_cooldown: f.key_403_cooldown,
       allowed_models: allowed,
-      via_proxy: f.via_proxy,
+      proxy: f.proxy || undefined,
+      use_proxy: f.use_proxy,
       use_local_proxy: forTest ? f.use_local_proxy : undefined, // 仅测试动作透传（保存不落盘）
       enabled: f.enabled,
     }
@@ -443,11 +453,13 @@ export default function CustomModelsPage({ toast }: { toast: (msg: string, ok?: 
           api_keys: p.api_keys && p.api_keys.length > 0 ? p.api_keys : undefined,
           key_strategy: p.key_strategy,
           key_403_cooldown: p.key_403_cooldown,
-          via_proxy: p.via_proxy,
+          proxy: p.proxy || undefined,
+          use_proxy: p.use_proxy,
           enabled: p.enabled,
         }))
       const r = await api.customProvidersSave([...others, input])
       setList(r.providers ?? [])
+      setGlobalProxy(r.global_proxy ?? '')
       setForm(null)
       setModelSearch('')
       setTestResult(null)
@@ -462,12 +474,13 @@ export default function CustomModelsPage({ toast }: { toast: (msg: string, ok?: 
     }
   }
 
-  // 删除 / 启停 / via_proxy 切换：整表保存（去掉或修改目标项）
+  // 删除 / 启停 / use_proxy 切换：整表保存（去掉或修改目标项）
   const saveAll = async (providers: CustomProviderInput[], okMsg: string) => {
     setSaving(true)
     try {
       const r = await api.customProvidersSave(providers)
       setList(r.providers ?? [])
+      setGlobalProxy(r.global_proxy ?? '')
       toast(`${okMsg}（网关约 3 秒内热生效；未生效请重启网关）`, true)
     } catch (e) {
       console.error('保存失败', e)
@@ -488,7 +501,8 @@ export default function CustomModelsPage({ toast }: { toast: (msg: string, ok?: 
       api_keys: p.api_keys && p.api_keys.length > 0 ? p.api_keys : undefined,
       key_strategy: p.key_strategy,
       key_403_cooldown: p.key_403_cooldown,
-      via_proxy: p.via_proxy,
+      proxy: p.proxy || undefined,
+      use_proxy: p.use_proxy,
       enabled: p.enabled,
       // 带上当前白名单（空 = 该源本就是全部暴露，序列化后键省略、后端不误伤）
       allowed_models: p.allowed_models && p.allowed_models.length > 0 ? p.allowed_models : undefined,
@@ -798,7 +812,7 @@ export default function CustomModelsPage({ toast }: { toast: (msg: string, ok?: 
           </h1>
           <p className="text-zinc-500 text-xs mt-1">
             接入自带 API Key 的第三方模型供应商（OpenAI / Anthropic / Gemini 三种协议），可同时接入多个。
-            保存后模型进入 /v1/models（模型名带 <code className="bg-zinc-100 px-1 rounded">源ID/</code> 前缀），调用、日志、统计与节点池全部复用统一网关。
+            保存后模型进入 /v1/models（模型名带 <code className="bg-zinc-100 px-1 rounded">源ID/</code> 前缀），调用、日志与统计全部复用供应商服务（50080）。
           </p>
         </div>
         <div className="flex items-center gap-2">
@@ -974,7 +988,7 @@ export default function CustomModelsPage({ toast }: { toast: (msg: string, ok?: 
                     <span className="text-[15px] font-medium text-zinc-900">{p.name || p.id}</span>
                     <span className="text-[11px] px-1.5 py-0.5 rounded bg-zinc-100 text-zinc-600 font-mono">{p.protocol}</span>
                     {!p.enabled && <span className="text-[11px] px-1.5 py-0.5 rounded bg-zinc-200 text-zinc-500">已停用</span>}
-                    {p.via_proxy && <span className="text-[11px] px-1.5 py-0.5 rounded bg-amber-50 text-amber-700">走节点池</span>}
+                    {p.use_proxy && <span className="text-[11px] px-1.5 py-0.5 rounded bg-amber-50 text-amber-700">走代理</span>}
                     {p.keys_total > 1 && (
                       <span className="text-[11px] px-1.5 py-0.5 rounded bg-zinc-100 text-zinc-600">
                         {p.keys_total} key
@@ -1269,18 +1283,24 @@ export default function CustomModelsPage({ toast }: { toast: (msg: string, ok?: 
               <p className="text-[11px] text-zinc-400">多 key 时仅失效 key 被标记，其余正常服务；真失效的 key 到期重试仍 401/403 会再次标记并重新冷却，不会反复刷上游</p>
             </div>
 
-            <div className="flex items-center space-x-3">
-              <label className="relative inline-flex items-center cursor-pointer">
-                <input
-                  type="checkbox"
-                  checked={form.via_proxy}
-                  onChange={(e) => setForm({ ...form, via_proxy: e.target.checked })}
-                  className="sr-only peer"
-                />
-                <div className="w-11 h-6 bg-zinc-200 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-zinc-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-zinc-900"></div>
-              </label>
-              <span className="text-sm text-zinc-700">出站走节点池代理</span>
-              <span className="text-zinc-500 text-xs">（默认直连；供应商有地区限制时开启）</span>
+            <div className="rounded-lg border border-zinc-200 bg-zinc-50/60 p-3 space-y-1.5">
+              <div className="flex items-center space-x-3">
+                <label className="relative inline-flex items-center cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={form.use_proxy}
+                    onChange={(e) => setForm({ ...form, use_proxy: e.target.checked })}
+                    className="sr-only peer"
+                  />
+                  <div className="w-11 h-6 bg-zinc-200 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-zinc-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-zinc-900"></div>
+                </label>
+                <span className="text-sm text-zinc-700">使用代理</span>
+                <span className="text-zinc-500 text-xs">（默认直连；供应商有地区限制时开启）</span>
+              </div>
+              <div className="text-[11px] text-zinc-400 pl-14">
+                出站走设置页「出口代理」的第一个可用项
+                {form.use_proxy ? `：${form.proxy || globalProxy || '未配置（请先到设置页添加）'}` : ''}
+              </div>
             </div>
 
             <div className="flex items-center space-x-3">
@@ -1294,7 +1314,7 @@ export default function CustomModelsPage({ toast }: { toast: (msg: string, ok?: 
                 <div className="w-11 h-6 bg-zinc-200 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-zinc-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-zinc-900"></div>
               </label>
               <span className="text-sm text-zinc-700">测试走本机系统代理</span>
-              <span className="text-zinc-500 text-xs">（仅「测试并获取模型」时经系统代理拉取；与上方节点池二选一，不写入配置）</span>
+              <span className="text-zinc-500 text-xs">（仅「测试并获取模型」时经系统代理拉取；与上方「使用代理」二选一，不写入配置）</span>
             </div>
 
             {/* 暴露模型白名单 */}

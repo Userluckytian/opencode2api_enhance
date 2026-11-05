@@ -123,7 +123,7 @@ curl http://127.0.0.1:50080/v1/chat/completions \
         "api_keys": ["sk-xxx1", "sk-xxx2"],
         "key_strategy": "round_robin",
         "protocol": "openai",
-        "via_proxy": false
+        "use_proxy": false
       }
     }
   ]
@@ -136,7 +136,8 @@ curl http://127.0.0.1:50080/v1/chat/completions \
 | `protocol` | — | `openai`（默认）/ `anthropic` / `responses` / `gemini` |
 | `api_keys` | — | 多 key 数组；`api_key` 单 key 为兼容字段，两者合并去重 |
 | `key_strategy` | — | `round_robin`（默认）/ `failover`，仅作用于本源 |
-| `via_proxy` | — | `true` 时出站走该实例的节点池代理（应对有地区限制的供应商）；默认直连 |
+| `use_proxy` | — | `true` 时出站走**设置页「出口代理」**的第一个可用项（应对有地区限制的供应商）；默认直连 |
+| `proxy` | — | 直接指定本源代理地址（`http/https/socks5/socks5h`），优先于 `use_proxy` |
 | `allowed_models` | — | 暴露白名单（上游模型 ID 数组；空 = 全部暴露）。目录缓存保存全量，仅对外过滤 |
 
 > 以 `_` 开头的 params 键保留给 core 运行时注入，配置中同名键会被忽略。

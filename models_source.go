@@ -8,7 +8,9 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"log/slog"
+	"os"
 	"sort"
 	"strings"
 	"sync"
@@ -16,6 +18,7 @@ import (
 
 	"github.com/6Kmfi6HP/opencode2api/core/aggregator"
 	"github.com/6Kmfi6HP/opencode2api/core/contract"
+	"github.com/6Kmfi6HP/opencode2api/core/manager"
 	chatRouter "github.com/6Kmfi6HP/opencode2api/core/router"
 	"github.com/6Kmfi6HP/opencode2api/vendors/custom"
 	// 聚合厂商注册：blank import 触发各厂商 init() 自注册（扩增即生效）。
@@ -86,16 +89,44 @@ func vendorParams(t string) map[string]any {
 	return map[string]any{}
 }
 
+// globalProxyFile 只声明设置页维护的全局出口代理键：与 manager.Config 共用同一
+// config.json，这里只读不写，避免把两套配置结构耦合在一起。
+type globalProxyFile struct {
+	EngineProxies []string `json:"engine_proxies"`
+}
+
+// globalEgressProxy 读取全局出口代理列表并返回第一个可用项（空 = 直连）。
+//
+// 自定义源勾选「使用代理」时只在配置里记 use_proxy 布尔值，具体地址每次装配
+// 现读全局列表 —— 因此在设置页改了代理，无需逐个重存自定义源。
+func globalEgressProxy() string {
+	data, err := os.ReadFile(configPath)
+	if err != nil {
+		return ""
+	}
+	var pc globalProxyFile
+	if json.Unmarshal(data, &pc) != nil {
+		return ""
+	}
+	return manager.FirstEgressProxy(pc.EngineProxies)
+}
+
 // mergeVendorParams 合并「类型级运行时注入」与「条目级配置参数」：
 // 运行时键（"_" 前缀，如 _transport）不可被配置覆盖；其余以条目 params 为准。
 //
-// 例外：custom 源声明了 proxy 时，这里把注入的传输换成 StaticProxyTransport——
-// 单代理地址是条目级配置，但传输实现必须由 core 构造（厂商不自建 client）。
+// 例外：custom 源声明了 proxy（或勾选 use_proxy）时，这里把注入的传输换成
+// StaticProxyTransport——代理地址是条目级配置，但传输实现必须由 core 构造
+// （厂商不自建 client）。use_proxy 解析为全局代理列表首个可用项。
 func mergeVendorParams(t string, entry map[string]any) map[string]any {
 	merged := vendorParams(t)
 	if t == "custom" {
-		if proxyURL, _ := entry[custom.ParamProxy].(string); strings.TrimSpace(proxyURL) != "" {
-			merged[contract.ParamTransport] = contract.StaticProxyTransport{ProxyURL: strings.TrimSpace(proxyURL)}
+		proxyURL, _ := entry[custom.ParamProxy].(string)
+		proxyURL = strings.TrimSpace(proxyURL)
+		if useProxy, _ := entry[custom.ParamUseProxy].(bool); proxyURL == "" && useProxy {
+			proxyURL = globalEgressProxy()
+		}
+		if proxyURL != "" {
+			merged[contract.ParamTransport] = contract.StaticProxyTransport{ProxyURL: proxyURL}
 		}
 	}
 	if len(entry) == 0 {

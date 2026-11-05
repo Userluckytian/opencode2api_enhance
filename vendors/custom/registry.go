@@ -25,6 +25,10 @@ const (
 	// ParamViaProxy 是 ParamProxy 的向后兼容别名：旧配置里的 via_proxy 布尔值
 	// 无法映射到具体代理地址，只用于在迁移时识别「该源曾要求走代理」。
 	ParamViaProxy = "via_proxy"
+	// ParamUseProxy 是否使用「全局出口代理」（设置页维护的 engine_proxies）。
+	// 为 true 时不复制地址：出站装配时解析为全局列表第一个非 direct 项，
+	// 因此修改全局代理无需重存各源。与 ParamProxy 同时存在时 ParamProxy 优先。
+	ParamUseProxy = "use_proxy"
 	// ParamKey403Cooldown 401/403 失效冷却时长（秒）：>0 到期自动回池重试；0 = 永久禁用（旧行为）。
 	ParamKey403Cooldown = "key_403_cooldown"
 )

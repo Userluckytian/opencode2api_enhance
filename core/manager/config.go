@@ -515,3 +515,18 @@ func maskSecret(s string) string {
 	}
 	return strings.Repeat("*", len(s))
 }
+
+// FirstEgressProxy 从出口代理列表里取第一个可用代理（跳过空项与 direct）。
+//
+// 用途：设置页的「出口代理」是全局唯一维护入口；自定义源勾选「使用代理」时
+// 只存布尔标记，出站装配时再用本函数解析具体地址。返回空串 = 直连。
+func FirstEgressProxy(proxies []string) string {
+	for _, p := range proxies {
+		p = strings.TrimSpace(p)
+		if p == "" || strings.EqualFold(p, "direct") {
+			continue
+		}
+		return p
+	}
+	return ""
+}
