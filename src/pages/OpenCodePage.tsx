@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import clsx from 'clsx'
 import {
+  AlertCircle,
   Copy,
   Key,
   ListChecks,
@@ -180,13 +181,30 @@ export default function OpenCodePage({ toast }: { toast: (msg: string, ok?: bool
     }
   }
 
+  // saveKeys 保存密钥并让它立刻生效。
+  //
+  // 三步必须串起来，否则用户会以为「填了 key 却没变化」：
+  //   1) 写入 config.engine_zen_keys / engine_go_keys
+  //   2) 按新 key 数量重算 WARP 出口池并重新生成引擎 config.json
+  //      （引擎把 key 均匀绑定到出口，出口数不足会让多个 key 挤同一出口 IP）
+  //   3) 重启引擎让新配置生效
   const saveKeys = async () => {
     setSavingKeys(true)
     try {
       await api.configSet('engine_zen_keys', zenDraft)
       await api.configSet('engine_go_keys', goDraft)
       setKeyDirty(false)
-      toast('密钥已保存，重启引擎后生效')
+
+      // 出口池交给后端按 key 数量推导（无 key=2，有 key=4）。
+      // 这里不再前端硬算：额度主要绑 session 而非出口数，开大出口只会拖慢启动。
+      setWarpDirty(false)
+
+      // 重写引擎配置 + 重启，让 key 立即生效
+      await api.freeTierEngineWriteConfig()
+      const st = await api.freeTierEngineRestart()
+      setStatus(st)
+      toast(`密钥已生效，引擎正在按 ${zenDraft.split(String.fromCharCode(10)).filter((s) => s.trim()).length + goDraft.split(String.fromCharCode(10)).filter((s) => s.trim()).length} 个 key 重建出口池`)
+      void reload()
     } catch (e) {
       toast((e as Error).message, false)
     } finally {
@@ -287,6 +305,9 @@ export default function OpenCodePage({ toast }: { toast: (msg: string, ok?: bool
           </button>
         </div>
       </div>
+
+      {/* 通道状态：一眼看出当前走在哪一档（key / WARP / 匿名直连） */}
+      <ChannelStatusBar status={status} config={config} />
 
       {/* 引擎接入卡（沿用「统一网关」卡的信息层级） */}
       <div className="bg-white rounded-2xl border border-zinc-200 shadow-sm p-5">
@@ -648,6 +669,84 @@ export default function OpenCodePage({ toast }: { toast: (msg: string, ok?: bool
             <div className="text-[16px] font-semibold text-zinc-900">{engineOn ? '启用' : '停用'}</div>
           </div>
         </div>
+      </div>
+    </div>
+  )
+}
+
+/**
+ * ChannelStatusBar 当前通道状态条。
+ *
+ * v2.0 起通道是「key 优先 → WARP → 匿名直连」三级降级，用户最关心的是
+ * 「现在到底走的哪一档、为什么」。这里把三种依据摊开：
+ *   1. 有没有配 key（配了就走 key 通道，匿名被引擎让位）
+ *   2. WARP 出口池状态（active / cooling）
+ *   3. 实际可用模型数（10 表示匿名可用，0 表示彻底不通）
+ */
+function ChannelStatusBar({
+  status,
+  config,
+}: {
+  status: FreeTierEngineStatus | null
+  config: ConfigView | null
+}) {
+  const zenCount = (config?.engine_zen_keys ?? []).filter((k) => k.trim()).length
+  const goCount = (config?.engine_go_keys ?? []).filter((k) => k.trim()).length
+  const keyCount = zenCount + goCount
+
+  const warpReady = status?.warp_status === 'ready' && (status?.warp_active ?? 0) > 0
+  const warpCoolingOnly = (status?.warp_cooling ?? 0) > 0 && !warpReady
+
+  // 判定当前生效通道
+  let lane: 'key' | 'warp' | 'anonymous' | 'down'
+  let laneLabel: string
+  let laneHint: string
+  let cls: string
+  if (keyCount > 0 && status?.healthy) {
+    lane = 'key'
+    laneLabel = `密钥通道（${keyCount} 个 key）`
+    laneHint = '已配 key，匿名通道自动让位；key 会均匀绑定到各出口'
+    cls = 'bg-teal-50 text-teal-800 border-teal-200'
+  } else if (warpReady) {
+    lane = 'warp'
+    laneLabel = `WARP 出口（活跃 ${status?.warp_active ?? 0}）`
+    laneHint = '未配 key，走匿名通道 + WARP 轮换出口'
+    cls = 'bg-blue-50 text-blue-800 border-blue-200'
+  } else if (warpCoolingOnly) {
+    lane = 'down'
+    laneLabel = '出口全部冷却'
+    laneHint = `${status?.warp_cooling ?? 0} 个出口在冷却，推理请求会挂起；等待恢复或添加 key`
+    cls = 'bg-amber-50 text-amber-800 border-amber-200'
+  } else if (status?.healthy) {
+    lane = 'anonymous'
+    laneLabel = '匿名直连'
+    laneHint = '未配 key 且 WARP 未启用，全靠本机 IP（易 429）'
+    cls = 'bg-zinc-50 text-zinc-700 border-zinc-200'
+  } else {
+    lane = 'down'
+    laneLabel = '不可用'
+    laneHint = status?.error || '引擎未运行'
+    cls = 'bg-red-50 text-red-700 border-red-200'
+  }
+
+  return (
+    <div className={clsx('rounded-xl border px-4 py-3 flex items-start gap-3', cls)}>
+      <div className="mt-0.5">
+        {lane === 'down' ? <AlertCircle size={16} /> : <ShieldCheck size={16} />}
+      </div>
+      <div className="flex-1 min-w-0">
+        <div className="flex items-center gap-2 flex-wrap">
+          <span className="text-[13px] font-semibold">当前通道：{laneLabel}</span>
+          <span className="text-[11px] opacity-70">
+            模型 {status?.model_shown ?? 0}/{status?.model_total ?? 0}
+          </span>
+          {warpCoolingOnly && (
+            <span className="text-[11px] px-1.5 py-0.5 rounded bg-amber-100">
+              冷却 {status?.warp_cooling ?? 0}
+            </span>
+          )}
+        </div>
+        <div className="text-[11px] opacity-70 mt-0.5">{laneHint}</div>
       </div>
     </div>
   )

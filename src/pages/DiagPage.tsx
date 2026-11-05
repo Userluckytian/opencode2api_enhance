@@ -55,6 +55,7 @@ export default function DiagPage({
   const [loading, setLoading] = useState(true)
   const [probing, setProbing] = useState<string | 'all' | null>(null)
   const [probingModel, setProbingModel] = useState('')
+  const [growing, setGrowing] = useState<number | null>(null)
 
   const aliveRef = useRef(true)
   useEffect(() => {
@@ -105,6 +106,28 @@ export default function DiagPage({
       toast((e as Error).message, false)
     } finally {
       if (aliveRef.current) setProbing(null)
+    }
+  }
+
+  // growPool 调整 WARP 出口池大小并重建引擎配置 + 重启。
+  //
+  // 为什么默认不开大：额度主要绑 session id，出口多不等于额度多；
+  // 而每个出口注册要 10~90s，盲目开大会拖慢启动。所以默认 2~4，
+  // 并发真的不够时在这里手动加。
+  const growPool = async (n: number) => {
+    setGrowing(n)
+    try {
+      await api.configSet('engine_warp_pool_size', String(n))
+      await api.freeTierEngineWriteConfig()
+      const st = await api.freeTierEngineRestart()
+      if (!aliveRef.current) return
+      setEngine(st)
+      toast(`出口池已设为 ${n}，引擎正在重建`)
+      void reload()
+    } catch (e) {
+      toast((e as Error).message, false)
+    } finally {
+      if (aliveRef.current) setGrowing(null)
     }
   }
 
@@ -247,6 +270,25 @@ export default function DiagPage({
           <Stat label="免费模型" value={`${engine?.model_shown ?? 0} / ${engine?.model_total ?? 0}`} />
           <Stat label="WARP" value={engine?.warp_status ?? '—'} />
           <Stat label="出口 活跃/冷却" value={`${engine?.warp_active ?? 0} / ${engine?.warp_cooling ?? 0}`} />
+        </div>
+
+        {/* 出口池按需扩容：额度主要绑 session，出口多不等于额度多，
+            所以默认只开 2~4 个；并发不够时在这里手动加。 */}
+        <div className="mt-3 flex items-center gap-2 flex-wrap">
+          <span className="text-[12px] text-zinc-500">扩容出口池：</span>
+          {[2, 4, 6, 8].map((n) => (
+            <button
+              key={n}
+              onClick={() => void growPool(n)}
+              disabled={growing !== null}
+              className="px-2.5 py-1 rounded-md text-[12px] text-zinc-700 bg-white border border-zinc-200 hover:bg-zinc-50 disabled:opacity-40"
+            >
+              {growing === n ? <Loader2 size={12} className="animate-spin inline" /> : null} {n} 个
+            </button>
+          ))}
+          <span className="text-[11px] text-zinc-400">
+            改完需重建引擎配置并重启（每个出口注册 10~90s）
+          </span>
         </div>
       </div>
 

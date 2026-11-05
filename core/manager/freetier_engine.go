@@ -188,9 +188,14 @@ func (m *Manager) WriteEngineConfig() error {
 	}
 
 	port := m.managerGatewayPort()
+	// WARP 出口池大小：未显式设置时按 key 数量自动推导（额度最大化）。
+	//
+	// 引擎把 key 均匀绑定到出口（proxyIndex = i % len(transports)），而
+	// 上游免费额度按「key × 出口 IP」计算：出口数不足时多个 key 共享同一 IP，
+	// 会一起 429。因此出口数至少要与 key 数量同量级。
 	poolSize := cfg.EngineWarpPoolSize
 	if poolSize <= 0 {
-		poolSize = 2
+		poolSize = autoWarpPoolSize(len(cfg.EngineZenKeys) + len(cfg.EngineGoKeys))
 	}
 	retryMax := cfg.EngineRetryMaxAttempts
 	if retryMax <= 0 {
@@ -439,4 +444,19 @@ func waitPortClosed(port uint16, timeout time.Duration) error {
 		time.Sleep(150 * time.Millisecond)
 	}
 	return fmt.Errorf("端口 %d 未在 %v 内释放", port, timeout)
+}
+
+func autoWarpPoolSize(keyCount int) int {
+	// 额度主要绑 session id，而不是出口 IP（见引擎 sessions.go：同一对话耗尽后
+	// 换任何新出口都仍 429，反而把整池烧掉 24h）。所以出口多不等于额度多，
+	// 盲目开大只会拖慢启动（每个出口注册 10~90s）并加速冷却消耗。
+	//
+	// 策略：小起点 + 按需扩容
+	//   - 无 key（纯匿名）：2 个（匿名本身按 IP 限流，多出口收益递减）
+	//   - 有 key：4 个（key 能开新 session，多出口才有意义）
+	//   - 上限 4，不够时由诊断页/面板手动调大
+	if keyCount <= 0 {
+		return 2
+	}
+	return 4
 }
