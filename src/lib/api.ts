@@ -312,6 +312,75 @@ export type ConfigView = {
   engine_models_refresh_sec: number
 }
 
+/** 免费层单个模型的可用性视图（v2.1） */
+export type FreeTierModel = {
+  id: string
+  /** 当前是否对外暴露（在引擎 /v1/models 里） */
+  available: boolean
+  /** 探测通道：anonymous / zen / go */
+  channel?: string
+  /** 最近一次探测结果：probe_succeeded / http_429 / http_403 … */
+  reason?: string
+  checked_at?: string
+  next_check?: string
+  context_window?: number
+  max_output?: number
+  reasoning?: boolean
+  tool_call?: boolean
+}
+
+export type FreeTierModelsView = {
+  models: FreeTierModel[]
+  total: number
+  shown: number
+  /** availability 文件路径（排障用） */
+  availability_source?: string
+  error?: string
+}
+
+/** 自检项 */
+export type DiagCheck = {
+  name: string
+  target: string
+  ok: boolean
+  detail?: string
+  duration_ms: number
+}
+
+export type DiagReport = {
+  checks: DiagCheck[]
+  generated_at: string
+}
+
+/** 单模型探测结果 */
+export type ModelProbeResult = {
+  model: string
+  ok: boolean
+  status: number
+  latency_ms: number
+  error?: string
+  preview?: string
+}
+
+export type ModelProbeResponse = {
+  results: ModelProbeResult[]
+  note?: string
+}
+
+/** 失败聚合桶（厂商 × 错误码） */
+export type FailBucket = {
+  vendor: string
+  reason: string
+  count: number
+  last_at?: string
+}
+
+export type FailAggregate = {
+  buckets: FailBucket[]
+  total_fails: number
+  scanned: number
+}
+
 /** 免费层引擎（40080）状态 */
 export type FreeTierEngineStatus = {
   /** stopped | starting | ready | failed */
@@ -583,17 +652,15 @@ export type GatewayNodeStat = {
   total_tokens: number
 }
 
-export type InstanceStat = {
+export type SourceStat = {
   name: string
-  /** 实例目录存在但实例列表中已无（已删除/历史实例）时为 false */
+  /** 统计文件存在（false = 历史残留） */
   exists: boolean
   requests: number
   prompt_tokens: number
   completion_tokens: number
   total_tokens: number
   models: ModelStat[]
-  /** 仅统一网关条目：按节点（SOCKS5 出口）拆分的调用统计 */
-  nodes?: GatewayNodeStat[]
 }
 
 export type StatsSummary = {
@@ -601,7 +668,8 @@ export type StatsSummary = {
   total_prompt_tokens: number
   total_completion_tokens: number
   total_tokens: number
-  instances: InstanceStat[]
+  /** v2.1：按来源统计（当前只有「供应商服务」；实例池已移除） */
+  sources: SourceStat[]
   /** 最近一次“重置统计”的时间点（RFC3339）；空 = 从未重置 */
   reset_at?: string
 }
@@ -846,7 +914,12 @@ export const api = {
   freeTierEngineRestart: () => req<FreeTierEngineStatus>('POST', '/free-tier/restart'),
   freeTierEngineWriteConfig: () =>
     req<{ status: string; path: string }>('POST', '/free-tier/config'),
-  // auto 虚拟模型：GET 当前配置 / POST 保存即传播子进程（热生效，无需重启）
+  freeTierModels: () => req<FreeTierModelsView>('GET', '/free-tier/models'),
+  freeTierProbe: (model?: string) =>
+    req<ModelProbeResponse>('POST', '/free-tier/probe', { model: model ?? '' }),
+  diag: () => req<DiagReport>('GET', '/diag'),
+  failAggregate: (limit?: number) =>
+    req<FailAggregate>('GET', '/fail-aggregate', undefined, { limit: limit ?? undefined }),
   autoModelGet: () => req<AutoModelConfig>('GET', '/auto-model'),
   autoModelSave: (cfg: AutoModelConfig) => req<{ status: string; config: AutoModelConfig }>('POST', '/auto-model', cfg),
 

@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import clsx from 'clsx'
-import { Zap, Settings, BarChart3, ScrollText, Plug, Sparkles } from 'lucide-react'
+import { Zap, Settings, BarChart3, ScrollText, Plug, Sparkles, Stethoscope } from 'lucide-react'
 import { api } from './lib/api'
 import { useUpdateCheck } from './lib/updates'
 import { nativeUpdateSupported } from './lib/nativeUpdate'
@@ -13,14 +13,16 @@ import CustomModelsPage from './pages/CustomModelsPage'
 import SettingsPage from './pages/SettingsPage'
 import StatsPage from './pages/StatsPage'
 import LogsPage from './pages/LogsPage'
+import DiagPage from './pages/DiagPage'
 
-type Tab = 'opencode' | 'custom' | 'stats' | 'logs' | 'settings'
+type Tab = 'opencode' | 'custom' | 'stats' | 'logs' | 'diag' | 'settings'
 
 const NAV: { id: Tab; label: string; icon: typeof Zap }[] = [
   { id: 'opencode', label: 'OpenCode', icon: Zap },
   { id: 'custom', label: '自定义模型', icon: Plug },
   { id: 'stats', label: '统计', icon: BarChart3 },
   { id: 'logs', label: '日志', icon: ScrollText },
+  { id: 'diag', label: '诊断', icon: Stethoscope },
   { id: 'settings', label: '设置', icon: Settings },
 ]
 
@@ -285,6 +287,7 @@ export default function App() {
           {tab === 'custom' && <CustomModelsPage toast={showToast} />}
           {tab === 'stats' && <StatsPage toast={showToast} />}
           {tab === 'logs' && <LogsPage toast={showToast} />}
+          {tab === 'diag' && <DiagPage toast={showToast} />}
           {tab === 'settings' && (
             <SettingsPage
               toast={showToast}

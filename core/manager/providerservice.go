@@ -249,6 +249,13 @@ func (p *ProviderService) Start(runner Runner) error {
 	dir := p.dir()
 	p.mu.Unlock()
 
+	// 端口预检：端口已被其他进程占用时直接报错，避免「启动→bind 失败→看门狗重启」的无限循环。
+	if !isPortFree(port) {
+		msg := fmt.Sprintf("端口 %d 已被其他进程占用，供应商服务无法启动", port)
+		p.setErr(msg)
+		return fmt.Errorf("%s", msg)
+	}
+
 	if err := os.MkdirAll(filepath.Join(dir, "logs"), 0o755); err != nil {
 		return err
 	}

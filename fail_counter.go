@@ -1,11 +1,14 @@
 package main
 
-// 阶段 7：失败原因计数器（节点 × 原因）。
+// 失败原因计数器（v2.1：厂商 × 错误码）。
 //
-// 在失败调用收口处，按「节点 × 失败原因（429/401/503/connect/timeout/other）」二维累加，
-// 让「最近哪个节点出什么问题」变成一次查询。数据源复用阶段1的 CallRecord 错误分类。
-// 进程内计数（与 token 统计同生命周期），提供查询端点与重置；UI 展示可后续对齐统计页。
-// 纯标准库实现。
+// v1.x 的维度是「节点 × 原因」（SOCKS5 节点池时代）。v2.0 删掉节点池后该维度
+// 恒为空，统计页的「失败原因分布」卡片因此拿不到任何数据。
+// 现在改为按 **厂商 × 错误类别** 聚合：厂商来自 CallRecord.Vendor，错误类别取自
+// CallRecord.ErrorClass（rate_limit / quota / auth / upstream / transport /
+// protocol / other），回退到状态码与文本归类。
+//
+// 进程内计数（与 token 统计同生命周期），提供查询端点与重置；纯标准库实现。
 
 import (
 	"encoding/json"
@@ -14,27 +17,43 @@ import (
 	"sync"
 )
 
-// 失败原因类别。
+// 失败原因类别（与 CallRecord.ErrorClass 对齐，并补充状态码兜底类）。
 const (
-	FailReason429     = "429"
-	FailReason401     = "401"
-	FailReason503     = "503"
-	FailReasonConnect = "connect"
-	FailReasonTimeout = "timeout"
-	FailReasonOther   = "other"
+	FailReasonRateLimit = "rate_limit"
+	FailReasonQuota     = "quota"
+	FailReasonAuth      = "auth"
+	FailReasonUpstream  = "upstream"
+	FailReasonTransport = "transport"
+	FailReasonProtocol  = "protocol"
+	FailReasonTimeout   = "timeout"
+	FailReasonOther     = "other"
 )
 
 var (
 	failCountMu sync.RWMutex
-	// failCounts[node][reason] = 累计次数
+	// failCounts[厂商][原因] = 累计次数
 	failCounts = map[string]map[string]int64{}
 )
 
-// classifyFailReason 从失败 CallRecord 的 status/err_msg/events 判定原因类别。
-func classifyFailReason(rec CallRecord) string {
+// failReasonOf 从失败 CallRecord 判定原因类别：优先用结构化字段，再回退到文本匹配。
+func failReasonOf(rec CallRecord) string {
+	if cls := strings.TrimSpace(rec.ErrorClass); cls != "" {
+		switch cls {
+		case FailReasonRateLimit, FailReasonQuota, FailReasonAuth,
+			FailReasonUpstream, FailReasonTransport, FailReasonProtocol:
+			return cls
+		}
+	}
+	// 状态码兜底（旧记录或上游未给结构化错误时）。
+	switch rec.UpstreamStatus {
+	case 429:
+		return FailReasonRateLimit
+	case 401, 403:
+		return FailReasonAuth
+	case 408, 504:
+		return FailReasonTimeout
+	}
 	var sb strings.Builder
-	sb.WriteString(strings.ToLower(rec.Status))
-	sb.WriteByte(' ')
 	sb.WriteString(strings.ToLower(rec.ErrMsg))
 	for _, ev := range rec.Events {
 		sb.WriteByte(' ')
@@ -44,36 +63,50 @@ func classifyFailReason(rec CallRecord) string {
 	}
 	blob := sb.String()
 	switch {
-	case strings.Contains(blob, "429"):
-		return FailReason429
-	case strings.Contains(blob, "401"), strings.Contains(blob, "403"):
-		return FailReason401
-	case strings.Contains(blob, "503"):
-		return FailReason503
+	case strings.Contains(blob, "429"), strings.Contains(blob, "rate limit"):
+		return FailReasonRateLimit
+	case strings.Contains(blob, "quota"), strings.Contains(blob, "额度"):
+		return FailReasonQuota
+	case strings.Contains(blob, "401"), strings.Contains(blob, "403"), strings.Contains(blob, "unauthorized"):
+		return FailReasonAuth
 	case strings.Contains(blob, "timeout"), strings.Contains(blob, "deadline"), strings.Contains(blob, "超时"):
 		return FailReasonTimeout
 	case strings.Contains(blob, "connect"), strings.Contains(blob, "dial"), strings.Contains(blob, "refused"):
-		return FailReasonConnect
+		return FailReasonTransport
+	case strings.Contains(blob, "503"), strings.Contains(blob, "502"), strings.Contains(blob, "upstream"):
+		return FailReasonUpstream
 	default:
 		return FailReasonOther
 	}
 }
 
-// recordFailure 对本次失败涉及的每个真实节点累加对应原因计数（跳过空/占位文案）。
+// failVendorOf 取失败归属的厂商：优先 Vendor 字段，回退到模型前缀。
+func failVendorOf(rec CallRecord) string {
+	if v := strings.TrimSpace(rec.Vendor); v != "" {
+		return v
+	}
+	if prefix, _, ok := strings.Cut(rec.Model, "/"); ok && prefix != "" {
+		return prefix
+	}
+	if strings.TrimSpace(rec.Model) != "" {
+		return "(unknown)"
+	}
+	return ""
+}
+
+// recordFailure 对本次失败累加「厂商 × 原因」计数。
 func recordFailure(rec CallRecord) {
-	reason := classifyFailReason(rec)
+	vendor := failVendorOf(rec)
+	if vendor == "" {
+		return
+	}
+	reason := failReasonOf(rec)
 	failCountMu.Lock()
 	defer failCountMu.Unlock()
-	for _, n := range rec.Nodes {
-		node := strings.TrimSpace(n)
-		if node == "" || node == callNodeDirectLabel || node == callNodeNoCandidateLabel {
-			continue
-		}
-		if failCounts[node] == nil {
-			failCounts[node] = map[string]int64{}
-		}
-		failCounts[node][reason]++
+	if failCounts[vendor] == nil {
+		failCounts[vendor] = map[string]int64{}
 	}
+	failCounts[vendor][reason]++
 }
 
 // snapshotFailCounts 返回二维计数的深拷贝（供查询/测试，避免外部持有内部 map）。
@@ -81,12 +114,12 @@ func snapshotFailCounts() map[string]map[string]int64 {
 	failCountMu.RLock()
 	defer failCountMu.RUnlock()
 	out := make(map[string]map[string]int64, len(failCounts))
-	for n, m := range failCounts {
+	for v, m := range failCounts {
 		cm := make(map[string]int64, len(m))
 		for r, c := range m {
 			cm[r] = c
 		}
-		out[n] = cm
+		out[v] = cm
 	}
 	return out
 }
@@ -98,7 +131,7 @@ func resetFailCounts() {
 	failCountMu.Unlock()
 }
 
-// failStatsHandler GET /api/admin/fail-stats → 节点 × 失败原因二维计数。
+// failStatsHandler GET /api/admin/fail-stats → 厂商 × 失败原因二维计数。
 func failStatsHandler(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)

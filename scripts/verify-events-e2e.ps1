@@ -32,12 +32,14 @@ $cases = @(
      trigger = @{ method = 'POST'; path = '/api/accounts/1/disable'; body = $null };
      eventsApi = '/api/events?lines=20'; expect = 'account.disable' },
   @{ id = 'buddyhub'; dir = "$WorkRoot\phase5\buddyhub"; build = './cmd/pluginbuddy';
-     # credits/refresh 在 RefreshCredits 未注入时回 501 且不写事件；
-     # 这里只验证「API 可达」，写事件依赖真实注入。
-     trigger = $null; eventsApi = '/api/events?lines=10'; expect = ''; readOnly = $true },
+     # RefreshCredits 已在 cmd/pluginbuddy 注入；空池下调用写一条 credits.refresh。
+     trigger = @{ method = 'POST'; path = '/api/credits/refresh'; body = $null };
+     eventsApi = '/api/events?lines=20'; expect = 'credits.refresh' },
   @{ id = 'lobsterai'; dir = "$WorkRoot\phase5\lobsterai"; build = './cmd/server';
-     # /admin/refresh 需要 RefreshCredits 注入；未注入时 501。这里验证 API 可达。
-     trigger = $null; eventsApi = '/admin/events?lines=10'; expect = ''; readOnly = $true }
+     # /admin/refresh 已注入 RefreshCredits（cmd/server 传 sch.RunCheckinNow），
+     # 空池下调用仍会写一条 credits.refresh 事件。
+     trigger = @{ method = 'POST'; path = '/admin/refresh'; body = $null };
+     eventsApi = '/admin/events?lines=20'; expect = 'credits.refresh' }
 )
 
 $results = @()

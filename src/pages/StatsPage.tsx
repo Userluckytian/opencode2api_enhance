@@ -66,9 +66,9 @@ function Card({
   )
 }
 
-const FAIL_REASONS = ['429', '401', '503', 'connect', 'timeout', 'other'] as const
+const FAIL_REASONS = ['rate_limit', 'quota', 'auth', 'upstream', 'transport', 'timeout', 'other'] as const
 
-/** 失败原因分布卡片（阶段7：节点 × 原因，内存态·重启清零）；自轮询 5s */
+/** 失败原因分布卡片（厂商 × 错误类别，内存态·重启清零）；自轮询 5s */
 function FailStatsCard() {
   const [counts, setCounts] = useState<FailCounts>({})
   useEffect(() => {
@@ -91,14 +91,14 @@ function FailStatsCard() {
   const nodes = Object.keys(counts).sort()
   return (
     <div className="bg-white rounded-[16px] border border-zinc-200 shadow-sm p-5">
-      <div className="text-[13px] font-semibold text-zinc-800 mb-2">失败原因分布（节点 × 原因 · 内存态，重启清零）</div>
+      <div className="text-[13px] font-semibold text-zinc-800 mb-2">失败原因分布（厂商 × 错误类别 · 内存态，重启清零）</div>
       {nodes.length === 0 ? (
         <p className="text-[12px] text-zinc-400">暂无失败记录</p>
       ) : (
         <table className="w-full text-[13px]">
           <thead>
             <tr className="text-left text-[12px] text-zinc-500 border-b border-zinc-100">
-              <th className="py-2 pr-3 font-medium">节点</th>
+              <th className="py-2 pr-3 font-medium">厂商</th>
               {FAIL_REASONS.map((r) => (
                 <th key={r} className="py-2 pr-3 font-medium text-right">{r}</th>
               ))}
@@ -183,7 +183,7 @@ export default function StatsPage({
         else totals.fail++
         totals.pt += l.prompt_tokens || 0
         totals.ct += l.completion_tokens || 0
-        // 来源标注：空 = 统一网关；否则为独享实例名
+  // 来源标注：按调用日志里的来源名（当前为「供应商服务」）
         const src = (l.source || '').trim() || GATEWAY_DISPLAY
         const a = bySrc.get(src)
         if (a) {
@@ -304,7 +304,7 @@ export default function StatsPage({
     setRefreshing(false)
   }
 
-  // 重置全部统计：运行中的实例/网关走 HTTP 复位，未运行的覆写磁盘文件
+  // 重置全部统计：运行中的来源进程走 HTTP 复位，未运行的覆写磁盘文件
   const doReset = async (clearDeleted: boolean) => {
     setResetting(true)
     setShowResetConfirm(false)
@@ -331,8 +331,8 @@ export default function StatsPage({
   }
 
   // 报表导出（已移除：无使用场景）
-  const instances = stats?.instances ?? []
-  const isEmpty = !stats || instances.length === 0
+  const sources = stats?.sources ?? []
+  const isEmpty = !stats || sources.length === 0
 
   return (
     <div className="p-6 flex flex-col gap-5">
@@ -423,9 +423,7 @@ export default function StatsPage({
         )}
       </div>
       <p className="text-[11px] text-zinc-400">
-        全部日期 = 各日期之和（统一网关调用日志，含失败请求）；下方实例表为统计文件累计
-        （仅成功且有 usage 的记录，无时间维度），两者口径不同。历史流式记录（1.7.9 之前）可能缺少
-        usage，Token 合计会偏低，完整累计以下方实例表为准。
+            全部日期 = 各日期之和（调用日志，含失败请求）；下方来源表为统计文件累计
       </p>
 
       {/* 按天视图：请求量 / 成功率趋势条（纯 CSS 柱状，复用 Card 组件） */}
@@ -486,7 +484,7 @@ export default function StatsPage({
         </div>
       )}
 
-      {/* 实例表格：按天明细 or 累计实例表 */}
+      {/* 来源表格：按天明细 or 累计来源表 */}
       <div className="bg-white rounded-[16px] border border-zinc-200 shadow-sm p-5">
         {day && dayStats ? (
           <div className="space-y-5">
@@ -555,13 +553,13 @@ export default function StatsPage({
         {isEmpty && !error ? (
           <div className="py-12 flex flex-col items-center gap-2 text-zinc-400">
             <Inbox size={28} strokeWidth={1.5} />
-            <span className="text-[13px]">暂无统计数据，启动实例并产生对话后会自动记录</span>
+            <span className="text-[13px]">暂无统计数据，产生对话后会自动记录</span>
           </div>
         ) : (
           <table className="w-full text-[13px]">
             <thead>
               <tr className="text-left text-[12px] text-zinc-500 border-b border-zinc-100">
-                <th className="py-2 pr-3 font-medium">实例</th>
+                <th className="py-2 pr-3 font-medium">来源</th>
                 <th className="py-2 pr-3 font-medium text-right" title="统计文件累计：仅成功且有 usage 的请求">请求数</th>
                 <th className="py-2 pr-3 font-medium" title="来自调用日志（含失败请求），与请求数列口径不同">成功/失败（日志）</th>
                 <th className="py-2 pr-3 font-medium text-right">输入 Token</th>
@@ -571,9 +569,9 @@ export default function StatsPage({
               </tr>
             </thead>
             <tbody>
-              {instances.map((ins) => {
+              {sources.map((ins) => {
                 const open = expanded.has(ins.name)
-                const hasDetail = (ins.models?.length ?? 0) > 0 || (ins.nodes?.length ?? 0) > 0
+                const hasDetail = (ins.models?.length ?? 0) > 0
                 const of = insOkFail[ins.name]
                 const ok = of?.ok ?? 0
                 const fail = of?.fail ?? 0
@@ -643,35 +641,6 @@ export default function StatsPage({
                             </tbody>
                           </table>
 
-                          {ins.nodes && ins.nodes.length > 0 && (
-                            <>
-                              <div className="mt-3 mb-1 text-[12px] font-medium text-zinc-500">
-                                调用节点明细（经统一网关路由）
-                              </div>
-                              <table className="w-full text-[12px]">
-                                <thead>
-                                  <tr className="text-left text-zinc-400">
-                                    <th className="py-1.5 pr-3 font-medium">节点</th>
-                                    <th className="py-1.5 pr-3 font-medium text-right">请求数</th>
-                                    <th className="py-1.5 pr-3 font-medium text-right">输入</th>
-                                    <th className="py-1.5 pr-3 font-medium text-right">输出</th>
-                                    <th className="py-1.5 font-medium text-right">总计</th>
-                                  </tr>
-                                </thead>
-                                <tbody>
-                                  {ins.nodes.map((n) => (
-                                    <tr key={n.addr} className="border-b border-zinc-100/60">
-                                      <td className="py-1.5 pr-3 text-zinc-700">{n.name}</td>
-                                      <td className="py-1.5 pr-3 text-right tabular-nums text-zinc-500">{fmt(n.requests)}</td>
-                                      <td className="py-1.5 pr-3 text-right tabular-nums text-zinc-500">{fmt(n.prompt_tokens)}</td>
-                                      <td className="py-1.5 pr-3 text-right tabular-nums text-zinc-500">{fmt(n.completion_tokens)}</td>
-                                      <td className="py-1.5 text-right tabular-nums font-medium text-zinc-700">{fmt(n.total_tokens)}</td>
-                                    </tr>
-                                  ))}
-                                </tbody>
-                              </table>
-                            </>
-                          )}
                         </td>
                       </tr>
                     )}
@@ -683,7 +652,7 @@ export default function StatsPage({
         )}
         {!isEmpty && (
           <div className="mt-3 text-[11px] text-zinc-400">
-            每 5 秒自动刷新 · 实例表为统计文件累计口径（成功 usage）· 已删除实例的统计仍保留在历史区
+            每 5 秒自动刷新 · 来源表为统计文件累计口径（成功 usage）
           </div>
         )}
           </>
@@ -705,7 +674,7 @@ export default function StatsPage({
           >
             <div className="text-[15px] font-semibold text-zinc-900 mb-2">重置 Token 统计</div>
             <p className="text-[13px] text-zinc-600 leading-relaxed">
-              此操作将清空所有实例与统一网关的 Token 用量数据。
+        此操作将清空「供应商服务」的 Token 用量数据。
             </p>
             <label className="flex items-center gap-2 mt-4 cursor-pointer select-none">
               <input

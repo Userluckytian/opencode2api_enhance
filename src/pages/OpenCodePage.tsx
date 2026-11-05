@@ -3,6 +3,7 @@ import clsx from 'clsx'
 import {
   Copy,
   Key,
+  ListChecks,
   Loader2,
   Play,
   Power,
@@ -12,7 +13,29 @@ import {
   Waves,
   Zap,
 } from 'lucide-react'
-import { api, type FreeTierEngineStatus, type ConfigView } from '../lib/api'
+import { api, type FreeTierEngineStatus, type FreeTierModelsView, type ConfigView } from '../lib/api'
+
+/** 上下文档位：1048576 → 1M，200000 → 200K，0 → —。 */
+function fmtCtx(n?: number): string {
+  if (!n) return '—'
+  if (n >= 1048576) return `${Math.round(n / 1048576)}M`
+  if (n >= 1000) return `${Math.round(n / 1000)}K`
+  return String(n)
+}
+
+/** 相对时间：把 RFC3339 时间戳转成「3 分钟后 / 已过期 / —」。 */
+function fmtRelTime(ts?: string): string {
+  if (!ts) return '—'
+  const t = Date.parse(ts)
+  if (!Number.isFinite(t)) return '—'
+  const diff = t - Date.now()
+  if (diff <= 0) return '已到期'
+  const min = Math.round(diff / 60000)
+  if (min < 60) return `${min} 分钟后`
+  const hr = Math.round(min / 60)
+  if (hr < 24) return `${hr} 小时后`
+  return `${Math.round(hr / 24)} 天后`
+}
 
 /** 引擎状态徽章：ready / starting / failed / stopped。 */
 function stateBadge(state: string, running: boolean): [string, string] {
@@ -32,6 +55,10 @@ export default function OpenCodePage({ toast }: { toast: (msg: string, ok?: bool
   const [proxyDraft, setProxyDraft] = useState('')
   const [proxyDirty, setProxyDirty] = useState(false)
   const [savingProxy, setSavingProxy] = useState(false)
+
+  // 可用模型列表（合并引擎 /v1/models 与 availability 探测结果）
+  const [models, setModels] = useState<FreeTierModelsView | null>(null)
+  const [showAllModels, setShowAllModels] = useState(false)
 
   // 付费密钥草稿（zen = 免费层 v1 通道；go = Go 订阅通道）
   const [zenDraft, setZenDraft] = useState('')
@@ -58,8 +85,15 @@ export default function OpenCodePage({ toast }: { toast: (msg: string, ok?: bool
       const s = await api.freeTierEngineStatus()
       if (!aliveRef.current) return
       setStatus(s)
-    } catch (e) {
+    } catch {
       if (aliveRef.current) setStatus(null)
+    }
+    try {
+      const mv = await api.freeTierModels()
+      if (!aliveRef.current) return
+      setModels(mv)
+    } catch {
+      /* 引擎未启动时忽略 */
     }
     try {
       const c = await api.configGet()
@@ -309,6 +343,95 @@ export default function OpenCodePage({ toast }: { toast: (msg: string, ok?: bool
             <code className="mx-1 text-[11px]">{status?.bin_path || 'bin/opencode2api-win.exe'}</code>
             —— 请把 opencode2api-win 放入该目录后点「启动」。
           </div>
+        )}
+      </div>
+
+      {/* 可用模型 */}
+      <div className="bg-white rounded-2xl border border-zinc-200 shadow-sm p-5">
+        <div className="flex items-center gap-2 mb-3">
+          <ListChecks size={16} className="text-teal-600" />
+          <h3 className="text-[15px] font-semibold text-zinc-900">可用模型</h3>
+          <span className="flex-1" />
+          <span className="text-[12px] text-zinc-400">
+            {models ? `${models.shown} 可用 / 共 ${models.total}` : '—'}
+          </span>
+          <button
+            onClick={() => setShowAllModels((v) => !v)}
+            className="px-2.5 py-1 rounded-md text-[12px] text-zinc-600 hover:bg-zinc-100"
+          >
+            {showAllModels ? '只看可用' : '显示全部'}
+          </button>
+        </div>
+
+        {models?.error ? (
+          <div className="rounded-lg bg-zinc-50 border border-zinc-200 px-3 py-2 text-[12px] text-zinc-600">
+            {models.error}
+          </div>
+        ) : !models || models.models.length === 0 ? (
+          <div className="text-[12px] text-zinc-400">暂无模型数据（引擎未启动或目录尚未刷新）</div>
+        ) : (
+          <>
+            <div className="overflow-hidden rounded-xl border border-zinc-100">
+              <table className="w-full text-[12px]">
+                <thead className="bg-zinc-50 text-zinc-500">
+                  <tr>
+                    <th className="text-left font-medium px-3 py-2">模型</th>
+                    <th className="text-left font-medium px-3 py-2 w-20">状态</th>
+                    <th className="text-left font-medium px-3 py-2 w-24">通道</th>
+                    <th className="text-left font-medium px-3 py-2">最近结果</th>
+                    <th className="text-right font-medium px-3 py-2 w-20">上下文</th>
+                    <th className="text-left font-medium px-3 py-2 w-32">下次探测</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {(showAllModels ? models.models : models.models.filter((m) => m.available))
+                    .slice(0, 200)
+                    .map((m) => (
+                      <tr key={m.id} className="border-t border-zinc-100">
+                        <td className="px-3 py-1.5 font-mono text-zinc-800">{m.id}</td>
+                        <td className="px-3 py-1.5">
+                          <span
+                            className={clsx(
+                              'inline-flex px-1.5 py-0.5 rounded text-[11px] font-medium',
+                              m.available
+                                ? 'bg-green-50 text-green-700'
+                                : 'bg-zinc-100 text-zinc-500',
+                            )}
+                          >
+                            {m.available ? '可用' : '不可用'}
+                          </span>
+                        </td>
+                        <td className="px-3 py-1.5 text-zinc-500">{m.channel || '—'}</td>
+                        <td className="px-3 py-1.5">
+                          <span
+                            className={clsx(
+                              'font-mono text-[11px]',
+                              m.reason === 'probe_succeeded' ? 'text-green-700' : 'text-amber-700',
+                            )}
+                          >
+                            {m.reason || '未探测'}
+                          </span>
+                        </td>
+                        <td className="px-3 py-1.5 text-right tabular-nums text-zinc-500 text-[11px]">
+                          {fmtCtx(m.context_window)}
+                        </td>
+                        <td className="px-3 py-1.5 text-zinc-400 text-[11px]">
+                          {fmtRelTime(m.next_check)}
+                        </td>
+                      </tr>
+                    ))}
+                </tbody>
+              </table>
+            </div>
+            {models.models.length > 60 && (
+              <div className="mt-2 text-[11px] text-zinc-400">仅显示前 200 条（共 {models.total}）</div>
+            )}
+            {models.availability_source && (
+              <div className="mt-2 text-[10px] text-zinc-300 font-mono truncate" title={models.availability_source}>
+                数据源：{models.availability_source}
+              </div>
+            )}
+          </>
         )}
       </div>
 

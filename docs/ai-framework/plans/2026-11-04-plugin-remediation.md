@@ -277,6 +277,29 @@
 
 ---
 
+## 9.7 事件日志端到端（2026-11-05）
+
+脚本：`scripts/verify-events-e2e.ps1`（触发动作 → 读 API → 核对写盘）
+
+| 插件 | 触发 | 读回 | 落盘 |
+|---|---|---|---|
+| mmxproxy | `POST /v1/accounts/sync`（面板端口） | 200 events=1 | `data/events.jsonl` ✅ |
+| qw2api | `POST /api/accounts/refresh` | 200 events=1 | `data/events.jsonl` ✅ |
+| lobsterhub | `POST /api/accounts/1/disable`（预置 vault） | 200 events=1 | `data/events.jsonl` ✅ |
+| buddyhub | `POST /api/credits/refresh` | 200 events=1 | `data/events.jsonl` ✅ |
+| lobsterai | `POST /admin/refresh` | 200 events=1 | `data/events.jsonl` ✅ |
+
+**脚本迭代中修正的 4 个判断错误（都是"看起来通过其实没验证到"）：**
+
+1. MiniMax 的管理 API 在**面板端口**，不在契约端口 → 第一版 404；
+2. 事件 API 返回的是**已格式化的一行一条**数组，不是原始 JSON 对象 → 数 `"ts"` 恒为 0；
+3. LobsterHub 的 `disable` 必须先有账号才写事件 → 加 `seedVault` 预置 `vault.json`；
+4. BuddyHub/LobsterAI 的 `RefreshCredits` 其实**已注入** → 从 `readOnly` 改为真触发。
+
+**补的事件：** LobsterAI 的 `adminRefresh`/`adminRewards` 之前没写事件，已补 `credits.refresh`、`rewards.claim`。
+
+---
+
 ## 9. P5：UI + 动效
 
 - P5-A token（5）：QwenWork/Skywork/Grok/BuddyHub/LobsterAI/LobsterHub/LOOMy。

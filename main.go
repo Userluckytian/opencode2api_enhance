@@ -309,6 +309,12 @@ func freeTierEngineRestartHandler(m *manager.Manager) http.HandlerFunc {
 	}
 }
 
+func freeTierModelsHandler(m *manager.Manager) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		writeJSONResp(w, m.FreeTierModels(r.Context()))
+	}
+}
+
 func freeTierEngineConfigHandler(m *manager.Manager) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if err := m.WriteEngineConfig(); err != nil {
@@ -347,6 +353,8 @@ func registerHTTPRoutes(mux *http.ServeMux, managerInst *manager.Manager, plugin
 	mux.HandleFunc("/api/admin/call-log/clear", loggingMiddleware(requireAuth(managerInst.ClearCallLogHandler())))
 	mux.HandleFunc("/api/admin/call-log/filtered", loggingMiddleware(requireAuth(managerInst.CallLogFilteredHandler())))
 	mux.HandleFunc("/api/admin/call-log/aggregate", loggingMiddleware(requireAuth(managerInst.CallLogAggregateHandler())))
+	// 失败原因分布（厂商 × 错误类别 · 进程内存态，重启清零）
+	mux.HandleFunc("/api/admin/fail-stats", loggingMiddleware(requireAuth(failStatsHandler)))
 	mux.HandleFunc("/api/logs", loggingMiddleware(requireAuth(managerInst.LogsHandler())))
 	mux.HandleFunc("/api/admin/binaries", loggingMiddleware(apiKeyAuthMiddleware(managerInst.BinariesHandler())))
 	mux.HandleFunc("/api/admin/port/suggest", loggingMiddleware(requireAuth(managerInst.PortSuggestHandler())))
@@ -364,6 +372,14 @@ func registerHTTPRoutes(mux *http.ServeMux, managerInst *manager.Manager, plugin
 	mux.HandleFunc("/api/admin/free-tier/stop", loggingMiddleware(requireAuth(freeTierEngineStopHandler(managerInst))))
 	mux.HandleFunc("/api/admin/free-tier/restart", loggingMiddleware(requireAuth(freeTierEngineRestartHandler(managerInst))))
 	mux.HandleFunc("/api/admin/free-tier/config", loggingMiddleware(requireAuth(freeTierEngineConfigHandler(managerInst))))
+	// 免费层可用模型清单：合并引擎 /v1/models 与它自写的 availability 探测结果
+	mux.HandleFunc("/api/admin/free-tier/models", loggingMiddleware(requireAuth(freeTierModelsHandler(managerInst))))
+	// 手动探测：对引擎发一次最小请求，用真实状态码判定模型可用性
+	mux.HandleFunc("/api/admin/free-tier/probe", loggingMiddleware(requireAuth(modelProbeHandler(managerInst))))
+	// 诊断：三端口自检 + 配置/二进制检查
+	mux.HandleFunc("/api/admin/diag", loggingMiddleware(requireAuth(diagHandler(managerInst))))
+	// 失败聚合：从调用日志现算「厂商 × 错误码」
+	mux.HandleFunc("/api/admin/fail-aggregate", loggingMiddleware(requireAuth(failAggregateHandler())))
 
 	// 自定义模型源
 	mux.HandleFunc("/api/admin/custom-providers", loggingMiddleware(requireAuth(customProvidersHandler())))
