@@ -310,11 +310,17 @@ export type ConfigView = {
   engine_go_key_count: number
   engine_retry_max_attempts: number
   engine_models_refresh_sec: number
+  /** 只暴露/路由免费模型（写引擎 models.free_only；默认 true） */
+  engine_free_only: boolean
 }
 
 /** 免费层单个模型的可用性视图（v2.1） */
 export type FreeTierModel = {
   id: string
+  /** 引擎口径下是否免费（ID 含 free，或元数据声明 input/output 成本均为 0 且未废弃） */
+  free: boolean
+  /** 元数据标记为已废弃/下线 */
+  deprecated?: boolean
   /** 当前是否对外暴露（在引擎 /v1/models 里） */
   available: boolean
   /** 探测通道：anonymous / zen / go */
@@ -333,7 +339,14 @@ export type FreeTierModelsView = {
   models: FreeTierModel[]
   total: number
   shown: number
-  /** availability 文件路径（排障用） */
+  /** 面板当前是否开启「只使用免费模型」（引擎 models.free_only） */
+  free_only: boolean
+  /** 判定为免费的模型数 */
+  free_total: number
+  /** 免费且对外暴露的数量 */
+  free_shown: number
+  /** catalog / availability 文件路径（排障用） */
+  catalog_source?: string
   availability_source?: string
   error?: string
 }
@@ -379,6 +392,87 @@ export type FailAggregate = {
   buckets: FailBucket[]
   total_fails: number
   scanned: number
+}
+
+/** 调用指标：总体概览（v2.0.0 增补） */
+export type MetricSummary = {
+  days: number
+  requests: number
+  ok: number
+  fail: number
+  canceled: number
+  /** 成功率 0~1 */
+  ok_rate: number
+  avg_ms: number
+  p50_ms: number
+  p95_ms: number
+  prompt_tokens: number
+  completion_tokens: number
+  /** 触发 session 轮换的请求数 */
+  rotated: number
+  models: number
+  keys: number
+  sources?: Record<string, number>
+  error_classes?: Record<string, number>
+  first_ts?: string
+  last_ts?: string
+}
+
+/** 调用指标：矩阵中的一格（模型 × 通道 × 密钥） */
+export type MetricMatrixCell = {
+  model: string
+  channel: string
+  key_id: string
+  requests: number
+  ok: number
+  fail: number
+  canceled: number
+  ok_rate: number
+  avg_ms: number
+  p95_ms: number
+  top_reason?: string
+  rotated: number
+  last_ts?: string
+}
+
+export type MetricMatrix = {
+  days: number
+  cells: MetricMatrixCell[]
+  models: string[]
+  channels: string[]
+  keys: string[]
+}
+
+/** 调用指标：单密钥健康度 */
+export type MetricKeyStat = {
+  key_id: string
+  channel?: string
+  requests: number
+  ok_rate: number
+  avg_ms: number
+  fail_reasons?: Record<string, number>
+  rotated: number
+  models: number
+  first_ts?: string
+  last_ts?: string
+}
+
+export type MetricKeyStats = {
+  days: number
+  keys: MetricKeyStat[]
+}
+
+/** 调用指标：一条优化建议 */
+export type MetricSuggestion = {
+  /** info | warn | action */
+  level: string
+  text: string
+  detail?: string
+}
+
+export type MetricSuggestions = {
+  days: number
+  suggestions: MetricSuggestion[]
 }
 
 /** 免费层引擎（40080）状态 */
@@ -912,6 +1006,10 @@ export const api = {
   freeTierEngineStart: () => req<FreeTierEngineStatus>('POST', '/free-tier/start'),
   freeTierEngineStop: () => req<FreeTierEngineStatus>('POST', '/free-tier/stop'),
   freeTierEngineRestart: () => req<FreeTierEngineStatus>('POST', '/free-tier/restart'),
+  // 异步重启：写完配置立刻返回，引擎在后台重启（WARP 首次注册最长 95s，
+  // 同步等会让切换「只使用免费模型」的按钮转圈一分半）。前端靠状态轮询收尾。
+  freeTierEngineRestartAsync: () =>
+    req<FreeTierEngineStatus>('POST', '/free-tier/restart', undefined, { async: 1 }),
   freeTierEngineWriteConfig: () =>
     req<{ status: string; path: string }>('POST', '/free-tier/config'),
   freeTierModels: () => req<FreeTierModelsView>('GET', '/free-tier/models'),
@@ -920,6 +1018,15 @@ export const api = {
   diag: () => req<DiagReport>('GET', '/diag'),
   failAggregate: (limit?: number) =>
     req<FailAggregate>('GET', '/fail-aggregate', undefined, { limit: limit ?? undefined }),
+  // 调用指标分析（v2.0.0 增补）：只读，数据来自本机 runtime/call-metrics
+  metricSummary: (days = 7) =>
+    req<MetricSummary>('GET', '/call-metrics/summary', undefined, { days }),
+  metricMatrix: (days = 7) =>
+    req<MetricMatrix>('GET', '/call-metrics/matrix', undefined, { days }),
+  metricKeys: (days = 7) =>
+    req<MetricKeyStats>('GET', '/call-metrics/keys', undefined, { days }),
+  metricSuggestions: (days = 7) =>
+    req<MetricSuggestions>('GET', '/call-metrics/suggestions', undefined, { days }),
   autoModelGet: () => req<AutoModelConfig>('GET', '/auto-model'),
   autoModelSave: (cfg: AutoModelConfig) => req<{ status: string; config: AutoModelConfig }>('POST', '/auto-model', cfg),
 

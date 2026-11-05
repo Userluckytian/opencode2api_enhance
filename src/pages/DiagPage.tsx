@@ -10,6 +10,9 @@ import {
   Stethoscope,
   XCircle,
   Zap,
+  BarChart3,
+  Lightbulb,
+  KeyRound,
 } from 'lucide-react'
 import {
   api,
@@ -17,6 +20,10 @@ import {
   type FailAggregate,
   type FreeTierEngineStatus,
   type ModelProbeResult,
+  type MetricSummary,
+  type MetricMatrix,
+  type MetricKeyStats,
+  type MetricSuggestions,
 } from '../lib/api'
 
 /** 状态码 → 颜色：2xx 绿、4xx 橙、5xx 红。 */
@@ -57,6 +64,16 @@ export default function DiagPage({
   const [probingModel, setProbingModel] = useState('')
   const [growing, setGrowing] = useState<number | null>(null)
 
+  // 调用分析（v2.0.0 增补）：只读指标，按窗口天数各自加载
+  const [metricDays, setMetricDays] = useState(7)
+  const [metricSummary, setMetricSummary] = useState<MetricSummary | null>(null)
+  const [metricMatrix, setMetricMatrix] = useState<MetricMatrix | null>(null)
+  const [metricKeys, setMetricKeys] = useState<MetricKeyStats | null>(null)
+  const [metricSuggestions, setMetricSuggestions] = useState<MetricSuggestions | null>(null)
+  const [metricLoading, setMetricLoading] = useState(true)
+  // 矩阵排序：点击表头切换
+  const [matrixSort, setMatrixSort] = useState<'requests' | 'ok_rate' | 'avg_ms'>('requests')
+
   const aliveRef = useRef(true)
   useEffect(() => {
     aliveRef.current = true
@@ -81,6 +98,31 @@ export default function DiagPage({
       if (aliveRef.current) setLoading(false)
     }
   }, [])
+
+  // loadMetrics 拉四个指标视图。与 reload 分开：指标数据是磁盘现算、
+  // 比自检慢，不适合跟着 15s 轮询；只在窗口切换或手动刷新时拉一次。
+  const loadMetrics = useCallback(async (days: number) => {
+    setMetricLoading(true)
+    try {
+      const [sum, mat, keys, sug] = await Promise.all([
+        api.metricSummary(days).catch(() => null),
+        api.metricMatrix(days).catch(() => null),
+        api.metricKeys(days).catch(() => null),
+        api.metricSuggestions(days).catch(() => null),
+      ])
+      if (!aliveRef.current) return
+      setMetricSummary(sum)
+      setMetricMatrix(mat)
+      setMetricKeys(keys)
+      setMetricSuggestions(sug)
+    } finally {
+      if (aliveRef.current) setMetricLoading(false)
+    }
+  }, [])
+
+  useEffect(() => {
+    void loadMetrics(metricDays)
+  }, [metricDays, loadMetrics])
 
   useEffect(() => {
     void reload()
@@ -408,6 +450,307 @@ export default function DiagPage({
           </div>
         )}
       </div>
+
+      {/* 调用分析（v2.0.0 增补）：模型 × 通道 × 密钥 的成功率与耗时矩阵 */}
+      <div className="bg-white rounded-2xl border border-zinc-200 shadow-sm p-5">
+        <div className="flex flex-wrap items-center gap-2 mb-3">
+          <BarChart3 size={16} className="text-indigo-600" />
+          <h3 className="text-[15px] font-semibold text-zinc-900">调用分析</h3>
+          <span className="flex-1" />
+          {metricLoading && <Loader2 size={13} className="animate-spin text-zinc-400" />}
+          <div className="inline-flex rounded-lg border border-zinc-200 overflow-hidden text-[12px]">
+            {[1, 7, 30].map((d) => (
+              <button
+                key={d}
+                onClick={() => setMetricDays(d)}
+                className={clsx(
+                  'px-2.5 py-1 transition-colors',
+                  metricDays === d
+                    ? 'bg-indigo-600 text-white'
+                    : 'bg-white text-zinc-600 hover:bg-zinc-50',
+                )}
+              >
+                {d === 1 ? '今天' : `${d} 天`}
+              </button>
+            ))}
+          </div>
+          <button
+            onClick={() => void loadMetrics(metricDays)}
+            className="px-2 py-1 rounded-md text-[12px] text-zinc-600 hover:bg-zinc-100"
+            title="重新读取指标文件"
+          >
+            刷新
+          </button>
+        </div>
+
+        {/* 总览 */}
+        <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 mb-4">
+          <MetricStat
+            label="请求数"
+            value={metricSummary ? String(metricSummary.requests) : '—'}
+            sub={metricSummary && metricSummary.requests > 0 ? `${metricSummary.models} 个模型 / ${metricSummary.keys} 个密钥` : undefined}
+          />
+          <MetricStat
+            label="成功率"
+            value={metricSummary && metricSummary.requests > 0 ? `${(metricSummary.ok_rate * 100).toFixed(0)}%` : '—'}
+            tone={metricSummary && metricSummary.requests > 0 ? (metricSummary.ok_rate >= 0.9 ? 'good' : metricSummary.ok_rate >= 0.6 ? 'warn' : 'bad') : undefined}
+            sub={metricSummary && metricSummary.requests > 0 ? `成功 ${metricSummary.ok} / 失败 ${metricSummary.fail} / 取消 ${metricSummary.canceled}` : undefined}
+          />
+          <MetricStat
+            label="P95 耗时"
+            value={metricSummary && metricSummary.p95_ms > 0 ? fmtDur2(metricSummary.p95_ms) : '—'}
+            sub={metricSummary && metricSummary.p50_ms > 0 ? `P50 ${fmtDur2(metricSummary.p50_ms)} · 均值 ${fmtDur2(metricSummary.avg_ms)}` : undefined}
+          />
+          <MetricStat
+            label="Session 轮换"
+            value={metricSummary ? String(metricSummary.rotated) : '—'}
+            tone={metricSummary && metricSummary.requests > 0 && metricSummary.rotated / metricSummary.requests > 0.3 ? 'warn' : undefined}
+            sub={metricSummary && metricSummary.requests > 0 ? `占 ${((metricSummary.rotated / metricSummary.requests) * 100).toFixed(0)}%（轮换多说明额度消耗快）` : undefined}
+          />
+        </div>
+
+        {/* 优化建议 */}
+        <div className="mb-4">
+          <div className="flex items-center gap-1.5 mb-2">
+            <Lightbulb size={13} className="text-amber-500" />
+            <span className="text-[12px] font-medium text-zinc-700">优化建议</span>
+          </div>
+          {!metricSuggestions || metricSuggestions.suggestions.length === 0 ? (
+            <div className="text-[12px] text-zinc-400">暂无建议。</div>
+          ) : (
+            <div className="space-y-1.5">
+              {metricSuggestions.suggestions.map((g, i) => (
+                <div
+                  key={i}
+                  className={clsx(
+                    'rounded-lg border px-3 py-2 text-[12px]',
+                    g.level === 'action'
+                      ? 'bg-red-50 border-red-200 text-red-900'
+                      : g.level === 'warn'
+                        ? 'bg-amber-50 border-amber-200 text-amber-900'
+                        : 'bg-zinc-50 border-zinc-200 text-zinc-700',
+                  )}
+                >
+                  <div>{g.text}</div>
+                  {g.detail && <div className="mt-0.5 text-[11px] opacity-70">{g.detail}</div>}
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+
+        {/* 矩阵 */}
+        <div className="mb-4">
+          <div className="text-[12px] font-medium text-zinc-700 mb-2">模型 × 通道 × 密钥</div>
+          {!metricMatrix || metricMatrix.cells.length === 0 ? (
+            <div className="text-[12px] text-zinc-400">
+              暂无调用记录。指标随每次调用产生；先用一次模型再回来看。
+            </div>
+          ) : (
+            <div className="overflow-hidden rounded-xl border border-zinc-100">
+              <table className="w-full text-[12px]">
+                <thead className="bg-zinc-50 text-zinc-500">
+                  <tr>
+                    <th className="text-left font-medium px-3 py-2">模型</th>
+                    <th className="text-left font-medium px-3 py-2 w-24">通道</th>
+                    <th className="text-left font-medium px-3 py-2 w-28">密钥</th>
+                    {([['requests', '请求'], ['ok_rate', '成功率'], ['avg_ms', '平均耗时']] as const).map(([k, label]) => (
+                      <th
+                        key={k}
+                        onClick={() => setMatrixSort(k)}
+                        className={clsx(
+                          'font-medium px-3 py-2 cursor-pointer select-none text-right',
+                          matrixSort === k ? 'text-indigo-600' : 'hover:text-zinc-700',
+                        )}
+                        title="点击按此列排序"
+                      >
+                        {label}
+                        {matrixSort === k ? ' ↓' : ''}
+                      </th>
+                    ))}
+                    <th className="text-left font-medium px-3 py-2">主要失败原因</th>
+                    <th className="text-right font-medium px-3 py-2 w-20">轮换</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {[...metricMatrix.cells]
+                    .sort((a, b) => {
+                      if (matrixSort === 'ok_rate') return a.ok_rate - b.ok_rate
+                      if (matrixSort === 'avg_ms') return b.avg_ms - a.avg_ms
+                      return b.requests - a.requests
+                    })
+                    .slice(0, 60)
+                    .map((c) => (
+                      <tr key={`${c.model}|${c.channel}|${c.key_id}`} className="border-t border-zinc-100">
+                        <td className="px-3 py-1.5 font-mono text-zinc-800">{c.model}</td>
+                        <td className="px-3 py-1.5">
+                          <span
+                            className={clsx(
+                              'px-1.5 py-0.5 rounded text-[11px]',
+                              c.channel === 'key'
+                                ? 'bg-teal-50 text-teal-700'
+                                : 'bg-zinc-100 text-zinc-600',
+                            )}
+                          >
+                            {c.channel === 'key' ? '密钥' : c.channel === 'anonymous' ? '匿名' : c.channel}
+                          </span>
+                        </td>
+                        <td className="px-3 py-1.5 font-mono text-zinc-500 text-[11px]">{c.key_id}</td>
+                        <td className="px-3 py-1.5 text-right tabular-nums text-zinc-700">{c.requests}</td>
+                        <td className="px-3 py-1.5 text-right">
+                          <span
+                            className={clsx(
+                              'px-1.5 py-0.5 rounded tabular-nums font-medium text-[11px]',
+                              c.ok_rate >= 0.9
+                                ? 'bg-green-50 text-green-700'
+                                : c.ok_rate >= 0.6
+                                  ? 'bg-amber-50 text-amber-700'
+                                  : 'bg-red-50 text-red-700',
+                            )}
+                          >
+                            {(c.ok_rate * 100).toFixed(0)}%
+                          </span>
+                        </td>
+                        <td className="px-3 py-1.5 text-right tabular-nums text-zinc-600">
+                          {fmtDur2(c.avg_ms)}
+                        </td>
+                        <td className="px-3 py-1.5">
+                          {c.top_reason ? (
+                            <span className="px-1.5 py-0.5 rounded bg-amber-50 text-amber-700 text-[11px] font-mono">
+                              {c.top_reason}
+                            </span>
+                          ) : (
+                            <span className="text-zinc-300">—</span>
+                          )}
+                        </td>
+                        <td className="px-3 py-1.5 text-right tabular-nums text-zinc-500">
+                          {c.rotated > 0 ? c.rotated : '—'}
+                        </td>
+                      </tr>
+                    ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+          {metricMatrix && metricMatrix.cells.length > 60 && (
+            <div className="mt-1.5 text-[11px] text-zinc-400">
+              仅显示前 60 行（共 {metricMatrix.cells.length} 个组合）
+            </div>
+          )}
+        </div>
+
+        {/* 密钥健康度 */}
+        <div>
+          <div className="flex items-center gap-1.5 mb-2">
+            <KeyRound size={13} className="text-teal-600" />
+            <span className="text-[12px] font-medium text-zinc-700">密钥健康度</span>
+          </div>
+          {!metricKeys || metricKeys.keys.length === 0 ? (
+            <div className="text-[12px] text-zinc-400">暂无密钥调用记录。</div>
+          ) : (
+            <div className="overflow-hidden rounded-xl border border-zinc-100">
+              <table className="w-full text-[12px]">
+                <thead className="bg-zinc-50 text-zinc-500">
+                  <tr>
+                    <th className="text-left font-medium px-3 py-2">密钥</th>
+                    <th className="text-left font-medium px-3 py-2 w-20">通道</th>
+                    <th className="text-right font-medium px-3 py-2 w-20">请求</th>
+                    <th className="text-right font-medium px-3 py-2 w-24">成功率</th>
+                    <th className="text-right font-medium px-3 py-2 w-28">平均耗时</th>
+                    <th className="text-right font-medium px-3 py-2 w-20">模型数</th>
+                    <th className="text-right font-medium px-3 py-2 w-20">轮换</th>
+                    <th className="text-left font-medium px-3 py-2">失败原因</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {metricKeys.keys.map((k) => (
+                    <tr key={k.key_id} className="border-t border-zinc-100">
+                      <td className="px-3 py-1.5 font-mono text-zinc-800">{k.key_id}</td>
+                      <td className="px-3 py-1.5 text-zinc-500 text-[11px]">
+                        {k.channel === 'key' ? '密钥' : k.channel === 'anonymous' ? '匿名' : k.channel || '—'}
+                      </td>
+                      <td className="px-3 py-1.5 text-right tabular-nums text-zinc-700">{k.requests}</td>
+                      <td className="px-3 py-1.5 text-right">
+                        <span
+                          className={clsx(
+                            'px-1.5 py-0.5 rounded tabular-nums font-medium text-[11px]',
+                            k.ok_rate >= 0.9
+                              ? 'bg-green-50 text-green-700'
+                              : k.ok_rate >= 0.6
+                                ? 'bg-amber-50 text-amber-700'
+                                : 'bg-red-50 text-red-700',
+                          )}
+                        >
+                          {(k.ok_rate * 100).toFixed(0)}%
+                        </span>
+                      </td>
+                      <td className="px-3 py-1.5 text-right tabular-nums text-zinc-600">{fmtDur2(k.avg_ms)}</td>
+                      <td className="px-3 py-1.5 text-right tabular-nums text-zinc-500">{k.models}</td>
+                      <td className="px-3 py-1.5 text-right tabular-nums text-zinc-500">
+                        {k.rotated > 0 ? k.rotated : '—'}
+                      </td>
+                      <td className="px-3 py-1.5 text-[11px] font-mono text-amber-700">
+                        {k.fail_reasons
+                          ? Object.entries(k.fail_reasons)
+                              .sort((a, b) => b[1] - a[1])
+                              .map(([r, n]) => `${r}×${n}`)
+                              .join(' ')
+                          : '—'}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </div>
+
+        <div className="mt-3 text-[11px] text-zinc-400">
+          数据来自本机 <code>runtime/call-metrics/</code>，按天滚动、保留 30 天，不上传任何服务器。
+          「出口」维度不可用：引擎的 <code>egress</code> / <code>exit_id</code> 字段实测恒为空。
+        </div>
+      </div>
+    </div>
+  )
+}
+
+/** fmtDur2 毫秒 → 人读耗时（接受小数毫秒，因为 avg_ms 是浮点）。 */
+function fmtDur2(ms: number): string {
+  if (!ms || ms <= 0) return '—'
+  if (ms < 1000) return `${Math.round(ms)}ms`
+  return `${(ms / 1000).toFixed(1)}s`
+}
+
+/** MetricStat 调用分析的数字卡（带副标题与着色）。 */
+function MetricStat({
+  label,
+  value,
+  sub,
+  tone,
+}: {
+  label: string
+  value: string
+  sub?: string
+  tone?: 'good' | 'warn' | 'bad'
+}) {
+  return (
+    <div className="rounded-xl border border-zinc-100 bg-zinc-50/60 p-3">
+      <div className="text-[11px] text-zinc-500">{label}</div>
+      <div
+        className={clsx(
+          'mt-0.5 text-[19px] font-semibold tabular-nums',
+          tone === 'good'
+            ? 'text-green-700'
+            : tone === 'warn'
+              ? 'text-amber-700'
+              : tone === 'bad'
+                ? 'text-red-700'
+                : 'text-zinc-900',
+        )}
+      >
+        {value}
+      </div>
+      {sub && <div className="mt-0.5 text-[10px] text-zinc-400 leading-tight">{sub}</div>}
     </div>
   )
 }

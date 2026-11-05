@@ -158,6 +158,10 @@ func main() {
 	}()
 	go managerInst.WatchdogFreeTierEngine(engineRunner)
 
+	// 调用指标采集：增量消费引擎 stdout，把 request_routed 落成分析用的指标行。
+	// 与看门狗一样常驻；指标是旁路，采不到只记 warn，不影响推理。
+	go watchCallMetrics(managerInst)
+
 	mux := http.NewServeMux()
 	registerHTTPRoutes(mux, managerInst, nil, providerSvc)
 
@@ -384,6 +388,12 @@ func registerHTTPRoutes(mux *http.ServeMux, managerInst *manager.Manager, plugin
 	mux.HandleFunc("/api/admin/diag", loggingMiddleware(requireAuth(diagHandler(managerInst))))
 	// 失败聚合：从调用日志现算「厂商 × 错误码」
 	mux.HandleFunc("/api/admin/fail-aggregate", loggingMiddleware(requireAuth(failAggregateHandler(managerInst))))
+
+	// 调用指标分析（v2.0.0 增补）：只读，数据来自 <runtime>/call-metrics/*.jsonl
+	mux.HandleFunc("/api/admin/call-metrics/summary", loggingMiddleware(requireAuth(callMetricSummaryHandler(managerInst))))
+	mux.HandleFunc("/api/admin/call-metrics/matrix", loggingMiddleware(requireAuth(callMetricMatrixHandler(managerInst))))
+	mux.HandleFunc("/api/admin/call-metrics/keys", loggingMiddleware(requireAuth(callMetricKeysHandler(managerInst))))
+	mux.HandleFunc("/api/admin/call-metrics/suggestions", loggingMiddleware(requireAuth(callMetricSuggestionsHandler(managerInst))))
 
 	// 自定义模型源
 	mux.HandleFunc("/api/admin/custom-providers", loggingMiddleware(requireAuth(customProvidersHandler())))
