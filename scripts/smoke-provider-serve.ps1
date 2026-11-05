@@ -80,7 +80,7 @@ foreach ($p in $plugins) {
   $out = Join-Path $run 'stdout.txt'
   $err = Join-Path $run 'stderr.txt'
   $proc = Start-Process -FilePath $exe -ArgumentList '--provider-serve', '--port', '0' -WorkingDirectory $run `
-    -RedirectStandardOutput $out -RedirectStandardError $err -PassThru
+    -WindowStyle Hidden -RedirectStandardOutput $out -RedirectStandardError $err -PassThru
   Start-Sleep -Seconds 5
 
   $ready = '-'; $models = '-'; $auth = '-'; $dataDir = '-'; $note = ''

@@ -73,7 +73,7 @@ foreach ($c in $cases) {
   $env:PLUGIN_AUTH_TOKEN = 'ev-token'
   $out = Join-Path $run 'stdout.txt'
   $proc = Start-Process -FilePath $exe -ArgumentList '--provider-serve', '--port', '0' -WorkingDirectory $run `
-    -RedirectStandardOutput $out -RedirectStandardError (Join-Path $run 'stderr.txt') -PassThru
+    -WindowStyle Hidden -RedirectStandardOutput $out -RedirectStandardError (Join-Path $run 'stderr.txt') -PassThru
   Start-Sleep -Seconds 5
 
   $ready = '-'; $trig = '-'; $read = '-'; $note = ''
