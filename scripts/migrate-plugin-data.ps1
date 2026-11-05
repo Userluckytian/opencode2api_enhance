@@ -38,14 +38,18 @@ function Fail([string]$text) { throw "[migrate] $text" }
 if (-not (Test-Path -LiteralPath $ProvidersRoot)) { Fail "providers 根目录不存在: $ProvidersRoot" }
 
 # 1) 真执行时必须已停止（DryRun 只读，不要求停）
-$running = Get-Process -ErrorAction SilentlyContinue | Where-Object {
-  $_.ProcessName -in @('lobsterai2api', 'lobsterhub', 'mmxproxy-provider')
-}
+# 关键：只认「目标 providers 目录下」的进程。按进程名判断会误伤本机其它副本
+# （例如 opencode2api_enhance\bin\providers 里的开发实例），导致明明停了却报"仍在运行"。
+$running = @(Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | Where-Object {
+  $_.ExecutablePath -and
+  $_.ExecutablePath.StartsWith($ProvidersRoot, [StringComparison]::OrdinalIgnoreCase) -and
+  $_.Name -in @('lobsterai2api.exe', 'lobsterhub.exe', 'mmxproxy-provider.exe')
+})
 if ($Execute -and $running -and -not $SkipProcessCheck) {
-  Fail ("请先在宿主面板停用相关插件（检测到进程: {0}）" -f (($running | Select-Object -ExpandProperty ProcessName) -join ', '))
+  Fail ("请先在宿主面板停用相关插件（检测到进程: {0}）" -f (($running | Select-Object -ExpandProperty Name) -join ', '))
 }
 if (-not $Execute -and $running) {
-  Write-Host ("[DRY ] 注意：检测到运行中进程 {0}；真执行前需先停用插件。" -f (($running | Select-Object -ExpandProperty ProcessName) -join ', '))
+  Write-Host ("[DRY ] 注意：检测到运行中进程 {0}；真执行前需先停用插件。" -f (($running | Select-Object -ExpandProperty Name) -join ', '))
 }
 
 function Move-WithBackup([string]$src, [string]$dst) {
