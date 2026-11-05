@@ -563,8 +563,20 @@ func applyCustomProvidersSave(m *manager.Manager, inputs []customProviderInput) 
 	)
 	applyConfig(cfg)
 	rebuildVendors()
-	// 重建不再自动刷目录（防自激循环），这里显式刷一次让面板立即看到新模型。
-	refreshModelCatalog()
+	// 重建不再自动刷目录（防自激循环）。这里**异步**刷一次：
+	//
+	// 早先是同步调用，而 refreshModelCatalog 会持 catalogRefreshMu 逐个厂商
+	// 拉目录（超时 60s）。用户点一个 switch 就要等它跑完才返回，多个供应商
+	// 连续启停只能排队 —— 表现为「启动一个要好久才能点另一个」。
+	// 目录刷新只影响面板展示，不是启停的前置条件，放后台即可。
+	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				slog.Error("async model catalog refresh panic", "panic", r)
+			}
+		}()
+		refreshModelCatalog()
+	}()
 
 	// manager 配置透传：供应商服务与主进程共用同一 config.json，custom 保存后
 	// 50080 经配置监视热重建（不再向实例/网关 runtime 配置传播，见 2026-10 拆分）。

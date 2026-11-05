@@ -169,7 +169,25 @@ export default function CustomModelsPage({ toast }: { toast: (msg: string, ok?: 
   const [clearing, setClearing] = useState(false)
   const [resetKeysId, setResetKeysId] = useState<string | null>(null)
   // 启停乐观更新：点击立即翻转本地开关并显示行内 spinner，失败回滚（问题 3②）
-  const [togglingId, setTogglingId] = useState<string | null>(null)
+  // 启停乐观更新：点击立即翻转本地开关并显示行内 spinner，失败回滚（问题 3②）
+  //
+  // 用 Set 而不是单个 string：早先 `if (togglingId) return` 让所有 switch 互斥，
+  // 一个供应商还在启停时其它行的开关点了没反应。实际上后端每个 custom 源是
+  // 独立配置项、插件每个也有自己的 toggleMu，彼此不冲突，没必要前端串行。
+  const [togglingIds, setTogglingIds] = useState<Set<string>>(() => new Set())
+  // listRef / togglingIdsRef：串行保存队列里要读**当下最新**的值，不能闭包捕获旧 state。
+  const listRef = useRef<CustomProviderView[] | null>(null)
+  const togglingIdsRef = useRef<Set<string>>(new Set())
+  // saveQueueRef 让整表保存串行（后端 save 是整表替换，并发会互相覆盖）
+  const saveQueueRef = useRef<Promise<void>>(Promise.resolve())
+
+  // 每次渲染同步镜像到 ref，供异步回调读取最新值。
+  useEffect(() => {
+    listRef.current = list
+  }, [list])
+  useEffect(() => {
+    togglingIdsRef.current = togglingIds
+  }, [togglingIds])
   // 供应商服务（自定义源 + 插件供应商的独立入口，默认 50080）
   const [provSvc, setProvSvc] = useState<ProviderServiceStatus | null>(null)
   const [provBusy, setProvBusy] = useState(false)
@@ -184,7 +202,13 @@ export default function CustomModelsPage({ toast }: { toast: (msg: string, ok?: 
   const [pluginConfirmDelete, setPluginConfirmDelete] = useState<string | null>(null)
   const [pluginBusy, setPluginBusy] = useState(false)
   // 插件启停行内反馈：仅当前行显示 spinner（问题 3② 同款）
-  const [pluginTogglingId, setPluginTogglingId] = useState<string | null>(null)
+  //
+  // 同样是 Set：不同插件走的是不同子进程、后端各持 p.toggleMu，可以并行启停。
+  const [pluginTogglingIds, setPluginTogglingIds] = useState<Set<string>>(() => new Set())
+  const pluginTogglingIdsRef = useRef<Set<string>>(new Set())
+  useEffect(() => {
+    pluginTogglingIdsRef.current = pluginTogglingIds
+  }, [pluginTogglingIds])
   const [modelSearch, setModelSearch] = useState('')
   const [modelRefreshBusy, setModelRefreshBusy] = useState(false)
   // 启停/保存后子进程状态异步推进（starting→running/need_config），延迟刷新让状态落定
@@ -475,17 +499,40 @@ export default function CustomModelsPage({ toast }: { toast: (msg: string, ok?: 
     await saveAll(toInputs((list ?? []).filter((p) => p.id !== id)), `已删除 ${id}`)
   }
 
-  // 启停（问题 3②）：乐观更新——点击立即翻转本地开关并显示行内 spinner，
-  // 失败回滚；后端整表保存成功后以服务端视图为准（避免并发点击互相覆盖）。
+  // 启停（问题 3②）：乐观更新——点击立即翻转本地开关并显示行内 spinner，失败回滚。
+  //
+  // 并发：后端 /custom-providers/save 是**整表**保存，两个请求并发会互相覆盖。
+  // 所以拆成两层——
+  //   · 界面层：按行独立忙态（togglingIds 是 Set），点 A 之后立刻能点 B；
+  //   · 落盘层：saveQueueRef 串行化，每次保存都基于最新本地列表重算，
+  //     后一次自然带上前一次改动，不会丢。
+  //
+  // 早先是 `if (togglingId) return` + 全局单态，A 没存完 B 的开关点了没反应；
+  // 而一次保存又要等后端同步拉完厂商目录（最长 60s），体验就是「卡死」。
   const toggleEnabled = async (p: CustomProviderView) => {
-    if (togglingId) return
+    if (togglingIdsRef.current.has(p.id)) return
     const nextEnabled = !p.enabled
-    const nextList = (list ?? []).map((x) => (x.id === p.id ? { ...x, enabled: nextEnabled } : x))
-    setList(nextList)
-    setTogglingId(p.id)
+    // 乐观更新：只改这一行
+    setList((prev) => prev?.map((x) => (x.id === p.id ? { ...x, enabled: nextEnabled } : x)) ?? null)
+    setTogglingIds((prev) => new Set(prev).add(p.id))
     try {
-      const r = await api.customProvidersSave(toInputs(nextList))
-      setList(r.providers ?? [])
+      // 串行入队：等前一次保存结束，再用当时最新的 list 重算整表
+      const run = saveQueueRef.current.then(async () => {
+        const withChange = (listRef.current ?? []).map((x) =>
+          x.id === p.id ? { ...x, enabled: nextEnabled } : x,
+        )
+        const r = await api.customProvidersSave(toInputs(withChange))
+        // 服务端视图覆盖本地；仍处于忙态的行保留本地乐观值（等它自己那轮保存回来）
+        setList((prev) => {
+          const serverById = new Map((r.providers ?? []).map((v) => [v.id, v]))
+          return (prev ?? []).map((x) => {
+            const s = serverById.get(x.id)
+            return s && !togglingIdsRef.current.has(x.id) ? s : x
+          })
+        })
+      })
+      saveQueueRef.current = run.catch(() => {})
+      await run
       toast(
         nextEnabled
           ? `已启用 ${p.id}（网关约 3 秒内热生效；未生效请重启网关）`
@@ -494,11 +541,14 @@ export default function CustomModelsPage({ toast }: { toast: (msg: string, ok?: 
       )
     } catch (e) {
       console.error('保存失败', e)
-      // 回滚到点击前的开关状态
       setList((prev) => prev?.map((x) => (x.id === p.id ? { ...x, enabled: p.enabled } : x)) ?? null)
       toast(`保存失败：${String(e)}`, false)
     } finally {
-      setTogglingId(null)
+      setTogglingIds((prev) => {
+        const n = new Set(prev)
+        n.delete(p.id)
+        return n
+      })
     }
   }
 
@@ -540,12 +590,16 @@ export default function CustomModelsPage({ toast }: { toast: (msg: string, ok?: 
     }
   }
 
-  // 启停：enabled=true 拉起子进程+注册厂商；false 停进程+注销（模型移出 /v1/models，不删文件）
+  // 启停：enabled=true 拉起子进程+注册厂商；false 停进程+注销（模型移出 /v1/models，不删文件）。
+  //
+  // 不再用全局 pluginBusy 做互斥：后端每个插件各持自己的 p.toggleMu，进程也各自独立，
+  // 并发启停本来就不冲突。早先 `if (pluginBusy || pluginTogglingId) return` 让 A 还在
+  // 启动时 B 的开关点了毫无反应，而插件首次启动要等 sidecar 起来（数秒到十几秒）。
+  // pluginBusy 保留给「重扫」这种真正全局互斥的操作。
   const doPluginToggle = async (p: PluginProviderView) => {
-    if (pluginBusy || pluginTogglingId) return
+    if (pluginTogglingIdsRef.current.has(p.id)) return
     const turningOn = p.status === 'disabled'
-    setPluginBusy(true)
-    setPluginTogglingId(p.id)
+    setPluginTogglingIds((prev) => new Set(prev).add(p.id))
     try {
       const r = await api.pluginToggle(p.id, turningOn)
       setPlugins((prev) => prev?.map((x) => (x.id === p.id ? r.plugin : x)) ?? null)
@@ -557,8 +611,11 @@ export default function CustomModelsPage({ toast }: { toast: (msg: string, ok?: 
     } catch (e) {
       toast(`${turningOn ? '启用' : '停用'}失败：${String(e)}`, false)
     } finally {
-      setPluginBusy(false)
-      setPluginTogglingId(null)
+      setPluginTogglingIds((prev) => {
+        const n = new Set(prev)
+        n.delete(p.id)
+        return n
+      })
     }
   }
 
@@ -973,15 +1030,15 @@ export default function CustomModelsPage({ toast }: { toast: (msg: string, ok?: 
                   <button
                     type="button"
                     onClick={() => void toggleEnabled(p)}
-                    disabled={saving || togglingId !== null}
+                    disabled={saving || togglingIds.has(p.id)}
                     className={clsx(
                       'relative inline-flex h-6 w-11 items-center rounded-full transition-colors disabled:opacity-50',
                       p.enabled ? 'bg-zinc-900' : 'bg-zinc-200',
                     )}
                     aria-label={p.enabled ? '停用' : '启用'}
-                    title={togglingId === p.id ? '保存中…' : p.enabled ? '停用' : '启用'}
+                    title={togglingIds.has(p.id) ? '保存中…' : p.enabled ? '停用' : '启用'}
                   >
-                    {togglingId === p.id ? (
+                    {togglingIds.has(p.id) ? (
                       <span className="absolute inset-0 flex items-center justify-center">
                         <Loader2 size={13} className={clsx('animate-spin', p.enabled ? 'text-white' : 'text-zinc-500')} />
                       </span>
@@ -1393,15 +1450,15 @@ export default function CustomModelsPage({ toast }: { toast: (msg: string, ok?: 
                       <button
                         type="button"
                         onClick={() => void doPluginToggle(p)}
-                        disabled={pluginBusy}
+                        disabled={pluginBusy || pluginTogglingIds.has(p.id)}
                         className={clsx(
                           'relative inline-flex h-6 w-11 items-center rounded-full transition-colors disabled:opacity-50',
                           p.status !== 'disabled' ? 'bg-zinc-900' : 'bg-zinc-200',
                         )}
                         aria-label={p.status === 'disabled' ? '启用' : '停用'}
-                        title={pluginTogglingId === p.id ? '处理中…' : p.status === 'disabled' ? '启用' : '停用'}
+                        title={pluginTogglingIds.has(p.id) ? '处理中…' : p.status === 'disabled' ? '启用' : '停用'}
                       >
-                        {pluginTogglingId === p.id ? (
+                        {pluginTogglingIds.has(p.id) ? (
                           <span className="absolute inset-0 flex items-center justify-center">
                             <Loader2 size={13} className={clsx('animate-spin', p.status !== 'disabled' ? 'text-white' : 'text-zinc-500')} />
                           </span>
@@ -1469,7 +1526,7 @@ export default function CustomModelsPage({ toast }: { toast: (msg: string, ok?: 
                       <button
                         type="button"
                         onClick={() => void doPluginDelete(p.id)}
-                        disabled={pluginBusy}
+                        disabled={pluginBusy || pluginTogglingIds.has(p.id)}
                         className="px-2.5 py-1 rounded bg-red-600 text-white hover:bg-red-700 disabled:opacity-50"
                       >
                         删除
