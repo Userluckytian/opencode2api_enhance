@@ -307,8 +307,24 @@ func freeTierEngineStopHandler(m *manager.Manager) http.HandlerFunc {
 	}
 }
 
+// freeTierEngineRestartHandler 重启引擎。
+//
+// ?async=1 时立刻返回（状态为 starting），重启在后台跑完。
+// 为什么需要：开了 WARP 后 StartFreeTierEngine 内部的 waitForPort 最长等 95s
+// （首次出口注册），同步等待会让前端按钮转圈一分半 —— 用户点一个勾选框
+// 不该付出这个代价。异步模式下前端靠 /free-tier/status 轮询观察进度。
 func freeTierEngineRestartHandler(m *manager.Manager) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		async := r.URL.Query().Get("async") == "1"
+		if async {
+			go func() {
+				_ = m.RestartFreeTierEngine(manager.NewRealRunner())
+			}()
+			// 给 Stop 一点时间把状态切成 starting，前端拿到的就不是旧的 ready
+			time.Sleep(150 * time.Millisecond)
+			writeJSONResp(w, m.FreeTierEngineStatus())
+			return
+		}
 		if err := m.RestartFreeTierEngine(manager.NewRealRunner()); err != nil {
 			writeErrResp(w, http.StatusInternalServerError, err.Error())
 			return

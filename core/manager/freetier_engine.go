@@ -236,7 +236,15 @@ func (m *Manager) WriteEngineConfig() error {
 		Models: engineModels{
 			RefreshSeconds: refreshSec,
 			Protocols:      map[string]any{},
-			FreeOnly:       false,
+			// FreeOnly 只暴露/路由免费模型（面板「只使用免费模型」勾选）。
+			//
+			// 引擎的 free_only 语义（internal/models/catalog.go:158）：
+			// 路由入口一律拒绝非免费模型，/v1/models 与轮换别名由 routes 派生，
+			// 因此也一并隐藏 —— 三条路径口径一致。
+			//
+			// 「免费」判定（pricing.go:256 Decide）：模型 ID 含 "free"，
+			// 或元数据显示 input/output 成本均为 0 且未废弃。
+			FreeOnly: engineFreeOnly(cfg),
 		},
 		Performance: enginePerformance{
 			MaxIdleConns:          2048,
@@ -264,30 +272,39 @@ func (m *Manager) WriteEngineConfig() error {
 }
 
 // Start 启动引擎（幂等：已在运行则直接返回）。
+//
+// 重要：锁只保护状态字段，**长等待（waitForPort 最长 95s）必须在锁外做**。
+// 早先整个函数 defer Unlock，导致重启期间任何 FreeTierEngineStatus() 调用
+// 都排队等满 95s，前端表现为「点勾选框后转圈一分半」甚至请求超时。
 func (m *Manager) StartFreeTierEngine(runner Runner) error {
 	e := m.FreeTierEngine()
-	e.mu.Lock()
-	defer e.mu.Unlock()
+	setState := func(state, lastErr string, pid int) {
+		e.mu.Lock()
+		e.state = state
+		e.lastErr = lastErr
+		if pid >= 0 {
+			e.pid = pid
+		}
+		e.mu.Unlock()
+	}
 
 	port := m.managerGatewayPort()
 	if probePort(port, 300*time.Millisecond) {
-		e.state = "ready"
-		e.lastErr = ""
+		setState("ready", "", -1)
 		return nil // 已在运行（可能是上次残留的进程）
 	}
 	binPath := m.EngineBinPath()
 	if _, err := os.Stat(binPath); err != nil {
-		e.state = "failed"
-		e.lastErr = "引擎未安装: " + binPath
-		return fmt.Errorf("%s", e.lastErr)
+		msg := "引擎未安装: " + binPath
+		setState("failed", msg, -1)
+		return fmt.Errorf("%s", msg)
 	}
 	if err := m.WriteEngineConfig(); err != nil {
-		e.state = "failed"
-		e.lastErr = err.Error()
+		setState("failed", err.Error(), -1)
 		return err
 	}
 
-	e.state = "starting"
+	setState("starting", "", -1)
 	dir := m.paths.FreeTierEngineDir()
 	pid, err := runner.Start(ExecSpec{
 		Bin:      binPath,
@@ -299,11 +316,12 @@ func (m *Manager) StartFreeTierEngine(runner Runner) error {
 		Env:      traceEnvKV(),
 	})
 	if err != nil {
-		e.state = "failed"
-		e.lastErr = err.Error()
+		setState("failed", err.Error(), -1)
 		return err
 	}
-	e.pid = pid
+	// pid 先落库：这样等待期间状态接口也能看到进程已在跑
+	setState("starting", "", pid)
+
 	// WARP 开启时引擎会先完成首次出口注册再监听端口（上游最长 90s），
 	// 因此等待窗口要覆盖这段：否则会误判「启动超时」并把状态打成 failed。
 	waitTimeout := 20 * time.Second
@@ -314,33 +332,40 @@ func (m *Manager) StartFreeTierEngine(runner Runner) error {
 		// 仍在启动（WARP 注册未完成）：保持 starting，让面板/看门狗继续观察，
 		// 不返回错误——引擎稍后会自行监听。
 		if engineWarpEnabled(m.loadConfig()) {
-			e.state = "starting"
-			e.lastErr = "等待 WARP 首次出口注册"
+			setState("starting", "等待 WARP 首次出口注册", -1)
 			return nil
 		}
-		e.state = "failed"
-		e.lastErr = "引擎启动超时: " + err.Error()
+		setState("failed", "引擎启动超时: "+err.Error(), -1)
 		return err
 	}
-	e.state = "ready"
-	e.lastErr = ""
+	setState("ready", "", -1)
 	return nil
 }
 
 // Stop 停止引擎。
+//
+// 锁只保护状态字段的读写，**不在锁内做等待** —— 早先 defer Unlock + 锁内
+// waitPortClosed（最长 5s）会让并发的 FreeTierEngineStatus() 一起阻塞，
+// 表现为面板状态接口卡住、异步重启也「点了没反应」。
 func (m *Manager) StopFreeTierEngine(runner Runner) error {
 	e := m.FreeTierEngine()
 	e.mu.Lock()
-	defer e.mu.Unlock()
-	if e.pid > 0 {
-		_ = runner.Kill(e.pid)
-		e.pid = 0
+	pid := e.pid
+	e.pid = 0
+	e.state = "stopping"
+	e.mu.Unlock()
+
+	if pid > 0 {
+		_ = runner.Kill(pid)
 	}
 	port := m.managerGatewayPort()
-	if err := waitPortClosed(port, 5*time.Second); err != nil {
+	err := waitPortClosed(port, 5*time.Second)
+	e.mu.Lock()
+	if err != nil {
 		e.lastErr = err.Error()
 	}
 	e.state = "stopped"
+	e.mu.Unlock()
 	return nil
 }
 

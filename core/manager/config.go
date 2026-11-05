@@ -62,6 +62,9 @@ type Config struct {
 	EngineRetryMaxAttempts int `json:"engine_retry_max_attempts,omitempty"`
 	// EngineModelsRefreshSec 引擎模型目录刷新间隔（秒，0 = 默认 300）。
 	EngineModelsRefreshSec int `json:"engine_models_refresh_sec,omitempty"`
+	// EngineFreeOnly 只暴露/路由免费模型（写引擎 models.free_only）。
+	// nil = 默认开启（用户要的就是「只勾选免费模型」这一默认行为）。
+	EngineFreeOnly *bool `json:"engine_free_only,omitempty"`
 }
 func (m *Manager) configPath() string {
 	return filepath.Join(m.paths.DataDir, "config.json")
@@ -224,6 +227,8 @@ func (m *Manager) ConfigGet(key string) (string, error) {
 		return strconv.Itoa(cfg.EngineRetryMaxAttempts), nil
 	case "engine_models_refresh_sec":
 		return strconv.Itoa(cfg.EngineModelsRefreshSec), nil
+	case "engine_free_only":
+		return strconv.FormatBool(engineFreeOnly(cfg)), nil
 	}
 	return "", fmt.Errorf("unknown config key: %s", key)
 }
@@ -341,6 +346,12 @@ func (m *Manager) ConfigSet(key, value string) error {
 			return fmt.Errorf("engine_models_refresh_sec 不能为负")
 		}
 		cfg.EngineModelsRefreshSec = int(v)
+	case "engine_free_only":
+		b, err := parseBool()
+		if err != nil {
+			return err
+		}
+		cfg.EngineFreeOnly = &b
 	default:
 		return fmt.Errorf("unknown config key: %s", key)
 	}
@@ -387,6 +398,19 @@ func engineWarpEnabled(cfg Config) bool {
 	return *cfg.EngineWarpEnabled
 }
 
+// engineFreeOnly 只暴露/路由免费模型（nil = 默认开启）。
+//
+// 默认开：本项目免费层存在的意义就是「不花钱用模型」。开着它，即使配了
+// zen/go key，引擎也不会把付费模型列进 /v1/models，更不会路由过去 ——
+// 避免客户端误选 claude-opus 之类把额度打光。用户确实想用付费模型时，
+// 关掉这个勾选即可（付费 key 仍然保留，随时可切回）。
+func engineFreeOnly(cfg Config) bool {
+	if cfg.EngineFreeOnly == nil {
+		return true
+	}
+	return *cfg.EngineFreeOnly
+}
+
 // ConfigView 是前端 /api/admin/config 的响应形态（密码脱敏）。
 // ConfigView 前端视图（v2.0.0 精简：免费层配置项已移除）。
 type ConfigView struct {
@@ -417,6 +441,8 @@ type ConfigView struct {
 	EngineGoKeyCount       int      `json:"engine_go_key_count"`
 	EngineRetryMaxAttempts int      `json:"engine_retry_max_attempts"`
 	EngineModelsRefreshSec int      `json:"engine_models_refresh_sec"`
+	// EngineFreeOnly 只暴露/路由免费模型（默认 true）。
+	EngineFreeOnly bool `json:"engine_free_only"`
 }
 
 // ConfigViewOf 生成前端视图（密码脱敏为掩码）。
@@ -451,6 +477,7 @@ func (m *Manager) ConfigViewOf() ConfigView {
 		EngineGoKeyCount:       len(cfg.EngineGoKeys),
 		EngineRetryMaxAttempts: cfg.EngineRetryMaxAttempts,
 		EngineModelsRefreshSec: cfg.EngineModelsRefreshSec,
+		EngineFreeOnly:         engineFreeOnly(cfg),
 	}
 }
 // defaultUiPollIntervalSec 界面轮询间隔默认值（秒，U3）。
