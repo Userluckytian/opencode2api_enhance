@@ -142,9 +142,15 @@ type engineRetry struct {
 }
 
 type engineModels struct {
-	RefreshSeconds int            `json:"refresh_seconds"`
-	Protocols      map[string]any `json:"protocols"`
-	FreeOnly       bool           `json:"free_only"`
+	RefreshSeconds int `json:"refresh_seconds"`
+	// Protocols 模型 ID → 上游协议覆盖（chat / responses / anthropic）。
+	//
+	// 类型必须是 map[string]string，与引擎一致（internal/config/config.go:158）。
+	// 写成 map[string]any 的话，引擎用 map[string]string 反序列化时，
+	// 一个非字符串值会让整个 config.json 解析失败 —— 而引擎是
+	// DisallowUnknownFields 严格解析，失败即启动不了。
+	Protocols map[string]string `json:"protocols"`
+	FreeOnly  bool              `json:"free_only"`
 	// AnonymousBackoff 匿名通道熔断参数。
 	//
 	// 为什么必须写：引擎在 models.anonymous_backoff 缺省时把熔断阈值置 0，
@@ -273,7 +279,7 @@ func (m *Manager) WriteEngineConfig() error {
 		Retry: engineRetry{MaxAttempts: retryMax, TimeoutSeconds: 300},
 		Models: engineModels{
 			RefreshSeconds: refreshSec,
-			Protocols:      map[string]any{},
+			Protocols:      map[string]string{},
 			// FreeOnly 只暴露/路由免费模型（面板「只使用免费模型」勾选）。
 			//
 			// 引擎的 free_only 语义（internal/models/catalog.go:158）：
