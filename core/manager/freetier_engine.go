@@ -272,6 +272,12 @@ func (m *Manager) WriteEngineConfig() error {
 		// tiers 再按 KeyTiers 顺序打 key。**开 anonymous 不会让 key 白费**，
 		// 只会把 key 排到 WARP 之后 —— 这正是 v2.2 要的顺序。
 		//
+		// 但别把「匿名失败必落 key」说得太满：引擎对**请求级确定性拒绝**
+		// （400/422 这类 invalid_request_error，internal/gateway/abuse.go:110-122）
+		// 会直接把 4xx 透传给客户端、**不进 key 段** —— 因为这种拒绝换条 lane
+		// 也一样会被拒（例：单请求超 tpm 上限的
+		// request_exceeds_token_rate_limit，重试无意义）。
+		//
 		// （旧注释说「配了 key 还留 anonymous=true，引擎仍会优先走匿名通道，
 		// 继续 429」——那是引擎更早版本的行为，在当前上游 9964407 已不成立。）
 		Anonymous: engineAnonymousEnabled(cfg),
