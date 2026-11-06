@@ -141,7 +141,8 @@ export default function OpenCodePage({ toast }: { toast: (msg: string, ok?: bool
   const [savingWarp, setSavingWarp] = useState(false)
 
   // 通道顺序（warp_first / key_first）：决定引擎先走 WARP 出口还是先走 key。
-  const [channelOrder, setChannelOrder] = useState<ChannelOrder>('warp_first')
+  // 初值 key_first：后端返回真实值前不预设新语义（旧版后端跑的就是这个）。
+  const [channelOrder, setChannelOrder] = useState<ChannelOrder>('key_first')
   const [savingOrder, setSavingOrder] = useState(false)
   // 出口冷却账本：引擎没在 WARP 模式跑时 /healthz 里没有 warp 字段，
   // 「冷却中」会恒显示 0，而账本里压着几十个已烧掉的出口前缀 —— 真相只在这里。
@@ -188,7 +189,9 @@ export default function OpenCodePage({ toast }: { toast: (msg: string, ok?: bool
       // 免费开关以服务端为准（勾选后会有一次重启，期间别被本地态覆盖）
       if (!freeOnlyDirty) setFreeOnly(c.engine_free_only !== false)
       // 通道顺序同理：服务端是唯一事实源。
-      if (!savingOrder) setChannelOrder(c.engine_channel_order ?? 'warp_first')
+      // 字段缺失 = 后端是旧版（不支持该配置）→ 按旧行为显示，别显示一个
+      // 后端并未执行的新语义。
+      if (!savingOrder) setChannelOrder(c.engine_channel_order ?? 'key_first')
     } catch {
       /* 配置读取失败不阻断状态展示 */
     } finally {
@@ -274,6 +277,12 @@ export default function OpenCodePage({ toast }: { toast: (msg: string, ok?: bool
   // 重启走 async：WARP 首次出口注册最长 90s，同步等会把一次点击变成转圈一分半。
   const switchChannelOrder = async (next: ChannelOrder) => {
     if (next === channelOrder) return
+    // 旧版后端没有这个配置项：写进去会被拒绝（unknown config key），
+    // 或者更糟 —— 写进去了但引擎不认。直接拒绝并说明，别让用户以为切了。
+    if (!config?.engine_channel_order) {
+      toast('当前后端不支持通道顺序配置，请更新管理器后再切换', false)
+      return
+    }
     const prev = channelOrder
     setChannelOrder(next)
     setSavingOrder(true)
@@ -626,7 +635,9 @@ export default function OpenCodePage({ toast }: { toast: (msg: string, ok?: bool
             ] as const
           ).map((opt) => {
             const active = channelOrder === opt.id
-            const disabled = savingOrder || restartingAt > 0
+            // 后端不支持该配置（字段缺失 = 旧版管理器）时禁用整个开关。
+            const unsupported = !config?.engine_channel_order
+            const disabled = savingOrder || restartingAt > 0 || unsupported
             return (
               <button
                 key={opt.id}
@@ -666,8 +677,14 @@ export default function OpenCodePage({ toast }: { toast: (msg: string, ok?: bool
         </div>
 
         <div className="mt-3 text-[11px] text-zinc-400">
-          切换后需重启引擎生效（引擎只在启动时读一次配置）。WARP 优先时若出口不可用，
-          引擎会自动跳过匿名通道直接用 key —— 不会每条请求都先失败一次。
+          {config?.engine_channel_order ? (
+            <>
+              切换后需重启引擎生效（引擎只在启动时读一次配置）。WARP 优先时若出口不可用，
+              引擎会自动跳过匿名通道直接用 key —— 不会每条请求都先失败一次。
+            </>
+          ) : (
+            <>当前管理器版本不支持通道顺序配置（字段缺失），开关已禁用。请更新管理器后再切换。</>
+          )}
         </div>
       </div>
 
@@ -1251,7 +1268,7 @@ function ChannelStatusBar({
   const zenCount = (config?.engine_zen_keys ?? []).filter((k) => k.trim()).length
   const goCount = (config?.engine_go_keys ?? []).filter((k) => k.trim()).length
   const keyCount = zenCount + goCount
-  const order: ChannelOrder = config?.engine_channel_order ?? 'warp_first'
+  const order: ChannelOrder = config?.engine_channel_order ?? 'key_first'
 
   const warpReady = status?.warp_status === 'ready' && (status?.warp_active ?? 0) > 0
   const warpCoolingOnly = (status?.warp_cooling ?? 0) > 0 && !warpReady

@@ -323,8 +323,11 @@ export type ConfigView = {
   /**
    * 生效的通道顺序：`warp_first`（默认，先走 WARP 出口再回落 key）
    * 或 `key_first`（只用 key，v2.1 之前的行为）。
+   *
+   * 可选：旧版后端没有这个字段时为 undefined，此时面板按「密钥优先」显示
+   * 并禁用开关 —— 宁可显示旧行为，也不显示一个后端并未执行的新语义。
    */
-  engine_channel_order: ChannelOrder
+  engine_channel_order?: ChannelOrder
 }
 
 /** 免费通道顺序档位 */
