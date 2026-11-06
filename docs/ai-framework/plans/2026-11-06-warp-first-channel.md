@@ -565,18 +565,36 @@ freeTierResetWarpCooldown: () =>
 
 ## 验收标准总表
 
-| # | 标准 | 通过条件 | 验证责任人 |
-|---|------|----------|------------|
-| 1 | 通道顺序语义生效 | `warp_first` + 有 key → 引擎 config.json `anonymous == true` | 自动化（执行方） |
-| 2 | 熔断已下发 | 引擎 config.json 含 `models.anonymous_backoff`（3/1/6） | 自动化（执行方） |
-| 3 | 冷却重置可用 | 端点返回 `cleared` 数；文件被删；同目录其他文件不受影响 | 自动化（执行方） |
-| 4 | 单测 | `go test ./core/manager/` 全过（含 10 条新用例） | 自动化（执行方） |
-| 5 | 构建 | `go build ./...`、`go vet ./core/manager/ .`、`npx tsc --noEmit`、`npm run build` 全 exit 0 | 自动化（执行方） |
-| 6 | 前端文案一致 | 无「key 优先」残留口径；状态条按真实顺序判定 | 自动化（执行方）+ 人工抽查 |
-| 7 | 代码审查 | 审查结论 ✅ 或 ⚠️（问题已登记）；❌ 不通过则下放下阶段 | 独立角色（非实现者） |
-| 8 | 红线 | 引擎源码/二进制未被修改；`git diff` 无引擎相关文件 | 自动化（执行方） |
-| 9 | 密钥 | `git ls-files` 无敏感文件；`docs/issue-log/2026-11-06.md` 未入库 | 自动化（执行方） |
-| 10 | 引擎能带新 config 启动 | 真机重启引擎后 `/healthz` 仍 200 且 `warp` 字段出现（若 WARP 注册成功） | 端到端（需用户/部署机） |
+> 状态列填 ✅ 的必须附**实际跑过的**证据；「未做」的在「跳过项」登记，不作全绿。
+
+| # | 标准 | 通过条件 | 验证责任人 | 状态 |
+|---|------|----------|------------|------|
+| 1 | 通道顺序语义生效 | `warp_first` + 有 key → 引擎 config.json `anonymous == true` | 自动化（执行方） | ✅ 实测 `anonymous=True` + `zen_keys=3`（隔离数据目录实跑） |
+| 2 | 熔断已下发 | 引擎 config.json 含 `models.anonymous_backoff`（3/1/6） | 自动化（执行方） | ✅ 实测 `{"threshold":3,"base_hours":1,"max_hours":6}` |
+| 3 | 冷却重置可用 | 端点返回 `cleared` 数；文件被删；同目录其他文件不受影响 | 自动化（执行方） | ✅ 实测 `{"cleared":52}`；账本已删；`config.json`/模型目录/stdout.log 完好 |
+| 4 | 单测 | `go test ./core/manager/` 全过（含 15 条新用例） | 自动化（执行方） | ✅ `ok ... 6.0s`（15 条新用例全过） |
+| 5 | 构建 | `go build ./...`、`go vet ./core/manager/ .`、`npx tsc --noEmit`、`npm run build` 全 exit 0 | 自动化（执行方） | ✅ 全部 exit 0（npm 产物 435.75 kB） |
+| 6 | 前端文案一致 | 无「key 优先」残留口径；状态条按真实顺序判定 | 自动化（执行方）+ 人工抽查 | ✅ 代码层已改；人工点验待部署后 |
+| 7 | 代码审查 | 审查结论 ✅ 或 ⚠️（问题已登记）；❌ 不通过则下放下阶段 | 独立角色（非实现者） | ⏳ 见下方「代码审查」小节 |
+| 8 | 红线 | 引擎源码/二进制未被修改；`git diff` 无引擎相关文件 | 自动化（执行方） | ✅ diff 只含 12 个本仓库文件；引擎仅被**读取** |
+| 9 | 密钥 | `git ls-files` 无敏感文件；`docs/issue-log/2026-11-06.md` 未入库 | 自动化（执行方） | ✅ 测试文件按 `.gitignore` 本地保留；issue-log 按仓库约定不入库 |
+| 10 | 引擎能带新 config 启动 | 真机重启引擎后 `/healthz` 仍 200 且 `warp` 字段出现（若 WARP 注册成功） | 端到端（需用户/部署机） | ✅ **已提前验证**：真实 `opencode2api-win.exe` 用本阶段生成的 config.json 启动成功，`/healthz` 回报 `"anonymous": true`（严格解析通过） |
+
+### 补充真机证据（超出最低要求）
+
+| 证据 | 内容 |
+|------|------|
+| 引擎侧行为 | `%TEMP%\o2a-warp-first` 独立实例 `legs` 字段：`anon:403 → anon:403 → anon:403 → anon:429 → i5h1l:403 → J_jXN:403 → XY-RG:403` —— **先匿名（WARP）4 次，再依次落 3 个 key**，正是需求要的顺序 |
+| 匿名通道确实在服务 | `availability_checked model="big-pickle" channel="anonymous" reason="probe_succeeded"`；`request routed status=200 channel="anonymous"` |
+| WARP 池在干净账本下能起 | `OpenCode WARP/ipv6 pool ready (max 4 exits, preloading 4)`（4 个出口注册成功） |
+| 配置非法值被拒 | `POST /config/set {engine_channel_order: bogus}` → **400** |
+
+### 执行中发现并已修的问题
+
+| # | 问题 | 处置 |
+|---|------|------|
+| 1 | 引擎 `models.protocols` 是 `map[string]string`，管理器侧却是 `map[string]any` —— 引擎用前者反序列化时，某个非字符串值会让整个 config.json 解析失败（引擎起不来） | 已对齐为 `map[string]string`（commit `a50fae8`） |
+| 2 | 旧版后端无 `engine_channel_order` 字段时，新面板会显示「WARP 优先」而后端其实跑 key_first —— 面板显示 ≠ 实际行为 | 已改为按 `key_first` 显示 + 禁用开关 + 明确提示（commit `37ae872`） |
 
 ---
 
