@@ -222,10 +222,13 @@ func rebuildVendors() {
 		"skipped", skipped,
 		"result_ids", resultIDs,
 	)
-	// 不在重建尾部刷新目录：刷新 remote 厂商会触发插件 OnModelRefresh →
-	// syncPlugins → rebuildVendors，形成自激循环（实测每 1.8s 一轮，
-	// 每次都用用户 key 打一遍上游）。目录刷新由 startModelRefresh 定时驱动，
-	// 配置保存后用 refreshModelCatalog() 显式触发一次即可。
+	// 不在重建尾部刷新目录：历史上这里同步刷新会与 OnChange→syncPlugins
+	// 互相放大，形成自激循环（实测每 1.8s 一轮，每次都用用户 key 打一遍上游）。
+	// 目录刷新由 startModelRefresh 定时驱动，配置保存后用 refreshModelCatalog()
+	// 显式触发一次；插件模型清单到位则由 pluginprovider 的 OnModelRefresh 回调
+	// 触发（见 plugin_vendors.go onPluginModelRefresh），都不经过 rebuildVendors。
+	// 注意：OnModelRefresh 本身不触发 syncPlugins/rebuildVendors，refreshModelCatalog
+	// 也只写 modelsCache —— 该回调链不会形成自激循环。
 }
 
 // ---------------------------------------------------------------------------

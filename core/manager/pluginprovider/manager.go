@@ -92,11 +92,11 @@ type Config struct {
 }
 
 // modelRefreshCoalesceWindow 启动期合并窗口：多个插件几乎同时就绪时，把
-// OnModelRefresh 合并成一次，避免 N 个插件触发 N 次串行目录刷新
-// （refreshModelCatalog 持 catalogRefreshMu 逐个厂商发 HTTP，60s ctx）。
+// OnModelRefresh 合并成一次，避免 N 个插件触发 N 轮全量目录刷新
+// （aggregator.Refresh 并行拉取全部厂商、整轮由 catalogRefreshMu 串行化，60s ctx）。
 //
-// 插件就绪是各自独立的 goroutine，12 个插件会在同一瞬间拉到模型；每次刷新都
-// 遍历全部厂商，串行 12 次会拖慢启动并放大对上游的请求。300ms 足以覆盖同一批
+// 插件就绪是各自独立的 goroutine，12 个插件会在同一瞬间拉到模型；每轮刷新都
+// 要遍历全部厂商，串行 12 轮会拖慢启动并放大对上游的请求。300ms 足以覆盖同一批
 // 就绪，又不至于让「插件模型到位」的可见延迟变长。
 const modelRefreshCoalesceWindow = 300 * time.Millisecond
 
@@ -118,10 +118,19 @@ type Manager struct {
 	// 状态锁互相嵌套）。合并器只用于自动就绪通知；手动 RefreshModels 直调回调。
 	// modelRefreshClosed 单独记关闭态：timer 回调在 modelRefreshMu 下判定，
 	// 不与 Close 持有的 mu 形成跨锁读写 m.closed 的数据竞争。
+	//
+	// modelRefreshWG 跟踪「已离开临界区、正在调用 OnModelRefresh」的回调：
+	// Timer.Stop() 不等待已触发的回调，且 unlocked 之后才调回调，Close 与回调
+	// 之间存在 TOCTOU（可能在聚合器退出后还刷一次目录）。Close 置 closed 后在
+	// 释放 m.mu 之外 Wait()，保证退出前没有在途回调。
+	// Add 全部在 modelRefreshMu 临界区内、且 closed 检查之后发生；Close 也先持
+	// 同一把锁置 closed，因此 Add 不会与 Wait 并发（WaitGroup 约定）。
 	modelRefreshMu      sync.Mutex
 	modelRefreshTimer   *time.Timer
 	modelRefreshPending bool
 	modelRefreshClosed  bool
+	modelRefreshLastID  string
+	modelRefreshWG      sync.WaitGroup
 }
 
 // New 构造插件管理器（零值配置回退默认）。
@@ -200,12 +209,15 @@ func (m *Manager) Close() {
 	m.cancel()
 	// 停掉启动期合并窗口：Close 之后不再触发 OnModelRefresh（回调会刷聚合目录，
 	// 而此时聚合器/HTTP 服务可能已经在退出）。
+	// 注意：Timer.Stop() 不等待「已触发、正在跑」的回调，fireModelRefresh 把
+	// 在途回调记进 modelRefreshWG，下面在释放 m.mu 之后有界等待它们结束。
 	m.modelRefreshMu.Lock()
 	if m.modelRefreshTimer != nil {
 		m.modelRefreshTimer.Stop()
 		m.modelRefreshTimer = nil
 	}
 	m.modelRefreshPending = false
+	m.modelRefreshLastID = ""
 	m.modelRefreshClosed = true
 	m.modelRefreshMu.Unlock()
 	ps := make([]*plugin, 0, len(m.plugins))
@@ -220,6 +232,7 @@ func (m *Manager) Close() {
 	done := make(chan struct{})
 	go func() {
 		m.wg.Wait()
+		m.modelRefreshWG.Wait() // 等已离开临界区、正在刷目录的回调结束
 		close(done)
 	}()
 	select {
@@ -1129,8 +1142,9 @@ func (m *Manager) fetchPluginModels(p *plugin) ([]string, []ModelDetail, error) 
 // 装配方的聚合目录只能等 10 分钟定时器刷新 —— 表现为「应用起来好一会儿，
 // /v1/models 里还是没有插件模型」。这里补上「模型到位 → 立刻刷目录」这一环。
 //
-// 合并语义：启动期多个插件几乎同时就绪，逐个回调会造成 N 次串行的全量目录
-// 刷新。首个通知立即触发，随后 modelRefreshCoalesceWindow 内的通知合并为
+// 合并语义：启动期多个插件几乎同时就绪，逐个回调会造成多轮全量目录刷新
+// （aggregator.Refresh 会并行拉取全部厂商，整轮由 catalogRefreshMu 串行化）。
+// 首个通知立即触发，随后 modelRefreshCoalesceWindow 内的通知合并为
 // 窗口结束时的一次，既不让首屏变慢，也不放大上游请求。
 //
 // 手动 RefreshModels 不走这里（直调回调），保证面板按钮的即时性。
@@ -1145,23 +1159,49 @@ func (m *Manager) notifyModelReady(id string) {
 	}
 	if m.modelRefreshTimer != nil {
 		// 已有合并窗口在跑：本次并入窗口（不再单独立即触发）。
+		// 记下最后一次通知的 id，供窗口末刷新打日志用（否则会误报首个插件）。
 		m.modelRefreshPending = true
+		m.modelRefreshLastID = id
 		m.modelRefreshMu.Unlock()
 		return
 	}
 	// 窗口内首次通知：立即触发一次，同时开一个合并窗口。
+	m.modelRefreshLastID = id
 	m.modelRefreshTimer = time.AfterFunc(modelRefreshCoalesceWindow, func() {
 		m.modelRefreshMu.Lock()
 		pending := m.modelRefreshPending
-		closed := m.modelRefreshClosed
+		lastID := m.modelRefreshLastID
 		m.modelRefreshPending = false
 		m.modelRefreshTimer = nil
+		m.modelRefreshLastID = ""
 		m.modelRefreshMu.Unlock()
-		if pending && !closed && m.cfg.OnModelRefresh != nil {
-			m.cfg.OnModelRefresh(id)
+		if pending {
+			m.fireModelRefresh(lastID)
 		}
 	})
 	m.modelRefreshMu.Unlock()
+	m.fireModelRefresh(id)
+}
+
+// fireModelRefresh 在 modelRefreshMu 之外调用回调，但把「是否允许调用」的判定
+// 留在锁内：Close 之后不再发起新回调，已在途的由 modelRefreshWG 跟踪，
+// Close 释放 m.mu 后 Wait() 等它们结束。
+//
+// 为什么 Add 放在锁内：Close 先持同一把锁置 modelRefreshClosed，之后所有
+// fireModelRefresh 都会直接 return（不再 Add），因此 Add 不会与 Wait 并发。
+// 为什么回调在锁外：回调（refreshModelCatalog）不取 modelRefreshMu，但
+// syncPlugins→RunningPlugins 会取 m.mu；持 modelRefreshMu 调它虽不成环，
+// 但会拉长临界区，且 manual RefreshModels 与窗口末回调能并发排队在
+// catalogRefreshMu 上，无需在这里串行。
+func (m *Manager) fireModelRefresh(id string) {
+	m.modelRefreshMu.Lock()
+	if m.modelRefreshClosed || m.cfg.OnModelRefresh == nil {
+		m.modelRefreshMu.Unlock()
+		return
+	}
+	m.modelRefreshWG.Add(1)
+	m.modelRefreshMu.Unlock()
+	defer m.modelRefreshWG.Done()
 	m.cfg.OnModelRefresh(id)
 }
 

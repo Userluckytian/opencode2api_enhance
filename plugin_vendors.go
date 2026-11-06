@@ -119,11 +119,21 @@ func pluginSigOf(rps []pluginprovider.RunningPlugin) string {
 	return sb.String()
 }
 
-// onPluginModelRefresh 手动刷新插件模型回调：无节流强制刷新聚合目录（/v1/models 即时更新）。
+// onPluginModelRefresh 模型清单就绪/手动刷新回调：无节流强制刷新聚合目录（/v1/models 即时更新）。
+//
+// 刷目录前先 syncPlugins()：插件的「就绪」与「模型清单到位」是两个异步事件，
+// OnChange→syncPlugins→rebuildVendors 可能与窗口末刷新并发。若某个 remote vendor
+// 尚未 ReplaceAll 进聚合器，这次刷新就看不到它的模型；而 modelsCache 随后非空
+// （自定义源模型已在），冷启动补救路径 refreshModelCatalogIfDue 会被短路，
+// 只能等 10 分钟定时器 —— 正是本次要修的症状残留。
+//
+// syncPlugins 自带签名判断：集合未变时直接 return，不重建厂商、也不触发
+// rebuildVendors（refreshModelCatalog 不产生任何插件通知），不会形成自激循环。
 func onPluginModelRefresh(id string) {
 	if globalAgg == nil {
 		return
 	}
+	syncPlugins()
 	refreshModelCatalog()
 	slog.Info("plugin models refreshed", "plugin", id)
 }
