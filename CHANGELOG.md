@@ -24,7 +24,18 @@
 - **WARP 卡片「池大小上限」显示错误**：manager 里 `engine_warp_pool_size=0` 表示「按 key 数自动推导（无 key 2 / 有 key 4）」，前端却用 `|| 2` 兜底，于是 10 个 key 实际跑 4 个出口时面板显示 2。已改为显示推导值并标注「自动」。
 ### 变更
 
-- OpenCode 页「出口代理」卡片移除，统一由设置页维护；WARP 关闭后的回退说明同步改指向设置页。
+- **OpenCode 页「出口代理」卡片移除**，统一由设置页维护；WARP 关闭后的回退说明同步改指向设置页。
+- **⚠️ 行为变更：OpenCode 免费通道默认改为「WARP 优先 → 密钥兜底」**。此前配了 key 就只用 key（引擎 `anonymous=false`），WARP 出口完全不参与请求；现在默认 `anonymous=true`，请求先走 WARP 匿名通道，不通才按 key 顺序兜底 —— key 的额度只在 WARP 通道全挂时才消耗。想保持旧行为可在 OpenCode 页「通道顺序」选「密钥优先」（管理面配置 `engine_channel_order=key_first`）。
+  - 引擎原生就支持这个顺序（上游 9964407 `internal/gateway/upstream.go:232-257`：匿名路由失败后 `entering preferred key tiers`），**没有改引擎**，只是修正了管理器写出的配置语义。
+  - 同时下发 `models.anonymous_backoff`（连续失败 3 次 → 暂停匿名通道 1 小时，逐次翻倍，上限 6 小时）：缺了它，WARP 不可用时每条请求都要先陪跑一次失败的匿名尝试才落到 key。
+
+### 新增（v2.2）
+
+- **OpenCode 页「通道顺序」开关**：二选一（WARP 优先 / 密钥优先）。切换后自动重写引擎 config 并异步重启引擎（引擎只在启动时读一次配置，不重启就是静默失败）。
+- **「重置出口冷却」按钮 + 出口冷却账本展示**：引擎把被上游拒绝的公网出口写进 24h 黑名单（`config.json.warp-state.json`），新注册的出口落在已冷却的 `/64` 上会被判「已在冷却」，于是 **WARP 池永远起不来**（实测本机 52 个 `/64` 全冷却 → 引擎退回无 WARP 模式，`/healthz` 连 `warp` 字段都没有）。面板现在直接显示账本条数并提供一键清除。
+  - **只清本地出口账本，不影响上游账号额度**（额度在服务端按账号/session 记账，重启/换出口/换 key 都重置不了）。清完需重启引擎才会重新注册出口。
+  - 新增端点：`GET /api/admin/free-tier/warp-cooldown`、`POST /api/admin/free-tier/reset-warp-cooldown`。
+- **通道状态条按真实顺序判定**：此前写死「配了 key 就显示密钥通道」，与实际路由不符。新版按「通道顺序配置 + WARP 出口池状态 + 引擎健康」判定，并明确显示「WARP 不通时回落到 key」。
 
 ## v2.0.0（2026-11-05，正式版）
 

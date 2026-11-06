@@ -77,6 +77,45 @@ CI（`.github/workflows/build-release.yml`）按矩阵交叉构建三平台：
 - **出口代理**：多行，每行一个（默认 `direct`）；关闭 WARP 时免费通道回落到该列表。
 保存后面板重写配置并重启引擎生效。
 
+### 通道顺序：WARP 优先 → 密钥兜底
+
+面板「通道顺序」有两种档位（对应管理面配置 `engine_channel_order`）：
+
+| 档位 | 引擎 `anonymous` | 实际顺序 |
+|------|------------------|---------|
+| **WARP 优先**（默认） | 恒为 `true` | 请求先走**匿名通道**（WARP 出口）→ 不通才按 `KeyTiers` 顺序打 key |
+| 密钥优先 | 仅当无 key 时为 `true` | 只用 key（v2.1 之前的行为），保留作回退档 |
+
+引擎侧的依据（上游 `opencode2api-win` 9964407）：
+
+- 路由只有 `anonymous=true` 才建匿名路由，否则直接建密钥路由
+  （`internal/models/catalog.go:282-291`）—— 所以「配了 key 又关掉 anonymous」
+  会让 WARP 出口完全不参与请求。
+- 匿名路由先走 `doAnonymousUpstream`（WARP 出口），失败后
+  `entering preferred key tiers` 再打 key（`internal/gateway/upstream.go:232-257`）。
+  **开 anonymous 不会让 key 白费**，只是把 key 排到 WARP 之后。
+
+WARP 优先时另有一层保护：管理器在引擎 `models.anonymous_backoff` 写入熔断参数
+（连续失败 3 次 → 暂停匿名通道 1 小时，逐次翻倍，上限 6 小时）。缺了它，
+WARP 不可用时每条请求都要先陪跑一次失败的匿名尝试才落到 key。
+
+> 注意：**WARP 池可用时，免费模型的 key 请求本身也走 WARP 出口**
+> （`internal/gateway/warp.go:38`）。所以 WARP 优先真正省下的是 **key 的额度** ——
+> key 只在 WARP 通道全挂时才被消耗。
+
+### 出口冷却账本（为什么 WARP 起不来）
+
+引擎把被上游拒绝的公网出口写进一份 24h 黑名单，落盘在
+`<runtime>/free-tier/config.json.warp-state.json`（引擎路径规则 = `configPath + ".warp-state.json"`）。
+新注册的出口若落在已冷却的 `/64` 上会被判「already active or cooling down」，
+于是 **WARP 池永远起不来**，引擎退回无 WARP 模式（`/healthz` 里连 `warp` 字段都没有）。
+
+面板「WARP 出口池」卡里的**「重置出口冷却」**按钮会删掉这份账本。语义边界：
+
+- **只清本地出口账本，不影响上游账号额度。** 免费额度是服务端按账号/session 记账的，
+  重启引擎、换出口、换 key 都重置不了它。
+- 清完必须**重启引擎**才会重新注册出口（引擎只在启动时读该文件）。
+
 ## 六、端口
 
 | 进程 | 默认端口 | 覆盖方式 |
@@ -96,6 +135,9 @@ CI（`.github/workflows/build-release.yml`）按矩阵交叉构建三平台：
 | 启动后 40080 不监听 | `runtime/free-tier/stderr.log`；端口被占用时改 `OPCODE2API_GATEWAY_PORT` |
 | 保存配置后不生效 | 配置只在引擎重启后加载，用面板的「重启引擎」 |
 | 免费层大面积 429 / 冷却中 | 看 `warp_cooling` 与出口池大小；必要时增加 WARP 出口或切换代理列表 |
+| 面板显示 WARP 优先，但出口一个都起不来 | 看 `runtime/free-tier/config.json.warp-state.json`：里面压着 24h 黑名单，新出口全被判「已在冷却」。用面板「重置出口冷却」清掉后**重启引擎** |
+| `/healthz` 里没有 `warp` 字段 | 引擎跑在无 WARP 模式（`g.warp == nil`）：WARP 池没起来。查 `runtime/free-tier/stdout.log` 的 `warp_startup_fallback` / `warp_retry_failed` |
+| 配了 key 仍 429 | key 不是万能：免费额度按账号/session 记账，匿名通道同样受限。key 是兜底不是保证 |
 | 构建只有 warning `bin/… not found` | 正常：`build.rs` 不注册 `embed_free_tier_engine`，`FREE_TIER_ENGINE = None`，面板其余功能不受影响 |
 
 引擎状态字段（面板/OpenCode 免费层页读取）：`state` / `running` / `healthy` / `pid` /
