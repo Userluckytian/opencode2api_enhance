@@ -485,6 +485,11 @@ type ConfigView struct {
 	EngineFreeOnly bool `json:"engine_free_only"`
 	// EngineChannelOrder 生效的通道顺序（warp_first / key_first，默认 warp_first）。
 	EngineChannelOrder string `json:"engine_channel_order"`
+	// EngineAnonymousBackoffThreshold 匿名通道熔断阈值（连续失败多少次后熔断）。
+	//
+	// 下发给前端是为了让面板文案与真实参数同源 —— 否则后端改了阈值、
+	// 前端还写着「连续失败达 6 次」，面板就会开始说谎。
+	EngineAnonymousBackoffThreshold int `json:"engine_anonymous_backoff_threshold"`
 }
 
 // ConfigViewOf 生成前端视图（密码脱敏为掩码）。
@@ -521,6 +526,8 @@ func (m *Manager) ConfigViewOf() ConfigView {
 		EngineModelsRefreshSec: cfg.EngineModelsRefreshSec,
 		EngineFreeOnly:         engineFreeOnly(cfg),
 		EngineChannelOrder:     engineChannelOrder(cfg),
+		// 熔断阈值同源下发：前端文案直接用它，不另写一份常量。
+		EngineAnonymousBackoffThreshold: anonymousBackoffThreshold,
 	}
 }
 // defaultUiPollIntervalSec 界面轮询间隔默认值（秒，U3）。

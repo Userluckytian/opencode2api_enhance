@@ -680,7 +680,7 @@ export default function OpenCodePage({ toast }: { toast: (msg: string, ok?: bool
           {config?.engine_channel_order ? (
             <>
               切换后需重启引擎生效（引擎只在启动时读一次配置）。WARP 优先时若出口不可用，
-              引擎会先试匿名通道，连续失败达 6 次后熔断并改走 key —— 熔断前仍会多几次失败尝试。
+              引擎会先试匿名通道，连续失败达 {config.engine_anonymous_backoff_threshold ?? 6} 次后熔断并改走 key —— 熔断前仍会多几次失败尝试。
             </>
           ) : (
             <>当前管理器版本不支持通道顺序配置（字段缺失），开关已禁用。请更新管理器后再切换。</>
@@ -1340,9 +1340,11 @@ function ChannelStatusBar({
     // 也不能断言「引擎会自动跳过匿名通道」—— 那要等熔断真的跳闸。
     lane = 'fallback'
     laneLabel = keyCount > 0 ? 'WARP 不可用，回落到 key' : '匿名直连'
+    // 阈值从后端取（单一事实源）：后端调参时前端不会继续说「6 次」。
+    const breakerThreshold = config?.engine_anonymous_backoff_threshold
     laneHint =
       keyCount > 0
-        ? 'WARP 出口未就绪：引擎先试匿名通道，连续失败达 6 次后熔断并改走 key'
+        ? `WARP 出口未就绪：引擎先试匿名通道，连续失败达 ${breakerThreshold ?? 6} 次后熔断并改走 key`
         : '未配 key 且 WARP 未启用，全靠本机 IP（易 429）'
     cls = 'bg-amber-50 text-amber-800 border-amber-200'
   }

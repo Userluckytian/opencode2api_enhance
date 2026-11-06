@@ -328,6 +328,13 @@ export type ConfigView = {
    * 并禁用开关 —— 宁可显示旧行为，也不显示一个后端并未执行的新语义。
    */
   engine_channel_order?: ChannelOrder
+  /**
+   * 匿名通道熔断阈值（连续失败多少次后熔断）。
+   *
+   * 由后端下发，前端文案直接引用 —— 不在前端另写一份常量，
+   * 否则后端调参后面板就会开始说谎。
+   */
+  engine_anonymous_backoff_threshold?: number
 }
 
 /** 免费通道顺序档位 */
