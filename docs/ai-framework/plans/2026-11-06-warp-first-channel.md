@@ -553,13 +553,41 @@ freeTierResetWarpCooldown: () =>
 
 | 审查项 | 结论（✅/⚠️/❌） | 问题清单 |
 |--------|------------------|----------|
-| 风格 | | |
-| 测试完整性 | | |
-| 依赖与架构红线 | | |
-| 安全 | | |
-| API 契约 | | |
+| 风格 | ✅ | 2 条建议（S2/S3 注释措辞）→ 已修 |
+| 测试完整性 | ⚠️→✅ | 2 条建议（S4 字段名契约测试、S5 签名编译期锁）→ 已修 |
+| 依赖与架构红线 | ✅ | 0 —— 引擎仅被读取，GPL 边界未越 |
+| 安全 | ⚠️→✅ | 1 条（Y3 坏文件与零冷却不可区分）→ 已修 |
+| API 契约 | ✅ | 0 —— 字段名逐字核对引擎源码一致 |
+| 前端一致性 | ⚠️→✅ | 1 条（Y1 文案过度断言）→ 已修 |
+| 正确性 | ⚠️→✅ | 1 条（Y2 熔断窗口短于出口冷却期）→ 已修 |
 
-**结论：** ✅ 通过 / ⚠️ 有条件通过（问题进验收表，❌ 下放下阶段）/ ❌ 不通过（阻塞）
+**审查结论：** ⚠️ 有条件通过 —— 无 🔴 阻塞；3 条应修（Y1/Y2/Y3）+ 5 条建议（S1~S5），全部已修并复验。
+
+### 审查发现与处置（逐条）
+
+| # | 级别 | 问题 | 处置 |
+|---|------|------|------|
+| Y1 | 🟡 | 前端文案断言「WARP 不可用时引擎会自动跳过匿名通道直接用 key」。但熔断是引擎的**进程内**状态（`internal/gateway/pool.go:81-83`），引擎重启即归零 —— 刚重启完、失败次数没累计到阈值时仍会先陪跑一次失败的匿名尝试。另外「出口全部冷却」分支漏了引擎的代理回落路径（`internal/gateway/upstream.go:364-366` `warp_proxy_fallback` → 退到代理列表走匿名直连，不是 key） | 文案改为如实描述：「先试匿名通道，连续失败达 6 次后熔断并改走 key」；冷却分支补上「引擎会退到代理列表（通常是直连）走匿名通道」 |
+| Y2 | 🟡 | 熔断参数 3/1/6 比引擎默认（6/1/24）激进。**关键问题**：引擎出口黑名单是固定 24h（`internal/warp/pool.go:29` `egressCooldown = 24 * time.Hour`），熔断 6h < 24h ⇒ 熔断一过出口还没解冻，引擎再次陪跑匿名尝试并把整池烧掉 —— 恰是本熔断想避免的循环 | 改为 **6/1/24**，对齐引擎默认且 `max_hours >= 出口冷却周期`；另加语义回归锁 `TestAnonymousBackoffOutlivesEgressCooldown` |
+| Y3 | 🟡 | 账本损坏时 `WarpCooldown()` 返回 `{cooling:0, exists:true}`，与「确实 0 条冷却」不可区分 → 前端把「重置出口冷却」按钮禁用掉，**用户恰恰在最需要它的时候点不动** | `WarpCooldownState` 新增 `corrupt` 字段；前端在损坏时显示「账本已损坏」并**放开**按钮禁用条件；已端到端实测（损坏→可重置→文件删除） |
+| S1 | 🟢 | 「额度重置」列在管理器重启后永久回到「点探测查询」，且「无数据」与「已过期」渲染成同一个 `—` | **本阶段不改**（属 v2.1 额度可视化范围，非本阶段引入）；登记为下阶段项 |
+| S2 | 🟢 | `availabilityEntry.retry_after_*` 是前瞻占位（引擎当前不写），注释却像在描述既有行为 | 注释改为明确标注「⚠️ 前瞻占位：引擎当前不写，别以为读不到是 bug」 |
+| S3 | 🟢 | `key_first` 档名与「有 key 时才开匿名」的行为容易读反 | 在 `ChannelOrderKeyFirst` 常量注释里补一句「此档**没有** key→匿名的降级路径：引擎在 anonymous=false 时压根不建匿名路由」 |
+| S4 | 🟢 | 字段名契约未被测试锁住：若本仓库与引擎 tag **同时**写错（如都写成 `base_hour`），两边单测双双通过而引擎启动失败 | 新增 `core/manager/freetier_contract_test.go`：手抄引擎 `Config` 全部 json tag 成独立契约结构体，用 `json.Decoder.DisallowUnknownFields()` 解码管理器写出的 config.json。**已用变异测试验证**：把 `base_hours` 改成 `base_hour` → 测试报 `引擎会拒绝这份 config.json（字段名与引擎契约不符）: json: unknown field "base_hour"` |
+| S5 | 🟢 | 路径穿越测试只验了路径形状，没锁「不接受路径参数」这个真正的安全属性 | 新增编译期断言 `var _ func() (WarpCooldownState, error) = m.ResetWarpCooldown` —— 日后有人给该方法加参数，这行会编译失败 |
+
+### 审查方跑过的验证命令
+
+```text
+go build ./...                        EXIT=0
+go vet ./core/manager/ .              EXIT=0
+go test -count=1 ./core/manager/      ok  5.595s
+npx tsc --noEmit                      EXIT=0
+npm run build                         EXIT=0（index-J50la_Bl.js 435.75 kB）
+
+密钥扫描：git diff main...HEAD | Select-String 'oc_sk_[A-Za-z0-9]{8,}|oc_go_[A-Za-z0-9]{8,}'  → 无输出
+GPL 扫描：git diff main...HEAD | Select-String 'internal/gateway|internal/warp|...'        → 命中项全部是注释中的上游行号引用
+```
 
 ---
 
@@ -570,12 +598,12 @@ freeTierResetWarpCooldown: () =>
 | # | 标准 | 通过条件 | 验证责任人 | 状态 |
 |---|------|----------|------------|------|
 | 1 | 通道顺序语义生效 | `warp_first` + 有 key → 引擎 config.json `anonymous == true` | 自动化（执行方） | ✅ 实测 `anonymous=True` + `zen_keys=3`（隔离数据目录实跑） |
-| 2 | 熔断已下发 | 引擎 config.json 含 `models.anonymous_backoff`（3/1/6） | 自动化（执行方） | ✅ 实测 `{"threshold":3,"base_hours":1,"max_hours":6}` |
+| 2 | 熔断已下发 | 引擎 config.json 含 `models.anonymous_backoff`，且 `max_hours` ≥ 引擎出口冷却周期（24h） | 自动化（执行方） | ✅ 实测 `{"threshold":6,"base_hours":1,"max_hours":24}`（审查后由 3/1/6 修正） |
 | 3 | 冷却重置可用 | 端点返回 `cleared` 数；文件被删；同目录其他文件不受影响 | 自动化（执行方） | ✅ 实测 `{"cleared":52}`；账本已删；`config.json`/模型目录/stdout.log 完好 |
-| 4 | 单测 | `go test ./core/manager/` 全过（含 15 条新用例） | 自动化（执行方） | ✅ `ok ... 6.0s`（15 条新用例全过） |
-| 5 | 构建 | `go build ./...`、`go vet ./core/manager/ .`、`npx tsc --noEmit`、`npm run build` 全 exit 0 | 自动化（执行方） | ✅ 全部 exit 0（npm 产物 435.75 kB） |
-| 6 | 前端文案一致 | 无「key 优先」残留口径；状态条按真实顺序判定 | 自动化（执行方）+ 人工抽查 | ✅ 代码层已改；人工点验待部署后 |
-| 7 | 代码审查 | 审查结论 ✅ 或 ⚠️（问题已登记）；❌ 不通过则下放下阶段 | 独立角色（非实现者） | ⏳ 见下方「代码审查」小节 |
+| 4 | 单测 | `go test ./core/manager/` 全过（含 18 条新用例） | 自动化（执行方） | ✅ `ok ... 5.5s`；全包 58 条用例 0 失败（审查后新增 3 条契约测试） |
+| 5 | 构建 | `go build ./...`、`go vet ./core/manager/ .`、`npx tsc --noEmit`、`npm run build` 全 exit 0 | 自动化（执行方） | ✅ 全部 exit 0（npm 产物 436.17 kB） |
+| 6 | 前端文案一致 | 无「key 优先」残留口径；状态条按真实顺序判定；不夸大熔断行为 | 自动化（执行方）+ 人工抽查 | ✅ 代码层已改（含审查后修正文案）；人工点验待部署后 |
+| 7 | 代码审查 | 审查结论 ✅ 或 ⚠️（问题已登记）；❌ 不通过则下放下阶段 | 独立角色（非实现者） | ✅ 独立审查结论「⚠️ 有条件通过」，无 🔴 阻塞；3 应修 + 5 建议**全部已修并复验** |
 | 8 | 红线 | 引擎源码/二进制未被修改；`git diff` 无引擎相关文件 | 自动化（执行方） | ✅ diff 只含 12 个本仓库文件；引擎仅被**读取** |
 | 9 | 密钥 | `git ls-files` 无敏感文件；`docs/issue-log/2026-11-06.md` 未入库 | 自动化（执行方） | ✅ 测试文件按 `.gitignore` 本地保留；issue-log 按仓库约定不入库 |
 | 10 | 引擎能带新 config 启动 | 真机重启引擎后 `/healthz` 仍 200 且 `warp` 字段出现（若 WARP 注册成功） | 端到端（需用户/部署机） | ✅ **已提前验证**：真实 `opencode2api-win.exe` 用本阶段生成的 config.json 启动成功，`/healthz` 回报 `"anonymous": true`（严格解析通过） |
@@ -588,6 +616,9 @@ freeTierResetWarpCooldown: () =>
 | 匿名通道确实在服务 | `availability_checked model="big-pickle" channel="anonymous" reason="probe_succeeded"`；`request routed status=200 channel="anonymous"` |
 | WARP 池在干净账本下能起 | `OpenCode WARP/ipv6 pool ready (max 4 exits, preloading 4)`（4 个出口注册成功） |
 | 配置非法值被拒 | `POST /config/set {engine_channel_order: bogus}` → **400** |
+| 熔断参数已被引擎接受 | 真实引擎用本阶段 config.json 启动，`/healthz` 回报 `"anonymous": true`（`DisallowUnknownFields` 严格解析通过） |
+| 契约测试确实能抓到错 | 变异测试：`base_hours` → `base_hour` 后，契约测试报 `引擎会拒绝这份 config.json（字段名与引擎契约不符）: json: unknown field "base_hour"` |
+| 坏账本可被重置 | 损坏账本 → `{"cooling":0,"exists":true,"corrupt":true}` → 重置 → `{"cleared":0,"status":"ok"}` → 再读 `{"exists":false,"corrupt":false}` |
 
 ### 执行中发现并已修的问题
 
@@ -595,6 +626,15 @@ freeTierResetWarpCooldown: () =>
 |---|------|------|
 | 1 | 引擎 `models.protocols` 是 `map[string]string`，管理器侧却是 `map[string]any` —— 引擎用前者反序列化时，某个非字符串值会让整个 config.json 解析失败（引擎起不来） | 已对齐为 `map[string]string`（commit `a50fae8`） |
 | 2 | 旧版后端无 `engine_channel_order` 字段时，新面板会显示「WARP 优先」而后端其实跑 key_first —— 面板显示 ≠ 实际行为 | 已改为按 `key_first` 显示 + 禁用开关 + 明确提示（commit `37ae872`） |
+| 3 | 审查发现熔断 6h < 引擎出口冷却 24h，熔断会先于出口解冻失效 → 反复烧出口 | 熔断改为 6/1/24 并加语义回归锁（commit `53e86cf`） |
+| 4 | 审查发现坏账本与「0 条冷却」不可区分，重置按钮在最需要时被禁用 | 新增 `corrupt` 字段 + 前端放开禁用条件（commit `53e86cf`） |
+| 5 | 审查发现前端文案过度断言「引擎会自动跳过匿名通道」 | 改为如实描述熔断触发条件（commit `53e86cf`） |
+
+### 登记到下阶段（本次不改）
+
+| # | 事项 | 原因 |
+|---|------|------|
+| S1 | 「额度重置」列区分「无数据」与「已过期」（`resolveRetryAfter` 返回 `at != "" && seconds == 0` 时渲染成「已过期」） | 属 v2.1 额度可视化范围，本阶段未触及；改动会牵扯 `freetier_models.go` 的探测缓存语义，单独做更稳 |
 
 ---
 
