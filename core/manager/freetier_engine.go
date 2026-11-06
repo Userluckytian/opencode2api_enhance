@@ -145,7 +145,34 @@ type engineModels struct {
 	RefreshSeconds int            `json:"refresh_seconds"`
 	Protocols      map[string]any `json:"protocols"`
 	FreeOnly       bool           `json:"free_only"`
+	// AnonymousBackoff 匿名通道熔断参数。
+	//
+	// 为什么必须写：引擎在 models.anonymous_backoff 缺省时把熔断阈值置 0，
+	// 即「熔断关闭」（gateway.go:148 → anonymousBackoffFromConfig(nil)）。
+	// 于是 WARP 通道不可用时，每条请求都要先陪跑一次失败的匿名尝试才落到
+	// key —— 白白多花一次往返。有了熔断：连续失败达阈值就暂停匿名通道，
+	// key 直接接管。
+	AnonymousBackoff *engineAnonymousBackoff `json:"anonymous_backoff,omitempty"`
 }
+
+// engineAnonymousBackoff 匿名通道熔断参数（阈值 + 指数退避时长，单位小时）。
+type engineAnonymousBackoff struct {
+	Threshold int `json:"threshold,omitempty"`
+	BaseHours int `json:"base_hours,omitempty"`
+	MaxHours  int `json:"max_hours,omitempty"`
+}
+
+// 匿名通道熔断的默认参数。
+//
+// 为什么固定成常量而不开放成配置项（YAGNI）：先把「熔断存在」这件事做对，
+// 参数调优等真实反馈。连续 3 次失败就暂停 1 小时，每次再失败翻倍，最长 6 小时
+// —— 覆盖「WARP 短暂不可用」与「出口被上游封禁」两种常见情形，又不至于
+// 让一条坏会话把匿名通道关上一整天。
+const (
+	anonymousBackoffThreshold = 3
+	anonymousBackoffBaseHours = 1
+	anonymousBackoffMaxHours  = 6
+)
 
 type enginePerformance struct {
 	MaxIdleConns          int `json:"max_idle_conns"`
@@ -215,10 +242,21 @@ func (m *Manager) WriteEngineConfig() error {
 		ServerKeys: []string{effectiveGatewayKey(cfg)},
 		ZenKeys:    cfg.EngineZenKeys,
 		GoKeys:     cfg.EngineGoKeys,
-		// Anonymous 只在完全没有付费 key 时开启：实测（同一引擎、同样直连）匿名
-		// 模式请求 big-pickle 恒 429；配一个 zen key 后同一模型立刻 200。
-		// 配了 key 还留 anonymous=true，引擎仍会优先走匿名通道，继续 429。
-		Anonymous: len(cfg.EngineZenKeys) == 0 && len(cfg.EngineGoKeys) == 0,
+		// Anonymous 决定引擎是否启用匿名（无 key）通道，也就是「WARP 优先」
+		// 这档能不能成立。
+		//
+		// 引擎的路由语义（internal/models/catalog.go:282-291）：只有
+		// anonymous=true 才建匿名路由，否则直接建密钥路由 —— 所以配了 key
+		// 再把 anonymous 关掉，WARP 出口就完全不参与请求。
+		//
+		// 引擎的降级语义（internal/gateway/upstream.go:232-257）：匿名路由
+		// 先走 doAnonymousUpstream（WARP 出口），失败后 entering preferred key
+		// tiers 再按 KeyTiers 顺序打 key。**开 anonymous 不会让 key 白费**，
+		// 只会把 key 排到 WARP 之后 —— 这正是 v2.2 要的顺序。
+		//
+		// （旧注释说「配了 key 还留 anonymous=true，引擎仍会优先走匿名通道，
+		// 继续 429」——那是引擎更早版本的行为，在当前上游 9964407 已不成立。）
+		Anonymous: engineAnonymousEnabled(cfg),
 		Warp: engineWarpConfig{
 			Enabled:    engineWarpEnabled(cfg),
 			PoolSize:   poolSize,
@@ -245,6 +283,12 @@ func (m *Manager) WriteEngineConfig() error {
 			// 「免费」判定（pricing.go:256 Decide）：模型 ID 含 "free"，
 			// 或元数据显示 input/output 成本均为 0 且未废弃。
 			FreeOnly: engineFreeOnly(cfg),
+			// 匿名通道熔断：WARP 不可用时快速跳过匿名尝试，把请求直接交给 key。
+			AnonymousBackoff: &engineAnonymousBackoff{
+				Threshold: anonymousBackoffThreshold,
+				BaseHours: anonymousBackoffBaseHours,
+				MaxHours:  anonymousBackoffMaxHours,
+			},
 		},
 		Performance: enginePerformance{
 			MaxIdleConns:          2048,
@@ -484,4 +528,19 @@ func autoWarpPoolSize(keyCount int) int {
 		return 2
 	}
 	return 4
+}
+
+// engineAnonymousEnabled 引擎匿名通道开关（按通道顺序）。
+//
+//   - warp_first（默认）：**恒开**。引擎路由是「匿名(WARP) → key tier」，
+//     匿名不通才落到 key，于是 key 的额度只用来兜 WARP 兜不住的场景。
+//   - key_first：只在完全没有 key 时才开（v2.1 之前的行为），保留作回退档。
+//
+// 注意：WARP 开关本身（engine_warp_enabled）与本函数正交。开匿名通道但
+// 关掉 WARP 时，引擎会走「出口代理」列表的匿名通道（不是 WARP）。
+func engineAnonymousEnabled(cfg Config) bool {
+	if engineChannelOrder(cfg) == ChannelOrderKeyFirst {
+		return len(cfg.EngineZenKeys) == 0 && len(cfg.EngineGoKeys) == 0
+	}
+	return true
 }

@@ -65,6 +65,9 @@ type Config struct {
 	// EngineFreeOnly 只暴露/路由免费模型（写引擎 models.free_only）。
 	// nil = 默认开启（用户要的就是「只勾选免费模型」这一默认行为）。
 	EngineFreeOnly *bool `json:"engine_free_only,omitempty"`
+	// EngineChannelOrder 免费通道的顺序档位（warp_first / key_first）。
+	// 空 = 默认 warp_first（先走 WARP 出口，失败再用 key）。
+	EngineChannelOrder string `json:"engine_channel_order,omitempty"`
 }
 func (m *Manager) configPath() string {
 	return filepath.Join(m.paths.DataDir, "config.json")
@@ -229,6 +232,8 @@ func (m *Manager) ConfigGet(key string) (string, error) {
 		return strconv.Itoa(cfg.EngineModelsRefreshSec), nil
 	case "engine_free_only":
 		return strconv.FormatBool(engineFreeOnly(cfg)), nil
+	case "engine_channel_order":
+		return engineChannelOrder(cfg), nil
 	}
 	return "", fmt.Errorf("unknown config key: %s", key)
 }
@@ -352,6 +357,12 @@ func (m *Manager) ConfigSet(key, value string) error {
 			return err
 		}
 		cfg.EngineFreeOnly = &b
+	case "engine_channel_order":
+		v := strings.TrimSpace(value)
+		if v != ChannelOrderWarpFirst && v != ChannelOrderKeyFirst {
+			return fmt.Errorf("engine_channel_order 只能是 %s 或 %s", ChannelOrderWarpFirst, ChannelOrderKeyFirst)
+		}
+		cfg.EngineChannelOrder = v
 	default:
 		return fmt.Errorf("unknown config key: %s", key)
 	}
@@ -411,6 +422,30 @@ func engineFreeOnly(cfg Config) bool {
 	return *cfg.EngineFreeOnly
 }
 
+// 免费通道的顺序档位。
+const (
+	// ChannelOrderWarpFirst：先走 WARP 出口（引擎匿名通道），不通再用 key。
+	//
+	// 这是默认档。用户要的是「优先 warp，warp 完再用 key」——把 key 的额度
+	// 留给 WARP 兜不住的场景，而不是让 key 先把额度烧光。
+	ChannelOrderWarpFirst = "warp_first"
+	// ChannelOrderKeyFirst：只用 key（v2.1 之前的行为），保留作回退档。
+	ChannelOrderKeyFirst = "key_first"
+)
+
+// engineChannelOrder 生效的通道顺序（空/非法值 = 默认 warp_first）。
+//
+// 为什么不把非法值当错误：配置文件可能被手改过，一个手滑的值不该让整个
+// 免费层起不来。回落默认值 + 面板显示实际生效值，比启动失败友好。
+func engineChannelOrder(cfg Config) string {
+	switch strings.TrimSpace(cfg.EngineChannelOrder) {
+	case ChannelOrderKeyFirst:
+		return ChannelOrderKeyFirst
+	default:
+		return ChannelOrderWarpFirst
+	}
+}
+
 // ConfigView 是前端 /api/admin/config 的响应形态（密码脱敏）。
 // ConfigView 前端视图（v2.0.0 精简：免费层配置项已移除）。
 type ConfigView struct {
@@ -443,6 +478,8 @@ type ConfigView struct {
 	EngineModelsRefreshSec int      `json:"engine_models_refresh_sec"`
 	// EngineFreeOnly 只暴露/路由免费模型（默认 true）。
 	EngineFreeOnly bool `json:"engine_free_only"`
+	// EngineChannelOrder 生效的通道顺序（warp_first / key_first，默认 warp_first）。
+	EngineChannelOrder string `json:"engine_channel_order"`
 }
 
 // ConfigViewOf 生成前端视图（密码脱敏为掩码）。
@@ -478,6 +515,7 @@ func (m *Manager) ConfigViewOf() ConfigView {
 		EngineRetryMaxAttempts: cfg.EngineRetryMaxAttempts,
 		EngineModelsRefreshSec: cfg.EngineModelsRefreshSec,
 		EngineFreeOnly:         engineFreeOnly(cfg),
+		EngineChannelOrder:     engineChannelOrder(cfg),
 	}
 }
 // defaultUiPollIntervalSec 界面轮询间隔默认值（秒，U3）。
