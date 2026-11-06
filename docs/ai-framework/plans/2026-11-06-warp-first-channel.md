@@ -310,7 +310,7 @@ type engineAnonymousBackoff struct {
 }
 ```
 
-**默认值**：`threshold=3, base_hours=1, max_hours=6`（写在管理器侧，不进管理器 config.json，避免配置面膨胀；用户如需覆盖再加 `engine_anonymous_backoff` 配置项——本阶段**先只做常量默认值**，D5 之外不扩张配置面）。
+**默认值**：`threshold=6, base_hours=1, max_hours=24`（审查后由 3/1/6 修正 —— 见「代码审查」小节 Y2）（写在管理器侧，不进管理器 config.json，避免配置面膨胀；用户如需覆盖再加 `engine_anonymous_backoff` 配置项——本阶段**先只做常量默认值**，D5 之外不扩张配置面）。
 
 > **YAGNI 决策：** 本阶段熔断参数**固定为默认常量**，不开放成配置项。理由：先把「熔断存在」这件事做对，参数调优等真实反馈。若用户需要再单独加。
 
@@ -391,7 +391,7 @@ func (m *Manager) ResetWarpCooldown() (WarpCooldownState, error) { ... }
 | `TestEngineAnonymousEnabledWarpFirstWithKeys` | 有 10 个 zen key + `warp_first` → `anonymous=true`（**这是本阶段核心断言**） |
 | `TestEngineAnonymousEnabledKeyFirstLegacy` | 有 key + `key_first` → `anonymous=false`（保持 v2.1 行为） |
 | `TestEngineAnonymousEnabledNoKeysAnyOrder` | 无 key + 任意顺序 → `anonymous=true` |
-| `TestWriteEngineConfigEmitsAnonymousBackoff` | 生成的引擎 config.json 里 `models.anonymous_backoff.threshold==3`、`base_hours==1`、`max_hours==6`，且 `anonymous==true` |
+| `TestWriteEngineConfigEmitsAnonymousBackoff` | 生成的引擎 config.json 里 `models.anonymous_backoff.threshold==6`、`base_hours==1`、`max_hours==24`，且 `anonymous==true` |
 
 > 关键：最后一条要**真实调用 `m.WriteEngineConfig()`** 写临时目录，再读回来解析断言——不能只测结构体。
 
@@ -576,18 +576,42 @@ freeTierResetWarpCooldown: () =>
 
 **审查结论：** ⚠️ 有条件通过 —— 无 🔴 阻塞；3 条应修（Y1/Y2/Y3）+ 5 条建议（S1~S5），全部已修并复验。
 
+> **补充：独立阶段验收又发现 S4 的修复本身有漏洞，已二次修复。**
+>
+> 验收员（未采信计划里的文字声明，自行编译**未修改的引擎源码**跑真实
+> `config.Load` 验证）实测发现：我第一版契约测试的手抄清单**不是引擎的忠实
+> 镜像** —— 漏了 `rotation` / `server_key_metadata` / `reasoning` /
+> `warp.tun` / `webui.password_hash` 5 个字段，还**多抄了引擎根本没有的**
+> `warp.source_ipv4` / `warp.country_code`。
+>
+> 后果实测：注入 `warp.source_ipv4` 的 config.json
+> → 第一版契约测试 **PASS**（因为清单里有它）
+> → 真实引擎 **LOAD_ERROR: unknown field "source_ipv4" → 引擎启动失败**
+>
+> 即第一版契约测试**只挡「少写字段」，挡不住「多写/写错字段」** ——
+> 而后者恰恰是引擎启动失败的主因。已重写为**双向镜像**：
+>
+> 1. **解码方向**：DisallowUnknownFields 解码管理器写出的配置（挡多写/写错）。
+> 2. **镜像方向**：断言本清单的字段名集合与引擎源码里的 json tag 集合
+>    **完全相等**（既不多也不少）—— 挡「清单自己抄错」。
+>
+> 并加反例测试 `TestEngineContractRejectsUnknownField`（注入
+> `warp.source_ipv4` 必须被抓到），确保解码方向不再失效。
+
 ### 审查发现与处置（逐条）
 
 | # | 级别 | 问题 | 处置 |
 |---|------|------|------|
-| Y1 | 🟡 | 前端文案断言「WARP 不可用时引擎会自动跳过匿名通道直接用 key」。但熔断是引擎的**进程内**状态（`internal/gateway/pool.go:81-83`），引擎重启即归零 —— 刚重启完、失败次数没累计到阈值时仍会先陪跑一次失败的匿名尝试。另外「出口全部冷却」分支漏了引擎的代理回落路径（`internal/gateway/upstream.go:364-366` `warp_proxy_fallback` → 退到代理列表走匿名直连，不是 key） | 文案改为如实描述：「先试匿名通道，连续失败达 6 次后熔断并改走 key」；冷却分支补上「引擎会退到代理列表（通常是直连）走匿名通道」 |
+| Y1 | 🟡 | 前端文案断言「WARP 不可用时引擎会自动跳过匿名通道直接用 key」。但熔断是引擎的**进程内**状态（`internal/gateway/pool.go:81-83`），引擎重启即归零 —— 刚重启完、失败次数没累计到阈值时仍会先陪跑一次失败的匿名尝试。另外「出口全部冷却」分支漏了引擎的代理回落路径（`internal/gateway/upstream.go:364-366` `warp_proxy_fallback` → 退到代理列表走匿名直连，不是 key） | 文案改为如实描述：「先试匿名通道，连续失败达 N 次后熔断并改走 key」；冷却分支补上「引擎会退到代理列表（通常是直连）走匿名通道」 |
 | Y2 | 🟡 | 熔断参数 3/1/6 比引擎默认（6/1/24）激进。**关键问题**：引擎出口黑名单是固定 24h（`internal/warp/pool.go:29` `egressCooldown = 24 * time.Hour`），熔断 6h < 24h ⇒ 熔断一过出口还没解冻，引擎再次陪跑匿名尝试并把整池烧掉 —— 恰是本熔断想避免的循环 | 改为 **6/1/24**，对齐引擎默认且 `max_hours >= 出口冷却周期`；另加语义回归锁 `TestAnonymousBackoffOutlivesEgressCooldown` |
 | Y3 | 🟡 | 账本损坏时 `WarpCooldown()` 返回 `{cooling:0, exists:true}`，与「确实 0 条冷却」不可区分 → 前端把「重置出口冷却」按钮禁用掉，**用户恰恰在最需要它的时候点不动** | `WarpCooldownState` 新增 `corrupt` 字段；前端在损坏时显示「账本已损坏」并**放开**按钮禁用条件；已端到端实测（损坏→可重置→文件删除） |
 | S1 | 🟢 | 「额度重置」列在管理器重启后永久回到「点探测查询」，且「无数据」与「已过期」渲染成同一个 `—` | **本阶段不改**（属 v2.1 额度可视化范围，非本阶段引入）；登记为下阶段项 |
 | S2 | 🟢 | `availabilityEntry.retry_after_*` 是前瞻占位（引擎当前不写），注释却像在描述既有行为 | 注释改为明确标注「⚠️ 前瞻占位：引擎当前不写，别以为读不到是 bug」 |
 | S3 | 🟢 | `key_first` 档名与「有 key 时才开匿名」的行为容易读反 | 在 `ChannelOrderKeyFirst` 常量注释里补一句「此档**没有** key→匿名的降级路径：引擎在 anonymous=false 时压根不建匿名路由」 |
-| S4 | 🟢 | 字段名契约未被测试锁住：若本仓库与引擎 tag **同时**写错（如都写成 `base_hour`），两边单测双双通过而引擎启动失败 | 新增 `core/manager/freetier_contract_test.go`：手抄引擎 `Config` 全部 json tag 成独立契约结构体，用 `json.Decoder.DisallowUnknownFields()` 解码管理器写出的 config.json。**已用变异测试验证**：把 `base_hours` 改成 `base_hour` → 测试报 `引擎会拒绝这份 config.json（字段名与引擎契约不符）: json: unknown field "base_hour"` |
+| S4 | 🟢 | 字段名契约未被测试锁住：若本仓库与引擎 tag **同时**写错（如都写成 `base_hour`），两边单测双双通过而引擎启动失败 | 新增 `core/manager/freetier_contract_test.go`：手抄引擎 `Config` 全部 json tag 成独立契约结构体，用 `json.Decoder.DisallowUnknownFields()` 解码管理器写出的 config.json。**变异测试验证**：把 `base_hours` 改成 `base_hour` → 测试报 `引擎会拒绝这份 config.json（字段名与引擎契约不符）: json: unknown field "base_hour"` |
+| S4′ | 🟡 | **验收阶段二次发现**：第一版 S4 的手抄清单不是引擎忠实镜像（漏 5 个字段、多抄 2 个引擎没有的字段）→ 契约测试只挡「少写」不挡「多写」，而后者才是引擎启动失败主因 | 重写为**双向镜像**：① 解码方向挡多写/写错；② 镜像方向断言清单字段集与引擎源码 json tag 集**完全相等**。补 `TestEngineContractRejectsUnknownField`（注入 `warp.source_ipv4` 必须被抓到）+ `TestEngineContractIsFaithfulMirror`（清单与引擎双向相等） |
 | S5 | 🟢 | 路径穿越测试只验了路径形状，没锁「不接受路径参数」这个真正的安全属性 | 新增编译期断言 `var _ func() (WarpCooldownState, error) = m.ResetWarpCooldown` —— 日后有人给该方法加参数，这行会编译失败 |
+| S6 | 🟢 | 前端硬编码「连续失败达 6 次后熔断」，与后端常量形成双份真相 —— 后端调参后前端即开始说谎 | 后端 `ConfigView` 新增 `engine_anonymous_backoff_threshold` 同源下发，前端文案直接引用（commit `7419e05`） |
 
 ### 审查方跑过的验证命令
 
@@ -613,13 +637,13 @@ GPL 扫描：git diff main...HEAD | Select-String 'internal/gateway|internal/war
 | 1 | 通道顺序语义生效 | `warp_first` + 有 key → 引擎 config.json `anonymous == true` | 自动化（执行方） | ✅ 实测 `anonymous=True` + `zen_keys=3`（隔离数据目录实跑） |
 | 2 | 熔断已下发 | 引擎 config.json 含 `models.anonymous_backoff`，且 `max_hours` ≥ 引擎出口冷却周期（24h） | 自动化（执行方） | ✅ 实测 `{"threshold":6,"base_hours":1,"max_hours":24}`（审查后由 3/1/6 修正） |
 | 3 | 冷却重置可用 | 端点返回 `cleared` 数；文件被删；同目录其他文件不受影响 | 自动化（执行方） | ✅ 实测 `{"cleared":52}`；账本已删；`config.json`/模型目录/stdout.log 完好 |
-| 4 | 单测 | `go test ./core/manager/` 全过（含 18 条新用例） | 自动化（执行方） | ✅ `ok ... 5.5s`；全包 58 条用例 0 失败（审查后新增 3 条契约测试） |
-| 5 | 构建 | `go build ./...`、`go vet ./core/manager/ .`、`npx tsc --noEmit`、`npm run build` 全 exit 0 | 自动化（执行方） | ✅ 全部 exit 0（npm 产物 436.17 kB） |
-| 6 | 前端文案一致 | 无「key 优先」残留口径；状态条按真实顺序判定；不夸大熔断行为 | 自动化（执行方）+ 人工抽查 | ✅ 代码层已改（含审查后修正文案）；人工点验待部署后 |
-| 7 | 代码审查 | 审查结论 ✅ 或 ⚠️（问题已登记）；❌ 不通过则下放下阶段 | 独立角色（非实现者） | ✅ 独立审查结论「⚠️ 有条件通过」，无 🔴 阻塞；3 应修 + 5 建议**全部已修并复验** |
-| 8 | 红线 | 引擎源码/二进制未被修改；`git diff` 无引擎相关文件 | 自动化（执行方） | ✅ diff 只含 12 个本仓库文件；引擎仅被**读取** |
-| 9 | 密钥 | `git ls-files` 无敏感文件；`docs/issue-log/2026-11-06.md` 未入库 | 自动化（执行方） | ✅ 测试文件按 `.gitignore` 本地保留；issue-log 按仓库约定不入库 |
-| 10 | 引擎能带新 config 启动 | 真机重启引擎后 `/healthz` 仍 200 且 `warp` 字段出现（若 WARP 注册成功） | 端到端（需用户/部署机） | ✅ **已提前验证**：真实 `opencode2api-win.exe` 用本阶段生成的 config.json 启动成功，`/healthz` 回报 `"anonymous": true`（严格解析通过） |
+| 4 | 单测 | `go test ./core/manager/` 全过（含 20 条新用例） | 自动化（执行方） | ✅ `ok ... 5.4s`；全包 **58 条用例 0 失败**（验收后新增 2 条契约测试：反例 + 双向镜像） |
+| 5 | 构建 | `go build ./...`、`go vet ./core/manager/ .`、`npx tsc --noEmit`、`npm run build` 全 exit 0 | 自动化（执行方） | ✅ 全部 exit 0（npm 产物 436.29 kB） |
+| 6 | 前端文案一致 | 无「key 优先」残留口径；状态条按真实顺序判定；不夸大熔断行为 | 自动化（执行方）+ 人工抽查 | ✅ 代码层已改（含审查后修正文案 + 阈值同源下发）；人工点验待部署后 |
+| 7 | 代码审查 | 审查结论 ✅ 或 ⚠️（问题已登记）；❌ 不通过则下放下阶段 | 独立角色（非实现者） | ✅ **两轮独立审查 + 一轮独立验收**：审查「⚠️ 有条件通过」（3 应修 + 6 建议）、契约专项审查「✅ 通过」、阶段验收「⚠️ 有条件通过」并二次发现契约测试漏洞 —— **全部已修并复验** |
+| 8 | 红线 | 引擎源码/二进制未被修改；`git diff` 无引擎相关文件 | 自动化（执行方） | ✅ diff 只含 12 个本仓库文件；引擎仅被**读取**（验收员独立核验：`git diff main...HEAD --stat -- '*internal/*' 'bin/*' '*.exe'` → 空） |
+| 9 | 密钥 | `git ls-files` 无敏感文件；`docs/issue-log/2026-11-06.md` 未入库 | 自动化（执行方） | ✅ 测试文件按 `.gitignore` 本地保留；issue-log 按仓库约定不入库；验收员独立正则扫描 0 命中 |
+| 10 | 引擎能带新 config 启动 | 真机重启引擎后 `/healthz` 仍 200 且 `warp` 字段出现（若 WARP 注册成功） | 端到端（需用户/部署机） | ✅ **双重独立验证**：① 真实 `opencode2api-win.exe` 用本阶段生成的 config.json 启动成功，`/healthz` 回报 `"anonymous": true`；② 验收员自行编译**未修改的引擎源码**跑真实 `config.Load` → `LOAD_OK / anonymous=true / anonymous_backoff={6,1,24}` |
 
 ### 补充真机证据（超出最低要求）
 
@@ -632,6 +656,55 @@ GPL 扫描：git diff main...HEAD | Select-String 'internal/gateway|internal/war
 | 熔断参数已被引擎接受 | 真实引擎用本阶段 config.json 启动，`/healthz` 回报 `"anonymous": true`（`DisallowUnknownFields` 严格解析通过） |
 | 契约测试确实能抓到错 | 变异测试：`base_hours` → `base_hour` 后，契约测试报 `引擎会拒绝这份 config.json（字段名与引擎契约不符）: json: unknown field "base_hour"` |
 | 坏账本可被重置 | 损坏账本 → `{"cooling":0,"exists":true,"corrupt":true}` → 重置 → `{"cleared":0,"status":"ok"}` → 再读 `{"exists":false,"corrupt":false}` |
+| 契约测试双向镜像成立 | `TestEngineContractIsFaithfulMirror` PASS —— 本清单字段集与引擎源码 json tag 集**完全相等**（既不多也不少） |
+| 契约测试能抓到「多写」 | `TestEngineContractRejectsUnknownField`：注入 `warp.source_ipv4` → 报错并指出该字段名（不再放过） |
+
+---
+
+## 阶段验收（独立角色，独立于实现与审查）
+
+**验收方**：独立子代理（未参与实现，也未参与前两轮审查）
+
+**关键做法**：验收员**不采信**本计划里的任何「✅」标记，全部自行核验；并且
+**自行编译未修改的引擎源码**跑真实 `config.Load` 来验证配置契约 ——
+这比「让引擎跑起来看日志」更严格（解析失败 = 引擎启动失败）。
+
+**验收结论：** ⚠️ 有条件通过 —— 10 行验收标准 9 行 ✅、1 行 ⚠️；无 🔴 阻塞。
+
+| 行 | 验收员结论 | 验收员独立证据 |
+|----|-----------|---------------|
+| 1 通道顺序语义 | ✅ | 自行生成 config 得 `"anonymous": true`；4 种组合单测全 PASS |
+| 2 熔断已下发 | ✅ | 自行生成得 `{"threshold":6,"base_hours":1,"max_hours":24}`；真实引擎解析出 `&{Threshold:6 BaseHours:1 MaxHours:24}` |
+| 3 冷却重置 | ✅ | 无参、只删固定路径；端点有 `requireAuth` |
+| 4 单测 | ✅ | 自行实跑 **58 用例 0 失败**，ok 5.359s |
+| 5 构建 | ✅ | build/vet/tsc/npm build 全 EXIT=0，产物 436.17 kB |
+| 6 前端文案 | ⚠️ | 状态条四态齐全、旧口径已清；但**硬编码「6 次」**与后端常量双份真相 → 已改为后端同源下发（commit `7419e05`） |
+| 7 代码审查 | ⚠️ | Y1/Y2/Y3 确已落地；但**S4 的修复本身留有漏洞** → 见下方二次发现 |
+| 8 红线 | ✅ | `git diff main...HEAD --stat -- '*internal/*' 'bin/*' '*.exe'` → **空** |
+| 9 密钥 | ✅ | 正则扫 `oc_sk_*`/`oc_go_*`/`sk-*` → **0 命中** |
+| 10 引擎带新 config 启动 | ✅ | 验收员自行编译**未修改的引擎源码**跑真实 `config.Load` → `LOAD_OK / anonymous=true / anonymous_backoff={6,1,24}` / `PARSER_EXIT=0` |
+
+### 验收阶段的二次发现（已修）
+
+| # | 级别 | 问题 | 处置 |
+|---|------|------|------|
+| A1 | 🟡 | 契约测试的手抄清单不是引擎忠实镜像（漏 5 个、多 2 个）→ 只挡「少写」不挡「多写」，而后者才是引擎启动失败主因 | 重写为双向镜像 + 反例测试（详见「代码审查」小节 S4′） |
+| A2 | 🟢 | 前端硬编码熔断阈值，与后端常量双份真相 | 后端 `ConfigView` 同源下发 `engine_anonymous_backoff_threshold` |
+| A3 | 🟡 | 计划「跳过项」口径矛盾：已给大量真机证据，却仍把「端到端真机验证」登记为跳过 | 改为区分「单请求级已验证」与「面板 GUI 端到端未做」，跳过项只留「部署 + 人工点验」 |
+| A4 | 🟢 | 计划正文残留旧熔断参数（threshold=3） | 已全文同步为 6/1/24（保留审查小节里的历史对照） |
+
+### 验收员确认的「需求本体成立」
+
+验收员**未只看注释**，而是去引擎源码核实了路由语义：
+
+- `catalog.go:283-286`：hasAnonymous 为真且模型免费 → 建 `Route{Anonymous:true, KeyTiers:keyTiers}`
+- `gateway.go:294/517`：把 `g.cfg.Anonymous` 传为 hasAnonymous → 管理器写 `anonymous=true` 即建匿名路由
+- `upstream.go:232-257`：先 `doAnonymousUpstream`（WARP），失败后 `entering preferred key tiers` 按 KeyTiers 打 key
+
+→ **「WARP 优先 → 密钥兜底」在引擎侧确实成立**，且注释属实。
+
+另核实 `warp.go:38-39`：Zen tier 打免费模型**即使走 key 也经 WARP 出口** ——
+所以本阶段真正省下的是 key 的**额度**，不是出口带宽。
 
 ### 执行中发现并已修的问题
 
@@ -655,8 +728,8 @@ GPL 扫描：git diff main...HEAD | Select-String 'internal/gateway|internal/war
 
 | 风险 | 缓解 |
 |------|------|
-| 引擎 `DisallowUnknownFields` 因字段名写错而启动失败 | Task 3 用例真实写盘再读回解析；字段名对照 `internal/config/config.go:162-176` |
-| 开 `anonymous` 后 WARP 不通导致**每条请求**先陪跑失败匿名尝试 | 熔断块（threshold=3）——连续失败即暂停匿名通道，key 直接接管 |
+| 引擎 `DisallowUnknownFields` 因字段名写错而启动失败 | ① Task 3 用例真实写盘再读回解析；② **契约测试双向镜像**（`freetier_contract_test.go`：解码方向挡多写/写错 + 镜像方向断言清单与引擎源码字段集完全相等）；③ 验收阶段另用真实引擎 `config.Load` 独立复验 |
+| 开 `anonymous` 后 WARP 不通导致**每条请求**先陪跑失败匿名尝试 | 熔断块（threshold=6）——连续失败即暂停匿名通道，key 直接接管 |
 | 匿名通道熔断触发后 WARP 恢复了，但熔断要等 1 小时 | 引擎的熔断在匿名通道成功一次即自动关闭（`pool.go:210` `NoteSuccess`）；面板「重启引擎」也能立刻重置 |
 | 引擎未带 WARP 启动（当前本机状态） | 引擎会 `warp_startup_fallback` 并后台重试；面板展示真实状态，不假装 WARP 可用 |
 | 用户升级后行为突变（原来 key 优先） | 提供 `key_first` 回退档；CHANGELOG 显式标注行为变更 |
@@ -680,7 +753,7 @@ GPL 扫描：git diff main...HEAD | Select-String 'internal/gateway|internal/war
 - 必读：`docs/ai-framework/phased-plan-driven.md`、`AGENTS.md`、本计划全文
 
 ### 做
-1. **Task 1**：新增 `engine_channel_order` 配置项（默认 `warp_first`），改 `freetier_engine.go` 让 `anonymous` 按顺序生成（`warp_first` → 恒 true），并在引擎 config 里补 `models.anonymous_backoff`（threshold=3 / base_hours=1 / max_hours=6）。**同时改掉 `freetier_engine.go:218-220` 那条已过期的注释。**
+1. **Task 1**：新增 `engine_channel_order` 配置项（默认 `warp_first`），改 `freetier_engine.go` 让 `anonymous` 按顺序生成（`warp_first` → 恒 true），并在引擎 config 里补 `models.anonymous_backoff`（threshold=6 / base_hours=1 / max_hours=24）。**同时改掉 `freetier_engine.go:218-220` 那条已过期的注释。**
 2. **Task 2**：新增 `WarpCooldown()` / `ResetWarpCooldown()`，操作 `<FreeTierEngineDir>/config.json.warp-state.json`，路径不接受外部参数。
 3. **Task 3**：写 10 条单测（6 条通道顺序 + 4 条冷却重置），其中必须有一条**真实调用 `WriteEngineConfig()` 写临时目录再读回解析**。
 4. **Task 4**：`POST /api/admin/free-tier/reset-warp-cooldown` 端点。
