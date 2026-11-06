@@ -129,8 +129,14 @@ type availabilityEntry struct {
 	Reason    string `json:"reason"`
 	Channel   string `json:"channel"`
 	// RetryAfterSeconds 引擎在探测 429 时记下的上游 Retry-After（秒）。
+	//
+	// ⚠️ 前瞻占位：引擎当前的 availability.json **不会**写这两个字段
+	// （internal/models/availability.go 的 AvailabilityEntry 只有
+	// checked_at / next_check / reason / channel）。引擎写了我就读、
+	// 将来引擎支持了会自动生效；没写则这两个字段恒为零值。
+	// 别以为「读不到值」是 bug —— 现在就是这个状态。
 	RetryAfterSeconds int `json:"retry_after_seconds"`
-	// RetryAfterAt 引擎若直接写了重置时刻，优先用它。
+	// RetryAfterAt 引擎若直接写了重置时刻，优先用它（同上，前瞻占位）。
 	RetryAfterAt string `json:"retry_after_at"`
 }
 

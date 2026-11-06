@@ -680,7 +680,7 @@ export default function OpenCodePage({ toast }: { toast: (msg: string, ok?: bool
           {config?.engine_channel_order ? (
             <>
               切换后需重启引擎生效（引擎只在启动时读一次配置）。WARP 优先时若出口不可用，
-              引擎会自动跳过匿名通道直接用 key —— 不会每条请求都先失败一次。
+              引擎会先试匿名通道，连续失败达 6 次后熔断并改走 key —— 熔断前仍会多几次失败尝试。
             </>
           ) : (
             <>当前管理器版本不支持通道顺序配置（字段缺失），开关已禁用。请更新管理器后再切换。</>
@@ -1066,15 +1066,26 @@ export default function OpenCodePage({ toast }: { toast: (msg: string, ok?: bool
           <div className="flex-1 min-w-0">
             <div className="text-[12px] text-zinc-600">
               出口冷却账本：
-              <span className="font-semibold text-zinc-900">{cooldown?.cooling ?? 0}</span> 个出口前缀被标记
+              {cooldown?.corrupt ? (
+                <span className="font-semibold text-amber-700">账本已损坏（引擎会当空状态处理）</span>
+              ) : (
+                <>
+                  <span className="font-semibold text-zinc-900">{cooldown?.cooling ?? 0}</span> 个出口前缀被标记
+                </>
+              )}
             </div>
             <div className="text-[11px] text-zinc-400">
-              清掉它只重置本地出口账本，<b>不影响账号额度</b>；清完需重启引擎才会重新注册出口。
+              {cooldown?.corrupt ? (
+                <>这份账本读不出内容，建议直接重置掉它。</>
+              ) : (
+                <>清掉它只重置本地出口账本，<b>不影响账号额度</b>；清完需重启引擎才会重新注册出口。</>
+              )}
             </div>
           </div>
           <button
             onClick={() => void resetCooldown()}
-            disabled={resettingCooldown || (cooldown?.cooling ?? 0) === 0}
+            // 账本损坏时 cooling 是 0，但恰恰最需要重置 —— 所以别把它禁用掉。
+            disabled={resettingCooldown || (!cooldown?.corrupt && (cooldown?.cooling ?? 0) === 0)}
             title="删除 config.json.warp-state.json（只清本地出口账本）"
             className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-[12px] text-zinc-700 bg-white border border-zinc-200 hover:bg-zinc-50 disabled:opacity-40"
           >
@@ -1313,15 +1324,25 @@ function ChannelStatusBar({
   } else if (warpCoolingOnly) {
     lane = 'down'
     laneLabel = '出口全部冷却'
-    laneHint = `${status?.warp_cooling ?? 0} 个出口在冷却；可用「重置出口冷却」清掉本地账本后重启引擎`
+    // 注意别写成「请求全挂」：引擎在 WARP 不可用时会退到代理列表走匿名通道
+    // （internal/gateway/upstream.go:364-366 warp_proxy_fallback），
+    // 代理列表通常是 direct，也就是本机 IP 直连匿名上游。
+    laneHint = `${status?.warp_cooling ?? 0} 个出口在冷却；引擎会退到代理列表（通常是直连）走匿名通道，可用「重置出口冷却」清掉本地账本后重启引擎`
     cls = 'bg-amber-50 text-amber-800 border-amber-200'
   } else {
-    // WARP 优先但出口不可用：引擎会自动跳过匿名通道直接用 key。
+    // WARP 优先但出口不可用。
+    //
+    // 别断言「请求直接走 key」：熔断是引擎的**进程内**状态
+    // （internal/gateway/pool.go:81-83 breakerUntil / breakerStrikes），
+    // 引擎重启即归零。所以刚重启完、失败次数还没累计到阈值时，
+    // 前几条请求仍会先陪跑一次失败的匿名尝试才落 key。
+    //
+    // 也不能断言「引擎会自动跳过匿名通道」—— 那要等熔断真的跳闸。
     lane = 'fallback'
     laneLabel = keyCount > 0 ? 'WARP 不可用，回落到 key' : '匿名直连'
     laneHint =
       keyCount > 0
-        ? 'WARP 出口未就绪，请求直接走 key（引擎熔断后会跳过失败的匿名尝试）'
+        ? 'WARP 出口未就绪：引擎先试匿名通道，连续失败达 6 次后熔断并改走 key'
         : '未配 key 且 WARP 未启用，全靠本机 IP（易 429）'
     cls = 'bg-amber-50 text-amber-800 border-amber-200'
   }

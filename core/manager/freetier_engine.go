@@ -171,13 +171,25 @@ type engineAnonymousBackoff struct {
 // 匿名通道熔断的默认参数。
 //
 // 为什么固定成常量而不开放成配置项（YAGNI）：先把「熔断存在」这件事做对，
-// 参数调优等真实反馈。连续 3 次失败就暂停 1 小时，每次再失败翻倍，最长 6 小时
-// —— 覆盖「WARP 短暂不可用」与「出口被上游封禁」两种常见情形，又不至于
-// 让一条坏会话把匿名通道关上一整天。
+// 参数调优等真实反馈。
+//
+// 取值对齐引擎自己的默认（internal/config/config.go:179-202 Normalize：
+// 6 / 1 / 24），**不要**为了「跳得快」把 max_hours 压短：
+//
+//   - 引擎的出口黑名单是固定 24h（internal/warp/pool.go:29
+//     `egressCooldown = 24 * time.Hour`，封禁不升级）。
+//   - 熔断窗口若比出口冷却期短（比如 6h < 24h），熔断一过出口还没解冻，
+//     引擎会再次陪跑匿名尝试、再把整池出口烧掉 —— 恰好是本熔断想避免的
+//     那个循环。
+//
+// 所以 max_hours 必须 >= 出口冷却周期（24h）。
 const (
-	anonymousBackoffThreshold = 3
+	// anonymousBackoffThreshold 连续失败多少次后熔断匿名通道。
+	anonymousBackoffThreshold = 6
+	// anonymousBackoffBaseHours 首次熔断暂停多久（小时），之后指数翻倍。
 	anonymousBackoffBaseHours = 1
-	anonymousBackoffMaxHours  = 6
+	// anonymousBackoffMaxHours 熔断暂停上限（小时），对齐出口 24h 冷却周期。
+	anonymousBackoffMaxHours = 24
 )
 
 type enginePerformance struct {

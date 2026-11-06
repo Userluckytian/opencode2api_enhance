@@ -544,6 +544,8 @@ export type WarpCooldownState = {
   cooling: number
   /** 账本文件是否存在 */
   exists: boolean
+  /** 账本存在但解析失败（引擎会当空状态处理） */
+  corrupt: boolean
 }
 
 export type BinariesInfo = {

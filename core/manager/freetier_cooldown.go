@@ -43,6 +43,16 @@ type WarpCooldownState struct {
 	Cooling int `json:"cooling"`
 	// Exists 账本文件是否存在（false = 没有待解冻的出口）。
 	Exists bool `json:"exists"`
+	// Corrupt 账本存在但解析失败。
+	//
+	// 为什么必须有这个字段：坏文件与「0 条冷却」在只读 Cooling 时长得
+	// 一模一样。面板若分不清，就会把「重置出口冷却」按钮禁用掉 ——
+	// 而用户恰恰在最需要它的时候点不动。
+	//
+	// 引擎侧遇到坏文件按空表继续（internal/warp/pool.go:652-671
+	// loadPenalties 出错即返回空表），所以「坏文件」在引擎那边等于
+	// 「没有冷却」，但在本面板这边必须显式标出来。
+	Corrupt bool `json:"corrupt"`
 }
 
 // WarpCooldownStatePath 返回冷却账本文件路径。
@@ -56,8 +66,8 @@ func (m *Manager) WarpCooldownStatePath() string {
 // WarpCooldown 读出口冷却状态。
 //
 // 文件不存在 = 没有冷却中的出口（正常状态，不是错误）。
-// 文件损坏 = 按 0 条处理并让面板知道它坏了 —— 引擎侧遇到损坏文件也是
-// 当空状态继续启动（loadPenalties 出错即返回空表）。
+// 文件损坏 = 按 0 条处理，但置 Corrupt=true 让面板知道它坏了 ——
+// 引擎侧遇到损坏文件也是当空状态继续启动（loadPenalties 出错即返回空表）。
 func (m *Manager) WarpCooldown() WarpCooldownState {
 	path := m.WarpCooldownStatePath()
 	st := WarpCooldownState{Path: path}
@@ -68,6 +78,10 @@ func (m *Manager) WarpCooldown() WarpCooldownState {
 	st.Exists = true
 	var state warpCoolingState
 	if json.Unmarshal(raw, &state) != nil {
+		// 坏文件：告诉面板「这份账本不可信，建议重置」。
+		// 不置这个标志的话，面板看到 cooling=0 会以为没东西可重置，
+		// 反而把重置按钮禁用掉 —— 正好卡在最需要它的时刻。
+		st.Corrupt = true
 		return st
 	}
 	st.Cooling = len(state.Cooling)

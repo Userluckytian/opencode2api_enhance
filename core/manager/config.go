@@ -430,6 +430,11 @@ const (
 	// 留给 WARP 兜不住的场景，而不是让 key 先把额度烧光。
 	ChannelOrderWarpFirst = "warp_first"
 	// ChannelOrderKeyFirst：只用 key（v2.1 之前的行为），保留作回退档。
+	//
+	// 注意这一档**没有**「key 失败再降级到匿名」的路径：引擎在
+	// anonymous=false 时压根不建匿名路由（internal/models/catalog.go:283-291），
+	// key 全挂就是全挂。只有一个例外 —— 一个 key 都没配时，引擎不能既没有
+	// key 又没有匿名路由，所以会强制开匿名。
 	ChannelOrderKeyFirst = "key_first"
 )
 
