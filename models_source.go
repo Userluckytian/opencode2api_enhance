@@ -268,6 +268,39 @@ func refreshModelCatalogIfDue() {
 	refreshModelCatalogLocked()
 }
 
+// catalogStaleAfter 目录「陈旧」判定阈值：超过它，/v1/models 会顺手在后台触发一轮刷新。
+//
+// 为什么需要：定时器稳态是 10 分钟，而运行期的模型变更（新增自定义源、插件换源、
+// 上游上新模型）没有事件通知路径，只能等下一轮。用一个远小于 10 分钟、又远大于
+// 单次刷新耗时的阈值，让「有人在看模型列表」这件事本身成为刷新触发条件 ——
+// 客户端每次拉列表都可能带出一轮后台刷新，从而把可见延迟压到 ~30s，而不是 10 分钟。
+//
+// 不会打爆上游：真正的刷新仍受 refreshModelCatalogIfDue 的 catalogRefreshMinGap
+// （10s）与 catalogRefreshMu（整轮串行）双重收敛，与请求量无关。
+const catalogStaleAfter = 30 * time.Second
+
+// refreshModelCatalogIfStale 目录非空但已陈旧时，后台触发一轮刷新（不阻塞调用方）。
+// 供 /v1/models 在「目录已就绪」的分支调用：此时不再同步等待，只顺手推一把。
+func refreshModelCatalogIfStale() {
+	if globalAgg == nil {
+		return
+	}
+	catalogRefreshMu.Lock()
+	stale := time.Since(catalogLastRefresh) >= catalogStaleAfter
+	catalogRefreshMu.Unlock()
+	if !stale {
+		return
+	}
+	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				slog.Error("async stale catalog refresh panic", "panic", r)
+			}
+		}()
+		refreshModelCatalogIfDue() // 仍受 10s 最小间隔收敛
+	}()
+}
+
 // refreshModelCatalogLocked 执行刷新（调用方已持 catalogRefreshMu）。
 func refreshModelCatalogLocked() {
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)

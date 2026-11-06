@@ -281,6 +281,12 @@ func listModelsHandler(w http.ResponseWriter, r *http.Request) {
 		modelMu.RLock()
 		loaded, models = modelsLoaded, modelsCache
 		modelMu.RUnlock()
+	} else {
+		// 目录已就绪但可能已陈旧（运行期新增自定义源/插件换源/上游上新模型都没有
+		// 事件通知，稳态定时器是 10 分钟）→ 后台推一轮刷新，本次响应仍用现有缓存。
+		// 不阻塞：刷新经 refreshModelCatalogIfStale → IfDue(10s 间隔) → catalogRefreshMu
+		// 三层收敛，宁可下次请求就看到新模型，也不让本次请求等一轮外部拉取。
+		refreshModelCatalogIfStale()
 	}
 	_ = loaded
 	// 保存别名快照；目录权限仍按真实上游模型判断，最后再替换为客户端可见名称。

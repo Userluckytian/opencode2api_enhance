@@ -107,6 +107,20 @@ func applyConfig(cfg AppConfig) {
 
 	if globalAgg != nil {
 		rebuildVendors()
+		// 配置热重载（新增/修改自定义源、改模型别名等）后厂商集合已变，但
+		// rebuildVendors 尾部不刷目录（防与插件 OnChange 互相放大）。这里补一次
+		// 异步刷新，让新源的模型立刻反映到 /v1/models，而不是等稳态定时器。
+		//
+		// 异步 + 走 IfDue/CatalogMu 节流：配置热重载可能被文件监听高频触发
+		// （保存一次触发多次写入），同步刷新会把监听协程堵在外部 HTTP 上。
+		go func() {
+			defer func() {
+				if r := recover(); r != nil {
+					slog.Error("async catalog refresh after config apply panic", "panic", r)
+				}
+			}()
+			refreshModelCatalogIfDue()
+		}()
 	}
 }
 
