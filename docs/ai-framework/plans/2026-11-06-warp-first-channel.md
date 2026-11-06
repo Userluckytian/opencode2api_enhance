@@ -294,9 +294,12 @@ func engineAnonymousEnabled(cfg Config) bool {
 
 ```go
 type engineModels struct {
-	RefreshSeconds int            `json:"refresh_seconds"`
-	Protocols      map[string]any `json:"protocols"`
-	FreeOnly       bool           `json:"free_only"`
+	RefreshSeconds int `json:"refresh_seconds"`
+	// ⚠️ 类型必须是 map[string]string，与引擎一致
+	// （internal/config/config.go:158）—— 写成 map[string]any 会让引擎
+	// 反序列化失败，而引擎是 DisallowUnknownFields 严格解析，失败即起不来。
+	Protocols map[string]string `json:"protocols"`
+	FreeOnly  bool              `json:"free_only"`
 	// AnonymousBackoff 匿名通道熔断：连续失败达阈值后暂停该通道，
 	// 指数退避到 max_hours。缺省时熔断关闭（引擎 threshold=0），
 	// 那样 WARP 挂了每条请求都要先陪跑一次失败的匿名尝试。
@@ -314,7 +317,15 @@ type engineAnonymousBackoff struct {
 
 > **YAGNI 决策：** 本阶段熔断参数**固定为默认常量**，不开放成配置项。理由：先把「熔断存在」这件事做对，参数调优等真实反馈。若用户需要再单独加。
 
-8. `engineModels` 的写入处补 `AnonymousBackoff: &engineAnonymousBackoff{Threshold: 3, BaseHours: 1, MaxHours: 6}`。
+8. `engineModels` 的写入处补 `AnonymousBackoff`（用常量，不写字面量 —— 避免常量与写入处漂移）：
+
+```go
+AnonymousBackoff: &engineAnonymousBackoff{
+    Threshold: anonymousBackoffThreshold, // 6
+    BaseHours: anonymousBackoffBaseHours, // 1
+    MaxHours:  anonymousBackoffMaxHours,  // 24
+},
+```
 
 **Steps:**
 
@@ -346,6 +357,12 @@ type WarpCooldownState struct {
 	Cooling int `json:"cooling"`
 	// Exists 状态文件是否存在。
 	Exists bool `json:"exists"`
+	// Corrupt 文件存在但解析失败（审查 Y3 新增）。
+	//
+	// 为什么必须有：坏文件与「0 条冷却」在只读 Cooling 时长得一模一样，
+	// 面板若分不清就会把「重置出口冷却」按钮禁用掉 —— 而用户恰恰在
+	// 最需要它的时候点不动。
+	Corrupt bool `json:"corrupt"`
 }
 
 // WarpCooldown 读出口冷却状态（文件不存在 = 无冷却）。
