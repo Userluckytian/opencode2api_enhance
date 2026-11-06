@@ -320,7 +320,15 @@ export type ConfigView = {
   engine_models_refresh_sec: number
   /** 只暴露/路由免费模型（写引擎 models.free_only；默认 true） */
   engine_free_only: boolean
+  /**
+   * 生效的通道顺序：`warp_first`（默认，先走 WARP 出口再回落 key）
+   * 或 `key_first`（只用 key，v2.1 之前的行为）。
+   */
+  engine_channel_order: ChannelOrder
 }
+
+/** 免费通道顺序档位 */
+export type ChannelOrder = 'warp_first' | 'key_first'
 
 /** 免费层单个模型的可用性视图（v2.1） */
 export type FreeTierModel = {
@@ -523,6 +531,16 @@ export type FreeTierEngineStatus = {
   bin_path: string
   bin_exists: boolean
   error?: string
+}
+
+/** WARP 出口冷却账本状态（引擎运行目录内的 config.json.warp-state.json） */
+export type WarpCooldownState = {
+  /** 冷却账本文件路径 */
+  path: string
+  /** 仍在冷却期内的出口前缀数（24h 黑名单） */
+  cooling: number
+  /** 账本文件是否存在 */
+  exists: boolean
 }
 
 export type BinariesInfo = {
@@ -1039,6 +1057,22 @@ export const api = {
     req<FreeTierEngineStatus>('POST', '/free-tier/restart', undefined, { async: 1 }),
   freeTierEngineWriteConfig: () =>
     req<{ status: string; path: string }>('POST', '/free-tier/config'),
+  /**
+   * 读 WARP 出口冷却账本。
+   *
+   * 为什么单独要这个接口：引擎没在 WARP 模式运行时 /healthz 里没有 warp 字段，
+   * 于是「冷却中」恒显示 0，而账本里其实压着几十个已烧掉的出口前缀 ——
+   * 用户看不到真正的原因（引擎起不来 WARP 池）。
+   */
+  freeTierWarpCooldown: () => req<WarpCooldownState>('GET', '/free-tier/warp-cooldown'),
+  /**
+   * 清空 WARP 出口冷却账本。
+   *
+   * 只清本地出口账本，**不影响上游账号额度**（额度在服务端）。
+   * 清完需重启引擎才会重新注册出口（引擎只在启动时读该文件）。
+   */
+  freeTierResetWarpCooldown: () =>
+    req<{ status: string; cleared: number }>('POST', '/free-tier/reset-warp-cooldown'),
   freeTierModels: () => req<FreeTierModelsView>('GET', '/free-tier/models'),
   freeTierProbe: (model?: string) =>
     req<ModelProbeResponse>('POST', '/free-tier/probe', { model: model ?? '' }),

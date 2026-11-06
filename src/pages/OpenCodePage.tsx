@@ -13,13 +13,15 @@ import {
   Play,
   Power,
   RefreshCw,
+  RotateCcw,
+  Route,
   Settings2,
   ShieldCheck,
   Waves,
   X,
   Zap,
 } from 'lucide-react'
-import { api, type FreeTierEngineStatus, type FreeTierModelsView, type ConfigView } from '../lib/api'
+import { api, type FreeTierEngineStatus, type FreeTierModelsView, type ConfigView, type ChannelOrder, type WarpCooldownState } from '../lib/api'
 
 /** 上下文档位：1048576 → 1M，200000 → 200K，0 → —。 */
 function fmtCtx(n?: number): string {
@@ -138,6 +140,14 @@ export default function OpenCodePage({ toast }: { toast: (msg: string, ok?: bool
   const [warpDirty, setWarpDirty] = useState(false)
   const [savingWarp, setSavingWarp] = useState(false)
 
+  // 通道顺序（warp_first / key_first）：决定引擎先走 WARP 出口还是先走 key。
+  const [channelOrder, setChannelOrder] = useState<ChannelOrder>('warp_first')
+  const [savingOrder, setSavingOrder] = useState(false)
+  // 出口冷却账本：引擎没在 WARP 模式跑时 /healthz 里没有 warp 字段，
+  // 「冷却中」会恒显示 0，而账本里压着几十个已烧掉的出口前缀 —— 真相只在这里。
+  const [cooldown, setCooldown] = useState<WarpCooldownState | null>(null)
+  const [resettingCooldown, setResettingCooldown] = useState(false)
+
   const aliveRef = useRef(true)
   useEffect(() => {
     aliveRef.current = true
@@ -177,12 +187,21 @@ export default function OpenCodePage({ toast }: { toast: (msg: string, ok?: bool
       }
       // 免费开关以服务端为准（勾选后会有一次重启，期间别被本地态覆盖）
       if (!freeOnlyDirty) setFreeOnly(c.engine_free_only !== false)
+      // 通道顺序同理：服务端是唯一事实源。
+      if (!savingOrder) setChannelOrder(c.engine_channel_order ?? 'warp_first')
     } catch {
       /* 配置读取失败不阻断状态展示 */
     } finally {
       if (aliveRef.current) setLoading(false)
     }
-  }, [warpDirty, keyDirty, freeOnlyDirty])
+    // 出口冷却账本：与引擎状态分开的独立数据源，失败不影响主流程。
+    try {
+      const cd = await api.freeTierWarpCooldown()
+      if (aliveRef.current) setCooldown(cd)
+    } catch {
+      /* 账本读不到不影响主流程 */
+    }
+  }, [warpDirty, keyDirty, freeOnlyDirty, savingOrder])
 
   // 把最新的 reload 挂到 ref（轮询 effect 用它做收尾刷新）
   useEffect(() => {
@@ -245,6 +264,56 @@ export default function OpenCodePage({ toast }: { toast: (msg: string, ok?: bool
     }
   }
 
+
+  // switchChannelOrder 切换通道顺序（WARP 优先 ↔ 密钥优先）。
+  //
+  // 为什么切换后必须重启引擎：这个开关决定引擎 config.json 里的 anonymous
+  // 字段，而引擎**只在启动时读一次** config.json（没有热更新接口）。
+  // 不重启的话，用户点了开关、面板显示变了，引擎却还在按旧顺序跑 —— 静默失败。
+  //
+  // 重启走 async：WARP 首次出口注册最长 90s，同步等会把一次点击变成转圈一分半。
+  const switchChannelOrder = async (next: ChannelOrder) => {
+    if (next === channelOrder) return
+    const prev = channelOrder
+    setChannelOrder(next)
+    setSavingOrder(true)
+    try {
+      await api.configSet('engine_channel_order', next)
+      // 先重写引擎 config（anonymous 随顺序变），再重启让新配置生效。
+      await api.freeTierEngineWriteConfig()
+      const st = await api.freeTierEngineRestartAsync()
+      setStatus(st)
+      setRestartingAt(Date.now())
+      toast(
+        next === 'warp_first'
+          ? '已切换到「WARP 优先」，引擎正在重启…'
+          : '已切换到「密钥优先」，引擎正在重启…',
+      )
+    } catch (e) {
+      // 失败回滚本地态，避免开关与后端不一致
+      setChannelOrder(prev)
+      toast((e as Error).message, false)
+    } finally {
+      setSavingOrder(false)
+    }
+  }
+
+  // resetCooldown 清空 WARP 出口冷却账本。
+  //
+  // 只清本地出口账本，**不影响上游账号额度**（额度在服务端，重启也重置不了）。
+  // 清完必须重启引擎才会重新注册出口 —— 引擎只在启动时读这份账本。
+  const resetCooldown = async () => {
+    setResettingCooldown(true)
+    try {
+      const r = await api.freeTierResetWarpCooldown()
+      toast(`已清除 ${r.cleared} 个冷却出口，请点「重启」让引擎重新注册出口`)
+      void reload()
+    } catch (e) {
+      toast((e as Error).message, false)
+    } finally {
+      setResettingCooldown(false)
+    }
+  }
 
   // probeOne 对单个模型发一次最小请求，用真实状态码判定可用性。
   //
@@ -524,8 +593,83 @@ export default function OpenCodePage({ toast }: { toast: (msg: string, ok?: bool
         </div>
       </div>
 
-      {/* 通道状态：一眼看出当前走在哪一档（key / WARP / 匿名直连） */}
+      {/* 通道状态：一眼看出当前走在哪一档（WARP 优先 / 密钥优先 / 不可用） */}
       <ChannelStatusBar status={status} config={config} />
+
+      {/* 通道顺序：决定引擎先走 WARP 出口还是先走 key */}
+      <div className="bg-white rounded-2xl border border-zinc-200 shadow-sm p-5">
+        <div className="flex items-center gap-2 mb-3">
+          <Route size={16} className="text-teal-600" />
+          <h3 className="text-[15px] font-semibold text-zinc-900">通道顺序</h3>
+          <span className="flex-1" />
+          {(savingOrder || restartingAt > 0) && (
+            <span className="inline-flex items-center gap-1 text-[11px] text-amber-700 bg-amber-50 border border-amber-200 rounded-md px-2 py-0.5">
+              <Loader2 size={10} className="animate-spin" />
+              引擎重启中，完成后生效
+            </span>
+          )}
+        </div>
+
+        <div className="grid grid-cols-2 gap-3">
+          {(
+            [
+              {
+                id: 'warp_first' as ChannelOrder,
+                title: 'WARP 优先',
+                desc: '先用 WARP 出口走匿名通道；WARP 不通时才消耗 key 额度。',
+              },
+              {
+                id: 'key_first' as ChannelOrder,
+                title: '密钥优先',
+                desc: '只用 key 请求，不走匿名通道（v2.1 之前的行为）。',
+              },
+            ] as const
+          ).map((opt) => {
+            const active = channelOrder === opt.id
+            const disabled = savingOrder || restartingAt > 0
+            return (
+              <button
+                key={opt.id}
+                type="button"
+                onClick={() => void switchChannelOrder(opt.id)}
+                disabled={disabled}
+                aria-pressed={active}
+                className={clsx(
+                  'text-left rounded-xl border px-4 py-3 transition-colors disabled:opacity-60 disabled:cursor-default',
+                  active
+                    ? 'border-teal-300 bg-teal-50'
+                    : 'border-zinc-200 bg-white hover:bg-zinc-50',
+                )}
+              >
+                <div className="flex items-center gap-2">
+                  <span
+                    className={clsx(
+                      'w-3.5 h-3.5 rounded-full border-2 flex items-center justify-center',
+                      active ? 'border-teal-600' : 'border-zinc-300',
+                    )}
+                  >
+                    {active && <span className="w-1.5 h-1.5 rounded-full bg-teal-600" />}
+                  </span>
+                  <span
+                    className={clsx(
+                      'text-[13px] font-semibold',
+                      active ? 'text-teal-900' : 'text-zinc-700',
+                    )}
+                  >
+                    {opt.title}
+                  </span>
+                </div>
+                <div className="mt-1 text-[11px] text-zinc-500">{opt.desc}</div>
+              </button>
+            )
+          })}
+        </div>
+
+        <div className="mt-3 text-[11px] text-zinc-400">
+          切换后需重启引擎生效（引擎只在启动时读一次配置）。WARP 优先时若出口不可用，
+          引擎会自动跳过匿名通道直接用 key —— 不会每条请求都先失败一次。
+        </div>
+      </div>
 
       {/* 引擎接入卡（沿用「统一网关」卡的信息层级） */}
       <div className="bg-white rounded-2xl border border-zinc-200 shadow-sm p-5">
@@ -848,6 +992,9 @@ export default function OpenCodePage({ toast }: { toast: (msg: string, ok?: bool
           </div>
           <div className="rounded-xl border border-zinc-100 bg-zinc-50/60 p-4">
             <div className="text-[12px] text-zinc-500">冷却中</div>
+            {/* 「活跃/冷却」来自 /healthz，只在引擎跑在 WARP 模式时才有值；
+                引擎退回无 WARP 模式时这两个数恒为 0 —— 真正的冷却账本是下面
+                那份 config.json.warp-state.json，单独显示。 */}
             <div className="mt-1 text-[20px] font-semibold text-zinc-900">{status?.warp_cooling ?? 0}</div>
           </div>
           <div className="rounded-xl border border-zinc-100 bg-zinc-50/60 p-4">
@@ -891,6 +1038,32 @@ export default function OpenCodePage({ toast }: { toast: (msg: string, ok?: bool
               className="w-full px-3 py-1.5 rounded-lg border border-zinc-200 text-[13px] focus:outline-none focus:ring-2 focus:ring-teal-500/30"
             />
           </label>
+        </div>
+
+        {/* 出口冷却账本：引擎把被上游拒绝的出口写进 24h 黑名单，
+            新注册的出口若落在已冷却的 /64 上会被判「已在冷却」，于是 WARP 池
+            永远起不来（实测 52 个 /64 全冷却 → 引擎退回无 WARP 模式）。
+            这个数字在 /healthz 里看不到（无 WARP 模式时压根没有 warp 字段），
+            所以单独读一次账本。 */}
+        <div className="mt-3 flex items-center gap-3 rounded-lg border border-zinc-200 bg-zinc-50/60 px-3 py-2">
+          <div className="flex-1 min-w-0">
+            <div className="text-[12px] text-zinc-600">
+              出口冷却账本：
+              <span className="font-semibold text-zinc-900">{cooldown?.cooling ?? 0}</span> 个出口前缀被标记
+            </div>
+            <div className="text-[11px] text-zinc-400">
+              清掉它只重置本地出口账本，<b>不影响账号额度</b>；清完需重启引擎才会重新注册出口。
+            </div>
+          </div>
+          <button
+            onClick={() => void resetCooldown()}
+            disabled={resettingCooldown || (cooldown?.cooling ?? 0) === 0}
+            title="删除 config.json.warp-state.json（只清本地出口账本）"
+            className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-[12px] text-zinc-700 bg-white border border-zinc-200 hover:bg-zinc-50 disabled:opacity-40"
+          >
+            {resettingCooldown ? <Loader2 size={13} className="animate-spin" /> : <RotateCcw size={13} />}
+            重置出口冷却
+          </button>
         </div>
 
         {warpDirty && (
@@ -968,6 +1141,10 @@ export default function OpenCodePage({ toast }: { toast: (msg: string, ok?: bool
           实测结论：<b>完全不配密钥（纯匿名）时，big-pickle 等模型会稳定返回 429</b>
           「Free usage limit reached」。配上一个 zen key 后，同一模型立刻可用。
           免费层建议至少填一个 <code>oc_sk_...</code> 密钥。
+          <div className="mt-1 text-[11px] text-amber-800/80">
+            通道顺序选「WARP 优先」时，key 只在 WARP 不通时兜底 —— 匿名通道同样受免费额度限制，
+            所以 key 仍要备着，只是不再第一时间消耗。
+          </div>
         </div>
         {editingKeys ? (
           <>
@@ -1055,11 +1232,14 @@ export default function OpenCodePage({ toast }: { toast: (msg: string, ok?: bool
 /**
  * ChannelStatusBar 当前通道状态条。
  *
- * v2.0 起通道是「key 优先 → WARP → 匿名直连」三级降级，用户最关心的是
- * 「现在到底走的哪一档、为什么」。这里把三种依据摊开：
- *   1. 有没有配 key（配了就走 key 通道，匿名被引擎让位）
+ * v2.2 起通道顺序可配（warp_first / key_first），状态条必须**按真实顺序**说话，
+ * 不能沿用「配了 key 就是密钥通道」那套写死的判定 —— 那样面板会显示
+ * 「密钥通道」而引擎其实在走 WARP 匿名通道，用户据此做的判断全错。
+ *
+ * 判定依据：
+ *   1. 通道顺序配置（决定引擎把谁排在前面）
  *   2. WARP 出口池状态（active / cooling）
- *   3. 实际可用模型数（10 表示匿名可用，0 表示彻底不通）
+ *   3. 引擎是否健康
  */
 function ChannelStatusBar({
   status,
@@ -1071,40 +1251,62 @@ function ChannelStatusBar({
   const zenCount = (config?.engine_zen_keys ?? []).filter((k) => k.trim()).length
   const goCount = (config?.engine_go_keys ?? []).filter((k) => k.trim()).length
   const keyCount = zenCount + goCount
+  const order: ChannelOrder = config?.engine_channel_order ?? 'warp_first'
 
   const warpReady = status?.warp_status === 'ready' && (status?.warp_active ?? 0) > 0
   const warpCoolingOnly = (status?.warp_cooling ?? 0) > 0 && !warpReady
 
   // 判定当前生效通道
-  let lane: 'key' | 'warp' | 'anonymous' | 'down'
+  let lane: 'key' | 'warp' | 'fallback' | 'down'
   let laneLabel: string
   let laneHint: string
   let cls: string
-  if (keyCount > 0 && status?.healthy) {
-    lane = 'key'
-    laneLabel = `密钥通道（${keyCount} 个 key）`
-    laneHint = '已配 key，匿名通道自动让位；key 会均匀绑定到各出口'
-    cls = 'bg-teal-50 text-teal-800 border-teal-200'
-  } else if (warpReady) {
-    lane = 'warp'
-    laneLabel = `WARP 出口（活跃 ${status?.warp_active ?? 0}）`
-    laneHint = '未配 key，走匿名通道 + WARP 轮换出口'
-    cls = 'bg-blue-50 text-blue-800 border-blue-200'
-  } else if (warpCoolingOnly) {
-    lane = 'down'
-    laneLabel = '出口全部冷却'
-    laneHint = `${status?.warp_cooling ?? 0} 个出口在冷却，推理请求会挂起；等待恢复或添加 key`
-    cls = 'bg-amber-50 text-amber-800 border-amber-200'
-  } else if (status?.healthy) {
-    lane = 'anonymous'
-    laneLabel = '匿名直连'
-    laneHint = '未配 key 且 WARP 未启用，全靠本机 IP（易 429）'
-    cls = 'bg-zinc-50 text-zinc-700 border-zinc-200'
-  } else {
+  if (!status?.healthy) {
     lane = 'down'
     laneLabel = '不可用'
     laneHint = status?.error || '引擎未运行'
     cls = 'bg-red-50 text-red-700 border-red-200'
+  } else if (order === 'key_first') {
+    // 密钥优先：配了 key 就走 key；没配 key 才退到匿名。
+    if (keyCount > 0) {
+      lane = 'key'
+      laneLabel = `密钥通道（${keyCount} 个 key）`
+      laneHint = '只用 key 请求，不走匿名通道'
+      cls = 'bg-teal-50 text-teal-800 border-teal-200'
+    } else if (warpReady) {
+      lane = 'warp'
+      laneLabel = `WARP 出口（活跃 ${status?.warp_active ?? 0}）`
+      laneHint = '未配 key，走匿名通道 + WARP 轮换出口'
+      cls = 'bg-blue-50 text-blue-800 border-blue-200'
+    } else {
+      lane = 'fallback'
+      laneLabel = '匿名直连'
+      laneHint = '未配 key 且 WARP 未启用，全靠本机 IP（易 429）'
+      cls = 'bg-zinc-50 text-zinc-700 border-zinc-200'
+    }
+  } else if (warpReady) {
+    // WARP 优先且出口可用：请求先走 WARP，key 只做兜底。
+    lane = 'warp'
+    laneLabel = `WARP 优先（出口活跃 ${status?.warp_active ?? 0}${keyCount > 0 ? `，${keyCount} 个 key 兜底` : ''}）`
+    laneHint =
+      keyCount > 0
+        ? '请求先走 WARP 出口；WARP 不通时才消耗 key 额度'
+        : '未配 key，走匿名通道 + WARP 轮换出口'
+    cls = 'bg-blue-50 text-blue-800 border-blue-200'
+  } else if (warpCoolingOnly) {
+    lane = 'down'
+    laneLabel = '出口全部冷却'
+    laneHint = `${status?.warp_cooling ?? 0} 个出口在冷却；可用「重置出口冷却」清掉本地账本后重启引擎`
+    cls = 'bg-amber-50 text-amber-800 border-amber-200'
+  } else {
+    // WARP 优先但出口不可用：引擎会自动跳过匿名通道直接用 key。
+    lane = 'fallback'
+    laneLabel = keyCount > 0 ? 'WARP 不可用，回落到 key' : '匿名直连'
+    laneHint =
+      keyCount > 0
+        ? 'WARP 出口未就绪，请求直接走 key（引擎熔断后会跳过失败的匿名尝试）'
+        : '未配 key 且 WARP 未启用，全靠本机 IP（易 429）'
+    cls = 'bg-amber-50 text-amber-800 border-amber-200'
   }
 
   return (

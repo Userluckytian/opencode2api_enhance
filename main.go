@@ -349,6 +349,33 @@ func freeTierEngineConfigHandler(m *manager.Manager) http.HandlerFunc {
 	}
 }
 
+// freeTierWarpCooldownHandler 查 WARP 出口冷却状态。
+//
+// 为什么要单独暴露：引擎没在 WARP 模式运行时，/healthz 里压根没有 warp
+// 字段（health.go 只在 g.warp != nil 时写它），于是面板的「冷却中」恒为 0，
+// 而账本里其实压着几十个已烧掉的出口前缀 —— 用户看不到真正的原因。
+func freeTierWarpCooldownHandler(m *manager.Manager) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		writeJSONResp(w, m.WarpCooldown())
+	}
+}
+
+// freeTierResetWarpCooldownHandler 清空 WARP 出口冷却状态。
+//
+// 只清本地出口账本（config.json.warp-state.json），**不影响上游账号额度**。
+// 清完需要重启引擎才会重新注册出口（引擎只在启动时读该文件），所以这里
+// 不自动重启 —— 重启最长要等 95s（首次出口注册），不该让接口同步等。
+func freeTierResetWarpCooldownHandler(m *manager.Manager) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		st, err := m.ResetWarpCooldown()
+		if err != nil {
+			writeErrResp(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		writeJSONResp(w, map[string]any{"status": "ok", "cleared": st.Cooling})
+	}
+}
+
 func writeJSONResp(w http.ResponseWriter, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(v)
@@ -396,6 +423,9 @@ func registerHTTPRoutes(mux *http.ServeMux, managerInst *manager.Manager, plugin
 	mux.HandleFunc("/api/admin/free-tier/stop", loggingMiddleware(requireAuth(freeTierEngineStopHandler(managerInst))))
 	mux.HandleFunc("/api/admin/free-tier/restart", loggingMiddleware(requireAuth(freeTierEngineRestartHandler(managerInst))))
 	mux.HandleFunc("/api/admin/free-tier/config", loggingMiddleware(requireAuth(freeTierEngineConfigHandler(managerInst))))
+	// WARP 出口冷却账本：查 + 清空（清空只动本地账本，不影响账号额度）
+	mux.HandleFunc("/api/admin/free-tier/warp-cooldown", loggingMiddleware(requireAuth(freeTierWarpCooldownHandler(managerInst))))
+	mux.HandleFunc("/api/admin/free-tier/reset-warp-cooldown", loggingMiddleware(requireAuth(freeTierResetWarpCooldownHandler(managerInst))))
 	// 免费层可用模型清单：合并引擎 /v1/models 与它自写的 availability 探测结果
 	mux.HandleFunc("/api/admin/free-tier/models", loggingMiddleware(requireAuth(freeTierModelsHandler(managerInst))))
 	// 手动探测：对引擎发一次最小请求，用真实状态码判定模型可用性
