@@ -329,12 +329,25 @@ export type FreeTierModel = {
   free: boolean
   /** 元数据标记为已废弃/下线 */
   deprecated?: boolean
-  /** 当前是否对外暴露（在引擎 /v1/models 里） */
+  /**
+   * 当前是否对外暴露（在引擎 /v1/models 里）。
+   *
+   * 注意：引擎对没被禁用的模型一律照常列出，**即使它探测 429**。
+   * 所以「在列表里」不等于「真能用」——判断能用请看 probe_ok。
+   */
   available: boolean
+  /** 最近一次真实探测是否成功（唯一能说明「现在能用」的依据） */
+  probe_ok: boolean
+  /** 最近一次探测的 HTTP 状态码（0 = 从未探测） */
+  probe_status?: number
   /** 探测通道：anonymous / zen / go */
   channel?: string
   /** 最近一次探测结果：probe_succeeded / http_429 / http_403 … */
   reason?: string
+  /** 上游 429 给的 Retry-After（秒）；0 = 未知 */
+  retry_after_seconds?: number
+  /** 换算后的额度重置时刻（RFC3339） */
+  retry_after_at?: string
   checked_at?: string
   next_check?: string
   context_window?: number
@@ -353,6 +366,8 @@ export type FreeTierModelsView = {
   free_total: number
   /** 免费且对外暴露的数量 */
   free_shown: number
+  /** 探测通过（probe_ok）的数量 —— 真正能用的个数 */
+  usable_shown: number
   /** catalog / availability 文件路径（排障用） */
   catalog_source?: string
   availability_source?: string
@@ -381,6 +396,10 @@ export type ModelProbeResult = {
   latency_ms: number
   error?: string
   preview?: string
+  /** 上游 429 带的 Retry-After（秒）；0 = 没有该头 */
+  retry_after_seconds?: number
+  /** 换算出的额度重置时刻（RFC3339） */
+  retry_after_at?: string
 }
 
 export type ModelProbeResponse = {

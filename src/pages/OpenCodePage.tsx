@@ -123,7 +123,7 @@ export default function OpenCodePage({ toast }: { toast: (msg: string, ok?: bool
   // 探测本身是每模型独立的上游请求，各行的忙态与结果本就该独立。
   const [probingModels, setProbingModels] = useState<Set<string>>(() => new Set())
   const [probeResults, setProbeResults] = useState<
-    Record<string, { ok: boolean; status: number }>
+    Record<string, { ok: boolean; status: number; retryAfterAt?: string }>
   >({})
 
   // 付费密钥草稿（zen = 免费层 v1 通道；go = Go 订阅通道）
@@ -259,10 +259,20 @@ export default function OpenCodePage({ toast }: { toast: (msg: string, ok?: bool
       const first = r.results[0]
       if (first) {
         // 只写自己那一槽，不动其它模型的结果
-        setProbeResults((prev) => ({ ...prev, [modelId]: { ok: first.ok, status: first.status } }))
+        setProbeResults((prev) => ({
+          ...prev,
+          [modelId]: { ok: first.ok, status: first.status, retryAfterAt: first.retry_after_at },
+        }))
       }
       if (r.note) toast(r.note, false)
-      else toast(`${modelId} → ${first?.status ?? 'ERR'}（${first?.latency_ms ?? 0}ms）`, first?.ok)
+      else if (first && !first.ok && first.status === 429 && first.retry_after_at) {
+        // 429 不是「稍后重试」这么简单：免费额度耗尽时上游给的是以小时计的
+        // 重置时间。不把这句说出来，用户只会反复点探测、反复重启。
+        toast(
+          `${modelId} → 429 免费额度已用尽，约 ${fmtRelTime(first.retry_after_at)}重置（${first.retry_after_at}）`,
+          false,
+        )
+      } else toast(`${modelId} → ${first?.status ?? 'ERR'}（${first?.latency_ms ?? 0}ms）`, first?.ok)
     } catch (e) {
       toast((e as Error).message, false)
     } finally {
@@ -422,6 +432,12 @@ export default function OpenCodePage({ toast }: { toast: (msg: string, ok?: bool
   const engineOn = config?.engine_enabled ?? true
   const zenKeys = (config?.engine_zen_keys ?? []).filter((k) => k.trim())
   const goKeys = (config?.engine_go_keys ?? []).filter((k) => k.trim())
+  const keyCount = zenKeys.length + goKeys.length
+  // 出口池大小：manager 里 0 = 未显式设置，由 key 数量自动推导
+  //（autoWarpPoolSize：无 key → 2，有 key → 4）。面板直接显示 "2" 会让人以为
+  // 只开了 2 个出口，实际引擎跑的是 4 个 —— 与 WARP 卡片的活跃出口数对不上。
+  const autoPool = !config?.engine_warp_pool_size
+  const effectivePoolSize = config?.engine_warp_pool_size || (keyCount > 0 ? 4 : 2)
 
   return (
     <div className="p-6 space-y-4">
@@ -608,8 +624,8 @@ export default function OpenCodePage({ toast }: { toast: (msg: string, ok?: bool
           <span className="text-[12px] text-zinc-400">
             {models
               ? freeOnly
-                ? `${models.free_shown} 免费可用 / 共 ${models.free_total} 免费`
-                : `${models.shown} 可用 / 共 ${models.total}`
+                ? `${models.usable_shown} 真可用 / 引擎暴露 ${models.free_shown} / 共 ${models.free_total} 免费`
+                : `${models.usable_shown} 真可用 / 引擎暴露 ${models.shown} / 共 ${models.total}`
               : '—'}
           </span>
           <button
@@ -643,9 +659,11 @@ export default function OpenCodePage({ toast }: { toast: (msg: string, ok?: bool
                   <tr>
                     <th className="text-left font-medium px-3 py-2">模型</th>
                     <th className="text-left font-medium px-3 py-2 w-16">免费</th>
+                    {/* 「状态」= 真实探测结论，不再拿「引擎列不列它」冒充可用 */}
                     <th className="text-left font-medium px-3 py-2 w-20">状态</th>
                     <th className="text-left font-medium px-3 py-2 w-24">通道</th>
-                    <th className="text-left font-medium px-3 py-2">最近结果</th>
+                    <th className="text-left font-medium px-3 py-2">最近探测</th>
+                    <th className="text-left font-medium px-3 py-2 w-32">额度重置</th>
                     <th className="text-right font-medium px-3 py-2 w-20">上下文</th>
                     <th className="text-left font-medium px-3 py-2 w-32">下次探测</th>
                     <th className="text-center font-medium px-3 py-2 w-28">操作</th>
@@ -678,25 +696,56 @@ export default function OpenCodePage({ toast }: { toast: (msg: string, ok?: bool
                           )}
                         </td>
                         <td className="px-3 py-1.5">
-                          <span
-                            className={clsx(
-                              'inline-flex px-1.5 py-0.5 rounded text-[11px] font-medium',
-                              m.available ? 'bg-green-50 text-green-700' : 'bg-zinc-100 text-zinc-500',
-                            )}
-                          >
-                            {m.available ? '可用' : '不可用'}
-                          </span>
+                          {/* 只有「探测通过」才叫可用。引擎照常列出的 429 模型
+                              以前被显示成「可用」，用户点探测却是 429，误导性极强。 */}
+                          {m.probe_ok ? (
+                            <span className="inline-flex px-1.5 py-0.5 rounded text-[11px] font-medium bg-green-50 text-green-700">
+                              可用
+                            </span>
+                          ) : m.available ? (
+                            <span
+                              className="inline-flex px-1.5 py-0.5 rounded text-[11px] font-medium bg-amber-50 text-amber-700"
+                              title="引擎仍把它列在 /v1/models 里，但最近一次探测没有通过"
+                            >
+                              受限
+                            </span>
+                          ) : (
+                            <span className="inline-flex px-1.5 py-0.5 rounded text-[11px] font-medium bg-zinc-100 text-zinc-500">
+                              不可用
+                            </span>
+                          )}
                         </td>
                         <td className="px-3 py-1.5 text-zinc-500">{m.channel || '—'}</td>
                         <td className="px-3 py-1.5">
                           <span
                             className={clsx(
                               'font-mono text-[11px]',
-                              m.reason === 'probe_succeeded' ? 'text-green-700' : 'text-amber-700',
+                              m.probe_ok ? 'text-green-700' : m.reason ? 'text-amber-700' : 'text-zinc-400',
                             )}
                           >
-                            {m.reason || '未探测'}
+                            {m.reason === 'probe_succeeded'
+                              ? '通过'
+                              : m.reason
+                                ? m.reason.replace(/^http_/, 'HTTP ')
+                                : '未探测'}
                           </span>
+                        </td>
+                        <td className="px-3 py-1.5 text-[11px]">
+                          {/* 重置时刻只存在于上游 429 的响应头里，而引擎的
+                              availability.json 不落这个字段 —— 所以只有「手动探测过
+                              且命中 429」的行才知道确切时刻。其余 429 行给一句引导，
+                              比干巴巴一个「—」有用。 */}
+                          {m.retry_after_at ? (
+                            <span className="text-amber-700" title={`额度重置于 ${m.retry_after_at}`}>
+                              {fmtRelTime(m.retry_after_at)}
+                            </span>
+                          ) : m.reason === 'http_429' ? (
+                            <span className="text-zinc-400" title="点「探测」可查询上游给出的重置时刻">
+                              点探测查询
+                            </span>
+                          ) : (
+                            <span className="text-zinc-400">—</span>
+                          )}
                         </td>
                         <td className="px-3 py-1.5 text-right tabular-nums text-zinc-500 text-[11px]">
                           {fmtCtx(m.context_window)}
@@ -734,6 +783,11 @@ export default function OpenCodePage({ toast }: { toast: (msg: string, ok?: bool
                                       ? 'bg-green-100 text-green-700'
                                       : 'bg-amber-100 text-amber-700',
                                   )}
+                                  title={
+                                    r.retryAfterAt
+                                      ? `额度重置约 ${fmtRelTime(r.retryAfterAt)}（${r.retryAfterAt}）`
+                                      : undefined
+                                  }
                                 >
                                   {r.status || 'ERR'}
                                 </span>
@@ -799,8 +853,16 @@ export default function OpenCodePage({ toast }: { toast: (msg: string, ok?: bool
           <div className="rounded-xl border border-zinc-100 bg-zinc-50/60 p-4">
             <div className="text-[12px] text-zinc-500">池大小上限</div>
             <div className="mt-1 text-[20px] font-semibold text-zinc-900">
-              {config?.engine_warp_pool_size || 2}
+              {effectivePoolSize}
+              {autoPool && (
+                <span className="ml-1.5 text-[11px] font-normal text-zinc-400">自动</span>
+              )}
             </div>
+            {autoPool && (
+              <div className="text-[10px] text-zinc-400">
+                按 {keyCount} 个 key 推导（无 key 2 / 有 key 4）
+              </div>
+            )}
           </div>
         </div>
 
@@ -963,7 +1025,7 @@ export default function OpenCodePage({ toast }: { toast: (msg: string, ok?: bool
           <h3 className="text-[15px] font-semibold text-zinc-900">免费模型</h3>
           <span className="flex-1" />
           <span className="text-[12px] text-zinc-400">
-            {status?.model_shown ?? 0} 个可用 / 共 {status?.model_total ?? 0} 个
+            共 {status?.model_total ?? 0} 个 · 引擎暴露 {status?.model_shown ?? 0} 个
           </span>
         </div>
         <div className="text-[12px] text-zinc-500">
@@ -976,8 +1038,9 @@ export default function OpenCodePage({ toast }: { toast: (msg: string, ok?: bool
             <div className="text-[16px] font-semibold text-zinc-900">{status?.model_total ?? 0}</div>
           </div>
           <div className="rounded-xl border border-zinc-100 bg-zinc-50/60 p-3">
-            <div className="text-[11px] text-zinc-500">对外可用</div>
-            <div className="text-[16px] font-semibold text-green-700">{status?.model_shown ?? 0}</div>
+            <div className="text-[11px] text-zinc-500">探测通过</div>
+            <div className="text-[16px] font-semibold text-green-700">{models?.usable_shown ?? 0}</div>
+            <div className="text-[11px] text-zinc-400">引擎暴露 {status?.model_shown ?? 0}</div>
           </div>
           <div className="rounded-xl border border-zinc-100 bg-zinc-50/60 p-3">
             <div className="text-[11px] text-zinc-500">引擎总开关</div>

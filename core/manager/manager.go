@@ -14,6 +14,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"time"
 )
 
 // Manager 持有管理器状态（数据目录 + 运行目录 + 运行依赖）。
@@ -26,6 +27,55 @@ type Manager struct {
 	runner Runner
 	// engine 免费层引擎（40080）托管状态。
 	engine *freeTierEngine
+
+	// retryAfterMu 保护 retryAfter：模型 ID → 额度重置时刻。
+	//
+	// 引擎的 availability.json **不记录**上游的 Retry-After（它只写
+	// reason=http_429），所以「额度何时重置」这个信息只存在于响应头里。
+	// 面板要显示它，唯一的办法是某次真的收到 429 时把响应头接住存下来。
+	// 手动探测（diag_api.go）命中 429 时会写这里，面板随模型列表一起读。
+	// 进程内存态：重启管理面即清空 —— 它只是「上次看到的提示」，不是事实源。
+	retryAfterMu sync.RWMutex
+	retryAfter   map[string]retryAfterHint
+}
+
+// retryAfterHint 某模型 429 时上游给出的额度重置提示。
+type retryAfterHint struct {
+	// Seconds 上游 Retry-After 原值（秒）。
+	Seconds int
+	// ResetAt 换算后的重置时刻（UTC）。
+	ResetAt time.Time
+}
+
+// NoteRetryAfter 记录某模型的 429 重置提示（seconds <= 0 视为未知，忽略）。
+func (m *Manager) NoteRetryAfter(model string, seconds int) {
+	if model == "" || seconds <= 0 {
+		return
+	}
+	m.retryAfterMu.Lock()
+	defer m.retryAfterMu.Unlock()
+	if m.retryAfter == nil {
+		m.retryAfter = map[string]retryAfterHint{}
+	}
+	m.retryAfter[model] = retryAfterHint{
+		Seconds: seconds,
+		ResetAt: time.Now().Add(time.Duration(seconds) * time.Second).UTC(),
+	}
+}
+
+// RetryAfterHint 读某模型的 429 重置提示；已过期或未记录返回零值。
+func (m *Manager) RetryAfterHint(model string) (seconds int, resetAt string) {
+	m.retryAfterMu.RLock()
+	h, ok := m.retryAfter[model]
+	m.retryAfterMu.RUnlock()
+	if !ok {
+		return 0, ""
+	}
+	remain := time.Until(h.ResetAt)
+	if remain <= 0 {
+		return 0, h.ResetAt.Format(time.RFC3339)
+	}
+	return int(remain.Seconds()), h.ResetAt.Format(time.RFC3339)
 }
 
 // New 创建管理器。

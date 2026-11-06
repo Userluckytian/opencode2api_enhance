@@ -7,12 +7,16 @@ package manager
 //     + 每个模型的上下文/输出/推理/工具能力），是「全集」；
 //  2. config.json.<hash>.availability.json —— 每个模型的最近一次探测结果
 //     （reason: probe_succeeded / http_429 / http_403 …）与下次探测时间；
-//  3. GET /v1/models —— 引擎当前**对外暴露**的模型（已按可用性过滤）。
+//  3. GET /v1/models —— 引擎当前**对外暴露**的模型。
 //
 // 三者合一才能回答用户真正关心的问题：
 //   「引擎认识哪些模型」→ catalog
-//   「现在哪些能用」→ /v1/models
+//   「引擎愿意接哪些」→ /v1/models（注意：**不等于能用**）
 //   「某个不能用的为什么、什么时候重试」→ availability
+//
+// v2.1 修正：早先把「在 /v1/models 里」当成「可用」，但引擎对 disabled=false
+// 的模型一律照常列出（哪怕探测 429），于是面板显示「可用 + http_429（已恢复）」
+// 而用户点探测仍 429。现在拆成 Available（暴露）与 ProbeOK（探测通过）两列。
 
 import (
 	"context"
@@ -23,6 +27,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -37,11 +42,27 @@ type FreeTierModel struct {
 	// Deprecated 元数据标记为已废弃/下线（免费但不再推荐）。
 	Deprecated bool `json:"deprecated,omitempty"`
 	// Available 当前是否对外暴露（在引擎 /v1/models 里 = true）。
+	//
+	// 注意：这只代表「引擎愿意接这一路请求」，**不代表上游真能给出结果**。
+	// 引擎对 disabled=false 的模型一律照常列进 /v1/models（即使它探测 429），
+	// 所以面板不能把它当成「可用」。判断真能用请看 ProbeOK。
 	Available bool `json:"available"`
+	// ProbeOK 最近一次**真实探测**是否成功（availability.reason == probe_succeeded）。
+	// 这是唯一能说「现在能用」的依据。
+	ProbeOK bool `json:"probe_ok"`
+	// ProbeStatus 最近一次探测的 HTTP 状态码（0 = 从未探测）。
+	ProbeStatus int `json:"probe_status,omitempty"`
 	// Channel 探测通道：anonymous（匿名免费层）/ zen（带 key）/ go（订阅）。
 	Channel string `json:"channel,omitempty"`
 	// Reason 最近一次探测结果：probe_succeeded / http_429 / http_403 / …
 	Reason string `json:"reason,omitempty"`
+	// RetryAfterSeconds 上游 429 给的 Retry-After（秒）；0 = 未知。
+	//
+	// 免费额度耗尽时上游会带这个头（实测约 20 小时），它比「等一会儿再试」
+	// 有用得多：用户据此能判断该等还是该换账号。
+	RetryAfterSeconds int `json:"retry_after_seconds,omitempty"`
+	// RetryAfterAt 换算后的重置时刻（RFC3339，空 = 未知）。
+	RetryAfterAt string `json:"retry_after_at,omitempty"`
 	// CheckedAt 最近一次探测时间（RFC3339，空 = 从未探测）。
 	CheckedAt string `json:"checked_at,omitempty"`
 	// NextCheck 下次计划探测时间（RFC3339，空 = unknown）。
@@ -72,6 +93,11 @@ type FreeTierModelsView struct {
 	FreeTotal int `json:"free_total"`
 	// FreeShown 免费且对外暴露的数量。
 	FreeShown int `json:"free_shown"`
+	// UsableShown 探测通过（ProbeOK）的数量 —— 真正能用的个数。
+	//
+	// 与 Shown 的区别就是「引擎列出来」vs「上游真给结果」。免费额度耗尽时
+	// Shown 仍是 10、UsableShown 会掉到 4，这个差值本身就是最重要的排障信号。
+	UsableShown int `json:"usable_shown"`
 	// CatalogSource / AvailabilitySource 数据文件路径（排障用；空 = 未找到）。
 	CatalogSource      string `json:"catalog_source,omitempty"`
 	AvailabilitySource string `json:"availability_source,omitempty"`
@@ -102,6 +128,10 @@ type availabilityEntry struct {
 	NextCheck string `json:"next_check"`
 	Reason    string `json:"reason"`
 	Channel   string `json:"channel"`
+	// RetryAfterSeconds 引擎在探测 429 时记下的上游 Retry-After（秒）。
+	RetryAfterSeconds int `json:"retry_after_seconds"`
+	// RetryAfterAt 引擎若直接写了重置时刻，优先用它。
+	RetryAfterAt string `json:"retry_after_at"`
 }
 
 // catalogMeta 目录里单个模型的元数据。
@@ -219,6 +249,15 @@ func (m *Manager) FreeTierModels(ctx context.Context) FreeTierModelsView {
 	}
 
 	// 4b. availability 补探测结果（channel 以探测通道为准，更贴近实际）
+	//
+	// 关键：**不要再把「引擎还列着它」解释成「已恢复」**。
+	// v2.0 曾在这里给 reason 追加「（已恢复）」，依据只是 /v1/models 里有这个
+	// ID。但引擎对 disabled=false 的模型一律照常列出（哪怕探测 429），于是
+	// 面板会同时显示「可用 + http_429（已恢复）」，用户点探测却仍是 429 ——
+	// 一个纯误导。现在把两件事分开表示：
+	//   Available —— 引擎暴露（引擎愿意接这一路）
+	//   ProbeOK   —— 探测真的成功（上游给出结果）
+	// reason 原样保留，由前端决定怎么措辞。
 	for id, e := range entries {
 		v, ok := merged[id]
 		if !ok {
@@ -229,13 +268,18 @@ func (m *Manager) FreeTierModels(ctx context.Context) FreeTierModelsView {
 		}
 		v.CheckedAt = e.CheckedAt
 		v.NextCheck = e.NextCheck
-		reason := e.Reason
-		// 若 /v1/models 里有它但探测结果是失败，说明「已恢复」——
-		// 引擎的探测是周期性的，目录是实时的，两者短暂不一致属正常。
-		if shown[id].Available && reason != "" && reason != "probe_succeeded" {
-			reason = reason + "（已恢复）"
+		v.Reason = e.Reason
+		v.ProbeOK = e.Reason == "probe_succeeded"
+		v.ProbeStatus = probeStatusFromReason(e.Reason)
+		// 先看引擎文件（它若写了就以它为准），再用管理面缓存兜底：
+		// 引擎只写 reason=http_429、不写 Retry-After，所以「何时重置」几乎
+		// 只能来自手动探测时接住的响应头。
+		v.RetryAfterSeconds, v.RetryAfterAt = resolveRetryAfter(e)
+		if v.RetryAfterAt == "" && v.RetryAfterSeconds == 0 {
+			if sec, at := m.RetryAfterHint(id); at != "" {
+				v.RetryAfterSeconds, v.RetryAfterAt = sec, at
+			}
 		}
-		v.Reason = reason
 		merged[id] = v
 	}
 
@@ -263,10 +307,13 @@ func (m *Manager) FreeTierModels(ctx context.Context) FreeTierModelsView {
 		merged[id] = v
 	}
 
-	// 5. 排序：免费优先 → 可用优先 → ID 升序
+	// 5. 排序：免费优先 → 探测通过优先 → 引擎暴露优先 → ID 升序
 	//
 	// 为什么免费排最前：面板默认勾了「只使用免费模型」，用户打开卡片想看的就是
 	// 那十几个免费模型。把付费的排在前面会让人以为「怎么全是收费的」。
+	//
+	// 为什么在 Available 之前加 ProbeOK：额度耗尽时 10 个模型全都「暴露」，
+	// 按旧的排序真正能用的 4 个会散在中间，用户会以为一个都不能用。
 	list := make([]FreeTierModel, 0, len(merged))
 	for _, v := range merged {
 		list = append(list, v)
@@ -274,6 +321,9 @@ func (m *Manager) FreeTierModels(ctx context.Context) FreeTierModelsView {
 	sort.Slice(list, func(i, j int) bool {
 		if list[i].Free != list[j].Free {
 			return list[i].Free
+		}
+		if list[i].ProbeOK != list[j].ProbeOK {
+			return list[i].ProbeOK
 		}
 		if list[i].Available != list[j].Available {
 			return list[i].Available
@@ -287,6 +337,9 @@ func (m *Manager) FreeTierModels(ctx context.Context) FreeTierModelsView {
 		if v.Available {
 			out.Shown++
 		}
+		if v.ProbeOK {
+			out.UsableShown++
+		}
 		if v.Free {
 			out.FreeTotal++
 			if v.Available {
@@ -295,6 +348,66 @@ func (m *Manager) FreeTierModels(ctx context.Context) FreeTierModelsView {
 		}
 	}
 	return out
+}
+
+// probeStatusFromReason 从 availability 的 reason 反推 HTTP 状态码。
+//
+// 引擎把探测结果写成 http_429 / http_403 / probe_succeeded 这类字符串，
+// 前端要显示「429」而不是「http_429」，所以在这里统一翻译一次。
+// 未探测（reason 为空）返回 0。
+func probeStatusFromReason(reason string) int {
+	if reason == "" {
+		return 0
+	}
+	if reason == "probe_succeeded" {
+		return http.StatusOK
+	}
+	// 形如 http_<code>；也兼容引擎将来直接写数字。
+	if i := strings.Index(reason, "_"); i >= 0 && i+1 < len(reason) {
+		if n, err := strconv.Atoi(reason[i+1:]); err == nil {
+			return n
+		}
+	}
+	if n, err := strconv.Atoi(reason); err == nil {
+		return n
+	}
+	return 0
+}
+
+// resolveRetryAfter 计算该模型的「额度重置时刻」。
+//
+// 两个来源，优先显式时刻：
+//  1. availability 里引擎若写了 retry_after_at，直接用；
+//  2. 否则用 retry_after_seconds 从 checked_at 起算。
+//
+// 为什么从 checked_at 而不是 now 起算：引擎每小时探测一次，写盘时上游给的
+// 是「从那一刻起还要等 N 秒」。用 now 会把重置时间算得比实际晚越来越久，
+// 一小时一次探测下来能漂出好几分钟，用户按这个时间去等就会白等。
+func resolveRetryAfter(e availabilityEntry) (seconds int, at string) {
+	if e.RetryAfterAt != "" {
+		if t, err := time.Parse(time.RFC3339Nano, e.RetryAfterAt); err == nil {
+			at = t.UTC().Format(time.RFC3339)
+			if d := time.Until(t); d > 0 {
+				return int(d.Seconds()), at
+			}
+			return 0, at
+		}
+	}
+	if e.RetryAfterSeconds <= 0 {
+		return 0, ""
+	}
+	base := time.Now()
+	if e.CheckedAt != "" {
+		if t, err := time.Parse(time.RFC3339Nano, e.CheckedAt); err == nil {
+			base = t
+		}
+	}
+	reset := base.Add(time.Duration(e.RetryAfterSeconds) * time.Second)
+	remain := time.Until(reset)
+	if remain <= 0 {
+		return 0, reset.UTC().Format(time.RFC3339)
+	}
+	return int(remain.Seconds()), reset.UTC().Format(time.RFC3339)
 }
 
 // fetchEngineModels 调引擎 GET /v1/models。

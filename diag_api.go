@@ -200,6 +200,13 @@ type ModelProbeResult struct {
 	LatencyMS int64  `json:"latency_ms"`
 	Error     string `json:"error,omitempty"`
 	Preview   string `json:"preview,omitempty"`
+	// RetryAfterSeconds 上游 429 带的 Retry-After（秒）；0 = 没有该头。
+	//
+	// 免费额度耗尽时上游会明确告诉你要等多久（实测 ~20h）。把它抛到界面，
+	// 用户才知道「该等」还是「该换账号」，否则只能反复点探测。
+	RetryAfterSeconds int `json:"retry_after_seconds,omitempty"`
+	// RetryAfterAt 换算出的重置时刻（RFC3339，空 = 未知）。
+	RetryAfterAt string `json:"retry_after_at,omitempty"`
 }
 
 // modelProbeHandler POST /api/admin/free-tier/probe
@@ -283,6 +290,12 @@ func modelProbeHandler(m *manager.Manager) http.HandlerFunc {
 				defer wg.Done()
 				defer func() { <-sem }()
 				results[idx] = probeOneModel(r.Context(), base, st.APIKey, modelID)
+				// 把 429 的重置提示记下来，供模型列表显示「额度何时重置」。
+				// 引擎只写 reason=http_429，不写 Retry-After，所以这里是唯一
+				// 能拿到它的地方。
+				if r2 := results[idx]; r2.RetryAfterSeconds > 0 {
+					m.NoteRetryAfter(modelID, r2.RetryAfterSeconds)
+				}
 			}(i, id)
 		}
 		wg.Wait()
@@ -321,6 +334,14 @@ func probeOneModel(ctx context.Context, base, apiKey, model string) ModelProbeRe
 	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
 	res.Status = resp.StatusCode
 	res.OK = resp.StatusCode >= 200 && resp.StatusCode < 300
+	// 429 时把上游的「还要等多久」带出来。引擎会把上游的 Retry-After 原样
+	// 透传（实测 /v1/chat/completions 429 响应带 Retry-After: 72815）。
+	if ra := strings.TrimSpace(resp.Header.Get("Retry-After")); ra != "" {
+		if sec, err := strconv.Atoi(ra); err == nil && sec > 0 {
+			res.RetryAfterSeconds = sec
+			res.RetryAfterAt = time.Now().Add(time.Duration(sec) * time.Second).UTC().Format(time.RFC3339)
+		}
+	}
 	preview := strings.TrimSpace(string(raw))
 	if len(preview) > 240 {
 		preview = preview[:240] + "…"
