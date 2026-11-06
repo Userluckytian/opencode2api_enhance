@@ -83,9 +83,22 @@ type Config struct {
 	StateFile string
 	// OnChange 就绪/状态/增删变化回调（R2 桥接厂商经此触发 rebuildVendors；可为 nil）。
 	OnChange func()
-	// OnModelRefresh 手动刷新模型回调（main 侧注入强制刷聚合目录；可为 nil）。
+	// OnModelRefresh 模型清单就绪/刷新回调（main 侧强制刷聚合目录；可为 nil）。
+	//
+	// 两个触发点：① 插件就绪后自动拉到模型清单（queryModelCountWithRetry）；
+	// ② 面板手动「刷新模型」（RefreshModels）。启动期多个插件同时就绪时由管理器
+	// 合并成一次回调，装配方无需自己去抖。
 	OnModelRefresh func(id string)
 }
+
+// modelRefreshCoalesceWindow 启动期合并窗口：多个插件几乎同时就绪时，把
+// OnModelRefresh 合并成一次，避免 N 个插件触发 N 次串行目录刷新
+// （refreshModelCatalog 持 catalogRefreshMu 逐个厂商发 HTTP，60s ctx）。
+//
+// 插件就绪是各自独立的 goroutine，12 个插件会在同一瞬间拉到模型；每次刷新都
+// 遍历全部厂商，串行 12 次会拖慢启动并放大对上游的请求。300ms 足以覆盖同一批
+// 就绪，又不至于让「插件模型到位」的可见延迟变长。
+const modelRefreshCoalesceWindow = 300 * time.Millisecond
 
 // Manager 插件管理器。所有插件状态在 mu 保护下读写；子进程 stdout 管道/退出
 // 检测在各协程间经 channel 传递，不跨 goroutine 直接写状态。
@@ -100,6 +113,15 @@ type Manager struct {
 	cancel  context.CancelFunc
 	started bool
 	closed  bool
+
+	// modelRefreshMu 保护启动期 OnModelRefresh 合并器（独立于 mu，避免与插件
+	// 状态锁互相嵌套）。合并器只用于自动就绪通知；手动 RefreshModels 直调回调。
+	// modelRefreshClosed 单独记关闭态：timer 回调在 modelRefreshMu 下判定，
+	// 不与 Close 持有的 mu 形成跨锁读写 m.closed 的数据竞争。
+	modelRefreshMu      sync.Mutex
+	modelRefreshTimer   *time.Timer
+	modelRefreshPending bool
+	modelRefreshClosed  bool
 }
 
 // New 构造插件管理器（零值配置回退默认）。
@@ -176,6 +198,16 @@ func (m *Manager) Close() {
 	}
 	m.closed = true
 	m.cancel()
+	// 停掉启动期合并窗口：Close 之后不再触发 OnModelRefresh（回调会刷聚合目录，
+	// 而此时聚合器/HTTP 服务可能已经在退出）。
+	m.modelRefreshMu.Lock()
+	if m.modelRefreshTimer != nil {
+		m.modelRefreshTimer.Stop()
+		m.modelRefreshTimer = nil
+	}
+	m.modelRefreshPending = false
+	m.modelRefreshClosed = true
+	m.modelRefreshMu.Unlock()
 	ps := make([]*plugin, 0, len(m.plugins))
 	for _, p := range m.plugins {
 		ps = append(ps, p)
@@ -1091,10 +1123,56 @@ func (m *Manager) fetchPluginModels(p *plugin) ([]string, []ModelDetail, error) 
 	return ids, details, nil
 }
 
+// notifyModelReady 插件自动拉到模型清单后通知装配方刷新聚合目录。
+//
+// 为什么需要：模型清单到位时插件状态早已是 running，OnChange 不会再次触发，
+// 装配方的聚合目录只能等 10 分钟定时器刷新 —— 表现为「应用起来好一会儿，
+// /v1/models 里还是没有插件模型」。这里补上「模型到位 → 立刻刷目录」这一环。
+//
+// 合并语义：启动期多个插件几乎同时就绪，逐个回调会造成 N 次串行的全量目录
+// 刷新。首个通知立即触发，随后 modelRefreshCoalesceWindow 内的通知合并为
+// 窗口结束时的一次，既不让首屏变慢，也不放大上游请求。
+//
+// 手动 RefreshModels 不走这里（直调回调），保证面板按钮的即时性。
+func (m *Manager) notifyModelReady(id string) {
+	if m.cfg.OnModelRefresh == nil {
+		return
+	}
+	m.modelRefreshMu.Lock()
+	if m.modelRefreshClosed {
+		m.modelRefreshMu.Unlock()
+		return
+	}
+	if m.modelRefreshTimer != nil {
+		// 已有合并窗口在跑：本次并入窗口（不再单独立即触发）。
+		m.modelRefreshPending = true
+		m.modelRefreshMu.Unlock()
+		return
+	}
+	// 窗口内首次通知：立即触发一次，同时开一个合并窗口。
+	m.modelRefreshTimer = time.AfterFunc(modelRefreshCoalesceWindow, func() {
+		m.modelRefreshMu.Lock()
+		pending := m.modelRefreshPending
+		closed := m.modelRefreshClosed
+		m.modelRefreshPending = false
+		m.modelRefreshTimer = nil
+		m.modelRefreshMu.Unlock()
+		if pending && !closed && m.cfg.OnModelRefresh != nil {
+			m.cfg.OnModelRefresh(id)
+		}
+	})
+	m.modelRefreshMu.Unlock()
+	m.cfg.OnModelRefresh(id)
+}
+
 // queryModelCountWithRetry 就绪后拉取插件模型目录（计数 + models_all/models_detail）。
 // 首拉常撞上插件冷启动的上游目录拉取（大响应、慢），宿主单次超时会得到空清单且
 // 无法自愈（暴露弹层按钮依赖 models_all 非空）——这里退避重试兜底；全部失败仅
 // 告警，等面板「刷新模型」手动触发。异步运行，不阻塞监督协程。
+//
+// 成功时另经 notifyModelReady 触发 OnModelRefresh：模型清单到位时插件状态早已是
+// running，OnChange 不会再触发，若不主动通知装配方，聚合目录只能等 10 分钟定时器
+// 才出现插件模型（用户感知「应用起来好一会儿还不显示」）。
 func (m *Manager) queryModelCountWithRetry(p *plugin) {
 	backoff := []time.Duration{0, 5 * time.Second, 15 * time.Second, 30 * time.Second}
 	for i, d := range backoff {
@@ -1127,6 +1205,9 @@ func (m *Manager) queryModelCountWithRetry(p *plugin) {
 		p.modelsAll = ids
 		p.modelsDetail = details
 		m.mu.Unlock()
+		// 模型清单到位 → 通知装配方立刻刷新聚合目录，否则 /v1/models 要等
+		// 10 分钟定时器才出现插件模型（P0：首屏可见性，不改暴露白名单语义）。
+		m.notifyModelReady(p.id)
 		return
 	}
 }
