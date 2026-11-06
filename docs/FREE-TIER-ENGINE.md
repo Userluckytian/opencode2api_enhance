@@ -96,8 +96,13 @@ CI（`.github/workflows/build-release.yml`）按矩阵交叉构建三平台：
   **开 anonymous 不会让 key 白费**，只是把 key 排到 WARP 之后。
 
 WARP 优先时另有一层保护：管理器在引擎 `models.anonymous_backoff` 写入熔断参数
-（连续失败 3 次 → 暂停匿名通道 1 小时，逐次翻倍，上限 6 小时）。缺了它，
+（连续失败 6 次 → 暂停匿名通道 1 小时，逐次翻倍，上限 24 小时）。缺了它，
 WARP 不可用时每条请求都要先陪跑一次失败的匿名尝试才落到 key。
+上限取 24h 是为了 **≥ 引擎出口黑名单的 24h 冷却期**：熔断若比出口冷却短，
+熔断解除时出口还没解冻，引擎会再次陪跑匿名尝试并把整池出口烧掉。
+
+> 注意：熔断是引擎的**进程内**状态，重启即归零；刚重启完、失败次数没累计到
+> 阈值时，前几条请求仍会先陪跑一次失败的匿名尝试。
 
 > 注意：**WARP 池可用时，免费模型的 key 请求本身也走 WARP 出口**
 > （`internal/gateway/warp.go:38`）。所以 WARP 优先真正省下的是 **key 的额度** ——
@@ -115,6 +120,11 @@ WARP 不可用时每条请求都要先陪跑一次失败的匿名尝试才落到
 - **只清本地出口账本，不影响上游账号额度。** 免费额度是服务端按账号/session 记账的，
   重启引擎、换出口、换 key 都重置不了它。
 - 清完必须**重启引擎**才会重新注册出口（引擎只在启动时读该文件）。
+
+> **为什么"换 IP / 换出口"重置不了额度、以及哪些维度理论上是可再生的**：
+> 见 [FREE-TIER-QUOTA-MODEL.md](FREE-TIER-QUOTA-MODEL.md)（额度记账维度与
+> 「模拟无限」的理论边界）。核心结论：当前上游按 **(session, egress)** 二元组
+> 记账，不是纯按 IP；引擎在 429 时先转 session 身份、再转出口。
 
 ## 六、端口
 
@@ -137,7 +147,8 @@ WARP 不可用时每条请求都要先陪跑一次失败的匿名尝试才落到
 | 免费层大面积 429 / 冷却中 | 看 `warp_cooling` 与出口池大小；必要时增加 WARP 出口或切换代理列表 |
 | 面板显示 WARP 优先，但出口一个都起不来 | 看 `runtime/free-tier/config.json.warp-state.json`：里面压着 24h 黑名单，新出口全被判「已在冷却」。用面板「重置出口冷却」清掉后**重启引擎** |
 | `/healthz` 里没有 `warp` 字段 | 引擎跑在无 WARP 模式（`g.warp == nil`）：WARP 池没起来。查 `runtime/free-tier/stdout.log` 的 `warp_startup_fallback` / `warp_retry_failed` |
-| 配了 key 仍 429 | key 不是万能：免费额度按账号/session 记账，匿名通道同样受限。key 是兜底不是保证 |
+| 配了 key 仍 429 | key 不是万能：免费额度按账号/session 记账，匿名通道同样受限。key 是兜底不是保证。原理见 [FREE-TIER-QUOTA-MODEL.md](FREE-TIER-QUOTA-MODEL.md) |
+| 换了很多出口/节点仍 429 | 额度按 **(session, egress)** 二元组记账：会话烧干后换新出口照样 429，引擎会先转 session 身份再淘汰出口。见 [FREE-TIER-QUOTA-MODEL.md](FREE-TIER-QUOTA-MODEL.md) |
 | 构建只有 warning `bin/… not found` | 正常：`build.rs` 不注册 `embed_free_tier_engine`，`FREE_TIER_ENGINE = None`，面板其余功能不受影响 |
 
 引擎状态字段（面板/OpenCode 免费层页读取）：`state` / `running` / `healthy` / `pid` /
