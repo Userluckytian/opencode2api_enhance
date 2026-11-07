@@ -1,5 +1,26 @@
 # Changelog
 
+## v2.0.4（2026-11-07）
+
+### 修复
+
+- **WARP 池起不来时，配了 key 也全部 503（引擎未运行 / 模型 0/0）**：引擎判定「这条请求要不要走 WARP」只看 WARP 池对象是否存在，**不看池里有没有可用出口**。于是 WARP 开着但池空时，连 zen key 的请求也被判成必须走 WARP，拿不到出口就直接放弃整个 key tier —— **10 个 key 一个都用不上**，客户端全收到 503 WARP pool has no ready egress，面板则显示「引擎未运行、模型 0/0」。
+  - **触发场景**：本机没有可用 IPv6（或没配 warp.source_ipv6）时，每次注册出口都从同一个本机地址出去，Cloudflare 反复发回同一个 /64，被判 duplicate egress；连续重复后引擎暂停预加载（preload paused for 5m after N duplicate egresses），池子永远是 0 出口。
+  - **修复方式**：管理器看门狗（30s 一轮）持续观察引擎 /healthz 的 warp.active；连续 3 轮（约 90s，跨过引擎首次注册窗口）发现 ctive==0 时，自动把 warp.enabled 关掉并重启引擎 —— 引擎随即进直连模式，key 恢复正常可用。**不修改引擎**（GPL 独立程序），只改配置驱动它。
+  - **不误杀正常池**：池一旦恢复 ctive>0 立刻清零计数；引擎不在 WARP 模式（/healthz 无 warp 字段）不计入；用户手动关掉 WARP 或关掉自动降级时不动作。
+  - **不会反复重试烧出口**：降级只做一次、不自动切回（池空往往是环境性的，反复重试只会把冷却账本撑得更大）。
+- **面板显示降级原因 + 「重试 WARP」按钮**：降级后 OpenCode 页 WARP 卡片显示醒目提示（原因、发生时刻、如何恢复），并提供「重试 WARP」一键重新启用 WARP 并重启引擎（接上 IPv6 或换了网络环境后使用）。引擎状态接口新增 warp_fallback 字段（enabled / uto_fallback / pplied / t / eason / strikes / 	hreshold）。
+- 新增配置项 engine_warp_auto_fallback（默认开启）。不需要自动降级的用户可关掉。
+
+### 实测
+
+隔离环境（引擎 + 单 key + 无 IPv6）验证完整链路：
+
+| 阶段 | 结果 |
+|------|------|
+| WARP 正常（ctive 2→4） | 看门狗**不降级**（pplied=false, strikes=0）—— 不误杀 |
+| 关掉 WARP 后重启引擎 | 引擎配置 warp.enabled=false，/healthz 无 warp 字段 = 直连模式 |
+| 直连模式下发真实请求 | **200 / 1.7s / 正常返回内容**（修复前是 503 WARP pool has no ready egress） |
 ## v2.0.3（2026-11-06）
 
 ### 修复
