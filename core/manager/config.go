@@ -68,6 +68,25 @@ type Config struct {
 	// EngineChannelOrder 免费通道的顺序档位（warp_first / key_first）。
 	// 空 = 默认 warp_first（先走 WARP 出口，失败再用 key）。
 	EngineChannelOrder string `json:"engine_channel_order,omitempty"`
+	// EngineWarpAutoFallback WARP 池起不来时自动降级为直连（默认开启）。
+	//
+	// 为什么必须有：引擎的 usesWARP() 只看「WARP 池对象是否存在」，不看池里有没有
+	// 可用出口（internal/gateway/warp.go:38）。于是 WARP 启用但池空时，**连 zen key
+	// 的请求也会被判为必须走 WARP**，拿到 errWARPUnavailable 后直接 break 放弃 key
+	// tier（internal/gateway/upstream.go:1041-1045）—— 结果 10 个 key 一个都用不上，
+	// 全部 503。
+	//
+	// 典型触发场景：本机没有可用 IPv6、warp.source_ipv6 为空时，每次注册都拿到同一个
+	// /64，被判 duplicate egress，池永远 0 出口（日志 "preload paused for 5m after N
+	// duplicate egresses"）。
+	//
+	// 降级方式：把引擎 config 的 warp.enabled 写成 false，让 g.warp == nil →
+	// usesWARP() 恒 false → key 直接走 proxies（直连或配置的代理）。这是唯一能在
+	// 不修改引擎的前提下恢复「key 可用」的手段（引擎是 GPL 独立程序，本项目不改它）。
+	//
+	// 降级后不会自动切回：WARP 池空往往是环境性的（无 IPv6 / 出口被封），反复重试
+	// 只会反复烧出口。用户在面板点「重试 WARP」或重新开启 WARP 开关即可再试。
+	EngineWarpAutoFallback *bool `json:"engine_warp_auto_fallback,omitempty"`
 }
 func (m *Manager) configPath() string {
 	return filepath.Join(m.paths.DataDir, "config.json")
@@ -216,6 +235,8 @@ func (m *Manager) ConfigGet(key string) (string, error) {
 		return strconv.FormatBool(engineEnabled(cfg)), nil
 	case "engine_warp_enabled":
 		return strconv.FormatBool(engineWarpEnabled(cfg)), nil
+	case "engine_warp_auto_fallback":
+		return strconv.FormatBool(engineWarpAutoFallback(cfg)), nil
 	case "engine_warp_pool_size":
 		return strconv.Itoa(cfg.EngineWarpPoolSize), nil
 	case "engine_warp_source_ipv6":
@@ -316,6 +337,12 @@ func (m *Manager) ConfigSet(key, value string) error {
 			return err
 		}
 		cfg.EngineWarpEnabled = &b
+	case "engine_warp_auto_fallback":
+		b, err := parseBool()
+		if err != nil {
+			return err
+		}
+		cfg.EngineWarpAutoFallback = &b
 	case "engine_warp_pool_size":
 		v, err := parseInt()
 		if err != nil {
@@ -409,6 +436,14 @@ func engineWarpEnabled(cfg Config) bool {
 	return *cfg.EngineWarpEnabled
 }
 
+// engineWarpAutoFallback WARP 池起不来时是否自动降级为直连（nil = 默认开启）。
+func engineWarpAutoFallback(cfg Config) bool {
+	if cfg.EngineWarpAutoFallback == nil {
+		return true
+	}
+	return *cfg.EngineWarpAutoFallback
+}
+
 // engineFreeOnly 只暴露/路由免费模型（nil = 默认开启）。
 //
 // 默认开：本项目免费层存在的意义就是「不花钱用模型」。开着它，即使配了
@@ -490,6 +525,8 @@ type ConfigView struct {
 	// 下发给前端是为了让面板文案与真实参数同源 —— 否则后端改了阈值、
 	// 前端还写着「连续失败达 6 次」，面板就会开始说谎。
 	EngineAnonymousBackoffThreshold int `json:"engine_anonymous_backoff_threshold"`
+	// EngineWarpAutoFallback WARP 池空时自动降级为直连（默认 true）。
+	EngineWarpAutoFallback bool `json:"engine_warp_auto_fallback"`
 }
 
 // ConfigViewOf 生成前端视图（密码脱敏为掩码）。
@@ -528,6 +565,7 @@ func (m *Manager) ConfigViewOf() ConfigView {
 		EngineChannelOrder:     engineChannelOrder(cfg),
 		// 熔断阈值同源下发：前端文案直接用它，不另写一份常量。
 		EngineAnonymousBackoffThreshold: anonymousBackoffThreshold,
+		EngineWarpAutoFallback:          engineWarpAutoFallback(cfg),
 	}
 }
 // defaultUiPollIntervalSec 界面轮询间隔默认值（秒，U3）。

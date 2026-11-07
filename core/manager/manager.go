@@ -37,6 +37,11 @@ type Manager struct {
 	// 进程内存态：重启管理面即清空 —— 它只是「上次看到的提示」，不是事实源。
 	retryAfterMu sync.RWMutex
 	retryAfter   map[string]retryAfterHint
+
+	// warpFallbackMu 保护 warpFallback：WARP 池空时的自动降级判定状态。
+	// 见 freetier_warp_fallback.go 顶部的成因说明。
+	warpFallbackMu sync.Mutex
+	warpFallback   warpFallbackState
 }
 
 // retryAfterHint 某模型 429 时上游给出的额度重置提示。

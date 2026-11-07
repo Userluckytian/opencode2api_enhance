@@ -45,6 +45,16 @@ function fmtRelTime(ts?: string): string {
   return `${Math.round(hr / 24)} 天后`
 }
 
+/** 绝对时刻（本地时区，精确到分钟）：降级发生时间等展示用。 */
+function fmtClock(ts?: string): string {
+  if (!ts) return ''
+  const t = Date.parse(ts)
+  if (!Number.isFinite(t)) return ''
+  const d = new Date(t)
+  const pad = (n: number) => String(n).padStart(2, '0')
+  return `${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`
+}
+
 /** 密钥遮罩：保留前 6 位（通常是 oc_sk_ 前缀）与末 4 位，其余替换为 *。 */
 function maskKey(key: string): string {
   if (key.length <= 10) return '*'.repeat(key.length)
@@ -148,6 +158,7 @@ export default function OpenCodePage({ toast }: { toast: (msg: string, ok?: bool
   // 「冷却中」会恒显示 0，而账本里压着几十个已烧掉的出口前缀 —— 真相只在这里。
   const [cooldown, setCooldown] = useState<WarpCooldownState | null>(null)
   const [resettingCooldown, setResettingCooldown] = useState(false)
+  const [retryingWarp, setRetryingWarp] = useState(false)
 
   const aliveRef = useRef(true)
   useEffect(() => {
@@ -321,6 +332,24 @@ export default function OpenCodePage({ toast }: { toast: (msg: string, ok?: bool
       toast((e as Error).message, false)
     } finally {
       setResettingCooldown(false)
+    }
+  }
+
+  // retryWarp 重试 WARP：清除自动降级判定 + 重新启用 WARP 并重启引擎。
+  //
+  // 用于「池空被自动降级为直连」之后想再试一次（接上 IPv6 / 换网络环境）。
+  // 不清冷却账本：那些 /64 确实被上游拒过，清了也是白清。
+  const retryWarp = async () => {
+    setRetryingWarp(true)
+    try {
+      const r = await api.freeTierRetryWarp()
+      toast(r.hint || '已重新启用 WARP，引擎正在重启并注册出口')
+      setRestartingAt(Date.now())
+      void reload()
+    } catch (e) {
+      toast((e as Error).message, false)
+    } finally {
+      setRetryingWarp(false)
     }
   }
 
@@ -1056,6 +1085,40 @@ export default function OpenCodePage({ toast }: { toast: (msg: string, ok?: bool
             />
           </label>
         </div>
+
+        {/* WARP 池空导致 key 全废：引擎判定「要不要走 WARP」只看池对象是否存在，
+            不看池里有没有可用出口 —— 所以池空时连 zen key 的请求也会被判成必须走
+            WARP 并直接 503（10 个 key 一个都用不上）。管理器连续观测到池空会自动
+            降级为直连，这里把状态和「再试一次」的入口给出来。 */}
+        {status?.warp_fallback?.applied && (
+          <div className="mt-3 rounded-lg border border-amber-300 bg-amber-50 px-3 py-2">
+            <div className="flex items-start gap-2">
+              <AlertCircle size={14} className="text-amber-700 mt-0.5 shrink-0" />
+              <div className="flex-1 min-w-0">
+                <div className="text-[12px] font-semibold text-amber-900">
+                  WARP 已自动降级为直连
+                </div>
+                <div className="text-[11px] text-amber-800 mt-0.5">
+                  {status.warp_fallback.reason ||
+                    'WARP 池没有可用出口，已关闭 WARP 以恢复 key 可用。'}
+                  {status.warp_fallback.at ? `（${fmtClock(status.warp_fallback.at)}）` : ''}
+                </div>
+                <div className="text-[11px] text-amber-700 mt-1">
+                  接上可用 IPv6 或换了网络环境后，可点右侧「重试 WARP」重新注册出口。
+                </div>
+              </div>
+              <button
+                onClick={() => void retryWarp()}
+                disabled={retryingWarp}
+                title="重新启用 WARP 并重启引擎（会重新注册出口，最长约 90s）"
+                className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-[12px] text-amber-900 bg-white border border-amber-300 hover:bg-amber-100 disabled:opacity-40 shrink-0"
+              >
+                {retryingWarp ? <Loader2 size={13} className="animate-spin" /> : <RotateCcw size={13} />}
+                重试 WARP
+              </button>
+            </div>
+          </div>
+        )}
 
         {/* 出口冷却账本：引擎把被上游拒绝的出口写进 24h 黑名单，
             新注册的出口若落在已冷却的 /64 上会被判「已在冷却」，于是 WARP 池

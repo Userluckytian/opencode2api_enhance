@@ -376,6 +376,39 @@ func freeTierResetWarpCooldownHandler(m *manager.Manager) http.HandlerFunc {
 	}
 }
 
+// freeTierRetryWarpHandler 重试 WARP：清除自动降级判定 + 重新打开 WARP 并重启引擎。
+//
+// 场景：WARP 池空时看门狗会自动降级为直连（否则 key 全废）。用户后来接上了
+// 可用 IPv6、或想再试一次时，点面板「重试 WARP」走这里 —— 重新把
+// engine_warp_enabled 置 true 并重启引擎，让引擎重新注册出口。
+//
+// 不清冷却账本：那些 /64 确实被上游拒过，清了也是白清（同一批 /64 大概率还在
+// 黑名单周期内）。用户若确认环境已变，可再单独点「重置出口冷却」。
+func freeTierRetryWarpHandler(m *manager.Manager) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if err := m.ConfigSet("engine_warp_enabled", "true"); err != nil {
+			writeErrResp(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		m.ResetWarpFallback()
+		// 重启走异步：首次出口注册最长 90s，不该让按钮转一分半。
+		go func() {
+			defer func() {
+				if rec := recover(); rec != nil {
+					slog.Error("retry warp: engine restart panic", "panic", rec)
+				}
+			}()
+			if err := m.RestartFreeTierEngine(manager.NewRealRunner()); err != nil {
+				slog.Warn("retry warp: engine restart failed", "error", err)
+			}
+		}()
+		writeJSONResp(w, map[string]any{
+			"status": "restarting",
+			"hint":   "已重新启用 WARP，引擎正在重启并注册出口（最长约 90s）",
+		})
+	}
+}
+
 func writeJSONResp(w http.ResponseWriter, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(v)
@@ -425,6 +458,7 @@ func registerHTTPRoutes(mux *http.ServeMux, managerInst *manager.Manager, plugin
 	mux.HandleFunc("/api/admin/free-tier/config", loggingMiddleware(requireAuth(freeTierEngineConfigHandler(managerInst))))
 	// WARP 出口冷却账本：查 + 清空（清空只动本地账本，不影响账号额度）
 	mux.HandleFunc("/api/admin/free-tier/warp-cooldown", loggingMiddleware(requireAuth(freeTierWarpCooldownHandler(managerInst))))
+	mux.HandleFunc("/api/admin/free-tier/retry-warp", loggingMiddleware(requireAuth(freeTierRetryWarpHandler(managerInst))))
 	mux.HandleFunc("/api/admin/free-tier/reset-warp-cooldown", loggingMiddleware(requireAuth(freeTierResetWarpCooldownHandler(managerInst))))
 	// 免费层可用模型清单：合并引擎 /v1/models 与它自写的 availability 探测结果
 	mux.HandleFunc("/api/admin/free-tier/models", loggingMiddleware(requireAuth(freeTierModelsHandler(managerInst))))

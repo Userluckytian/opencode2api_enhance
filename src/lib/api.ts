@@ -335,6 +335,8 @@ export type ConfigView = {
    * 否则后端调参后面板就会开始说谎。
    */
   engine_anonymous_backoff_threshold?: number
+  /** WARP 池空时自动降级为直连（默认 true） */
+  engine_warp_auto_fallback?: boolean
 }
 
 /** 免费通道顺序档位 */
@@ -538,9 +540,36 @@ export type FreeTierEngineStatus = {
   warp_stack?: string
   warp_active: number
   warp_cooling: number
+  /** WARP 池空时的自动降级状态 */
+  warp_fallback: WarpFallbackStatus
   bin_path: string
   bin_exists: boolean
   error?: string
+}
+
+/**
+ * WARP 自动降级状态。
+ *
+ * 背景：引擎判定「要不要走 WARP」只看 WARP 池对象是否存在，不看池里有没有可用
+ * 出口。所以池空时连 key 请求也会被判为必须走 WARP 并直接 503 —— key 全废。
+ * 管理器观察到池连续多次 0 出口时会自动关掉 WARP 让 key 直连，这里把该状态
+ * 暴露给面板。
+ */
+export type WarpFallbackStatus = {
+  /** 用户是否开着 WARP（配置值） */
+  enabled: boolean
+  /** 是否启用自动降级（配置值） */
+  auto_fallback: boolean
+  /** 是否已因池空而降级 */
+  applied: boolean
+  /** 降级发生时刻（RFC3339；未降级为空） */
+  at?: string
+  /** 降级原因（未降级为空） */
+  reason?: string
+  /** 当前连续「池空」观测次数 */
+  strikes: number
+  /** 触发降级所需的连续观测次数 */
+  threshold: number
 }
 
 /** WARP 出口冷却账本状态（引擎运行目录内的 config.json.warp-state.json） */
@@ -1085,6 +1114,14 @@ export const api = {
    */
   freeTierResetWarpCooldown: () =>
     req<{ status: string; cleared: number }>('POST', '/free-tier/reset-warp-cooldown'),
+  /**
+   * 重试 WARP：清除自动降级判定 + 重新打开 WARP 并异步重启引擎。
+   *
+   * 用于「池空被自动降级为直连」之后想再试一次的场景（比如接上了可用 IPv6）。
+   * 不清冷却账本 —— 那些 /64 确实被上游拒过。
+   */
+  freeTierRetryWarp: () =>
+    req<{ status: string; hint: string }>('POST', '/free-tier/retry-warp'),
   freeTierModels: () => req<FreeTierModelsView>('GET', '/free-tier/models'),
   freeTierProbe: (model?: string) =>
     req<ModelProbeResponse>('POST', '/free-tier/probe', { model: model ?? '' }),

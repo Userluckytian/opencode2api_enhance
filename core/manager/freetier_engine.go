@@ -16,6 +16,7 @@ package manager
 import (
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -52,6 +53,8 @@ type FreeTierEngineStatus struct {
 	WarpStack   string `json:"warp_stack,omitempty"`
 	WarpActive  int    `json:"warp_active"`
 	WarpCooling int    `json:"warp_cooling"`
+	// WarpFallback WARP 池空时的自动降级状态（见 freetier_warp_fallback.go）。
+	WarpFallback WarpFallbackStatus `json:"warp_fallback"`
 	// BinPath / BinExists 引擎二进制位置与是否已安装。
 	BinPath   string `json:"bin_path"`
 	BinExists bool   `json:"bin_exists"`
@@ -444,6 +447,10 @@ func (m *Manager) RestartFreeTierEngine(runner Runner) error {
 }
 
 // Watchdog 每 30s 检查引擎存活与健康，异常则重启。
+//
+// 除了「端口不通」这种硬故障，还处理一种功能性故障：引擎活着、端口在听，但 WARP
+// 池 0 出口 —— 此时引擎会把 key 请求也判成必须走 WARP 并直接 503（见
+// freetier_warp_fallback.go 顶部说明）。连续多轮观测到就自动降级为直连。
 func (m *Manager) WatchdogFreeTierEngine(runner Runner) {
 	ticker := time.NewTicker(30 * time.Second)
 	defer ticker.Stop()
@@ -453,10 +460,17 @@ func (m *Manager) WatchdogFreeTierEngine(runner Runner) {
 			continue
 		}
 		port := m.managerGatewayPort()
-		if probePort(port, 2*time.Second) {
+		if !probePort(port, 2*time.Second) {
+			_ = m.RestartFreeTierEngine(runner)
 			continue
 		}
-		_ = m.RestartFreeTierEngine(runner)
+		// 端口活着：再查一次 /healthz，判断是不是「WARP 池空导致 key 全废」。
+		if health, ok := fetchEngineHealth(port); ok {
+			if m.maybeAutoFallbackWarp(runner, health) {
+				slog.Warn("WARP pool has no usable egress; auto-fallback to direct so keys stay usable",
+					"active", health.Active, "cooling", health.Cooling, "status", health.Status)
+			}
+		}
 	}
 }
 
@@ -476,8 +490,9 @@ func (m *Manager) FreeTierEngineStatus() FreeTierEngineStatus {
 		PID:         pid,
 		APIKey:      effectiveGatewayKey(cfg),
 		BinPath:     m.EngineBinPath(),
-		Error:       lastErr,
-		WarpCooling: e.warpCooling,
+		Error:        lastErr,
+		WarpCooling:  e.warpCooling,
+		WarpFallback: m.WarpFallbackStatusOf(),
 	}
 	if _, err := os.Stat(st.BinPath); err == nil {
 		st.BinExists = true
