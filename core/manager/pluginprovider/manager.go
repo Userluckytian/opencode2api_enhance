@@ -304,6 +304,9 @@ type plugin struct {
 	// 消费 stdout 行流，否则漏掉 need_config → ready 转换，插件永不注册）。由
 	// scanStdout 写入、spawnAndReadReady 之后 supervise 继续读，通道不跨周期重建。
 	stdoutCh chan string
+	// logs 子进程 stdout/stderr 的有界环形缓冲（跨 spawn 周期保留，见 pluglogs.go）。
+	// 与 stdoutCh 分离：stdoutCh 只承载就绪行解析，logs 只做记录，互不干扰。
+	logs *logRing
 }
 
 func newPlugin(m *Manager, id string) *plugin {
@@ -324,6 +327,7 @@ func newPlugin(m *Manager, id string) *plugin {
 		retryCh:      make(chan struct{}, 1),
 		exitCh:       make(chan struct{}, 1),
 		stdoutCh:     make(chan string, 16),
+		logs:         newLogRing(defaultLogRingCap),
 	}
 }
 
@@ -914,7 +918,15 @@ func (m *Manager) spawnAndReadReady(p *plugin) bool {
 		m.setStatus(p, StatusError, "无法接管子进程 stdout: "+err.Error())
 		return false
 	}
-	cmd.Stderr = nil // 丢弃 stderr（错误经就绪行上报）
+	// stderr 必须接管道而不是 nil：插件（尤其 Go 写的）把日志全打在 stderr，
+	// stdout 按契约只打状态行。以前写 nil 等于让操作系统丢弃——子进程崩溃前
+	// 打的「启动浏览器失败: CDP 端口未就绪」「上游 400」等关键错误一条都到不了宿主，
+	// 真机故障只能靠手工起探针复现（2026-11-09 事故复盘，见 pluglogs.go 文件头）。
+	stderr, err := cmd.StderrPipe()
+	if err != nil {
+		m.setStatus(p, StatusError, "无法接管子进程 stderr: "+err.Error())
+		return false
+	}
 	if err := cmd.Start(); err != nil {
 		m.setStatus(p, StatusError, "子进程启动失败: "+err.Error())
 		return false
@@ -927,7 +939,11 @@ func (m *Manager) spawnAndReadReady(p *plugin) bool {
 	p.startedAt = time.Time{}
 	m.mu.Unlock()
 
-	go scanStdout(stdout, stdoutCh)
+	// 记录本轮周期号 + 两条流的日志（stdout 状态行也留档：need_config 的 hint
+	// 和 fatal 的 error 往往就是唯一的错误说明）。
+	cycle := p.logs.BeginCycle(fmt.Sprintf("pid=%d entry=%s", cmd.Process.Pid, p.man.Entry))
+	go scanStdout(stdout, stdoutCh, p.logs)
+	go scanStderr(stderr, p.logs, cycle)
 	cleanup := func() {
 		m.mu.Lock()
 		if p.pid == cmd.Process.Pid {
@@ -943,13 +959,15 @@ func (m *Manager) spawnAndReadReady(p *plugin) bool {
 		select {
 		case <-ctx.Done():
 			cleanup()
-			m.fail(p, fmt.Sprintf("启动超时：%s 内未收到就绪行", m.cfg.StartupTimeout))
+			m.fail(p, withStderrTail(fmt.Sprintf("启动超时：%s 内未收到就绪行", m.cfg.StartupTimeout), p.logs))
 			return false
 		case ln, ok := <-stdoutCh:
 			if !ok {
 				// stdout 关闭 = 子进程已退出（未报告状态）。
+				// 这里正是「插件一启动就退出」的唯一线索点：把 stderr 尾部带上，
+				// 否则面板只能看到一句「子进程在报告就绪前退出」，无从判断原因。
 				cleanup()
-				m.fail(p, "子进程在报告就绪前退出")
+				m.fail(p, withStderrTail("子进程在报告就绪前退出", p.logs))
 				return false
 			}
 			msg, isReady := parseReadyLine(ln)
@@ -966,7 +984,7 @@ func (m *Manager) spawnAndReadReady(p *plugin) bool {
 				}
 				if msg.ID != "" && msg.ID != p.id {
 					cleanup()
-					m.fail(p, fmt.Sprintf("就绪行 id %q 与目录 %q 不一致", msg.ID, p.id))
+					m.fail(p, withStderrTail(fmt.Sprintf("就绪行 id %q 与目录 %q 不一致", msg.ID, p.id), p.logs))
 					return false
 				}
 				if msg.Port < 1 || msg.Port > 65535 {
@@ -1005,7 +1023,7 @@ func (m *Manager) spawnAndReadReady(p *plugin) bool {
 				return true
 			case "fatal":
 				cleanup()
-				m.fail(p, "子进程启动失败: "+msg.Error)
+				m.fail(p, withStderrTail("子进程启动失败: "+msg.Error, p.logs))
 				return false
 			}
 		}
@@ -1024,16 +1042,41 @@ func (m *Manager) fail(p *plugin, msg string) {
 }
 
 // scanStdout 逐行读取子进程 stdout 并投递（缓冲满丢弃，读取者退出后不阻塞）。
-func scanStdout(r io.Reader, lines chan<- string) {
+//
+// ring 非 nil 时同步留档到环形缓冲：stdout 虽按契约只打状态行，但 need_config 的
+// hint / fatal 的 error 往往就是唯一的错误说明，值得与 stderr 一起呈现在面板上。
+func scanStdout(r io.Reader, lines chan<- string, ring *logRing) {
 	sc := bufio.NewScanner(r)
 	sc.Buffer(make([]byte, 0, 64*1024), 1024*1024)
 	for sc.Scan() {
+		text := sc.Text()
+		if ring != nil {
+			ring.Append("out", text)
+		}
 		select {
-		case lines <- sc.Text():
+		case lines <- text:
 		default:
 		}
 	}
 	close(lines)
+}
+
+// scanStderr 逐行读取子进程 stderr 并入环形缓冲（不参与就绪行解析）。
+//
+// stderr 是插件的主要日志通道（Go 的 log 包默认写 stderr），必须持续读完：
+// 不读会让子进程在管道写满时阻塞（Windows 匿名管道缓冲约 4KB），表现为插件
+// 「莫名其妙卡住」——这比丢日志更糟。所以这里只记录、不设上限地读到 EOF。
+func scanStderr(r io.Reader, ring *logRing, cycle int) {
+	sc := bufio.NewScanner(r)
+	sc.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+	for sc.Scan() {
+		if ring != nil {
+			ring.Append("err", sc.Text())
+		}
+	}
+	// 读取出错（子进程被杀时的 broken pipe 属正常）无需上报：日志缺口由
+	// 「子进程退出」状态行体现。cycle 保留供将来按周期分片查询。
+	_ = cycle
 }
 
 // watchExit 等待子进程退出并通知 exitCh（缓冲 1，防发送阻塞）。

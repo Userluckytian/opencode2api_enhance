@@ -11,6 +11,8 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"time"
 )
 
@@ -178,6 +180,69 @@ func (m *Manager) RefreshModelsHandler() http.HandlerFunc {
 		}
 		writeJSON(w, map[string]any{"status": "ok", "plugin": view})
 	}
+}
+
+const (
+	// pluginLogsDefaultLimit / pluginLogsMaxLimit 日志查询的行数默认与上限。
+	pluginLogsDefaultLimit = 500
+	pluginLogsMaxLimit     = 5000
+)
+
+// LogsHandler GET /api/admin/plugins/{id}/logs：读取插件子进程的 stdout/stderr 日志。
+//
+// 查询参数：
+//
+//	limit=200   保留最后 N 行（默认 500，上限 5000）
+//	stream=err  只看某一流：out（状态行/普通输出）、err（插件日志）、mark（周期分隔）
+//
+// 为什么要有这个端点（2026-11-09 事故复盘）：以前宿主 `cmd.Stderr = nil` 直接丢弃
+// 子进程 stderr，插件真正的错误（「启动浏览器失败: CDP 端口未就绪」「上游 400」）
+// 一条都到不了宿主，真机故障只能手工起探针复现。现在日志进有界环形缓冲，
+// 面板/CLI 可以随时拉取。
+func (m *Manager) LogsHandler() http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if !requireMethod(w, r, http.MethodGet) {
+			return
+		}
+		id := r.PathValue("id")
+		q := r.URL.Query()
+		limit := pluginLogsDefaultLimit
+		if s := q.Get("limit"); s != "" {
+			if n, err := strconv.Atoi(s); err == nil && n > 0 {
+				limit = n
+			}
+		}
+		if limit > pluginLogsMaxLimit {
+			limit = pluginLogsMaxLimit
+		}
+		stream := strings.TrimSpace(q.Get("stream"))
+
+		lines, cycle, ok := m.PluginLogs(id, limit, stream)
+		if !ok {
+			writeErr(w, http.StatusNotFound, "插件不存在: "+id)
+			return
+		}
+		writeJSON(w, map[string]any{
+			"id":     id,
+			"cycle":  cycle, // 当前 spawn 周期号（第几次拉起子进程）
+			"stream": stream,
+			"count":  len(lines),
+			"lines":  lines,
+		})
+	}
+}
+
+// PluginLogs 返回插件子进程日志快照（limit<=0 取全部；stream 空取全部）。
+//
+// 第二个返回值是该插件当前的 spawn 周期号，第三个表示插件是否存在。
+func (m *Manager) PluginLogs(id string, limit int, stream string) ([]LogLine, int, bool) {
+	m.mu.Lock()
+	p, ok := m.plugins[id]
+	m.mu.Unlock()
+	if !ok {
+		return nil, 0, false
+	}
+	return p.logs.Snapshot(limit, stream), p.logs.CurrentCycle(), true
 }
 
 func (m *Manager) enabledOf(id string) bool {

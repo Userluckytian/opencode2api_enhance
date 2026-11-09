@@ -232,6 +232,7 @@ func runProviderServiceMode(port, listenAddr string) {
 	mux.HandleFunc("/api/admin/plugins/{id}/toggle", loggingMiddleware(apiKeyAuthMiddleware(pluginMgr.ToggleHandler())))
 	mux.HandleFunc("/api/admin/plugins/{id}/exposed-models", loggingMiddleware(apiKeyAuthMiddleware(pluginMgr.ExposedModelsHandler())))
 	mux.HandleFunc("/api/admin/plugins/{id}/refresh-models", loggingMiddleware(apiKeyAuthMiddleware(pluginMgr.RefreshModelsHandler())))
+	mux.HandleFunc("/api/admin/plugins/{id}/logs", loggingMiddleware(apiKeyAuthMiddleware(pluginMgr.LogsHandler())))
 	mux.HandleFunc("/api/admin/plugins/{id}", loggingMiddleware(apiKeyAuthMiddleware(pluginMgr.DeleteHandler())))
 
 	addr := ":" + port
@@ -491,6 +492,7 @@ func registerHTTPRoutes(mux *http.ServeMux, managerInst *manager.Manager, plugin
 		mux.HandleFunc("/api/admin/plugins/{id}/toggle", loggingMiddleware(requireAuth(pluginMgr.ToggleHandler())))
 		mux.HandleFunc("/api/admin/plugins/{id}/exposed-models", loggingMiddleware(requireAuth(pluginMgr.ExposedModelsHandler())))
 		mux.HandleFunc("/api/admin/plugins/{id}/refresh-models", loggingMiddleware(requireAuth(pluginMgr.RefreshModelsHandler())))
+		mux.HandleFunc("/api/admin/plugins/{id}/logs", loggingMiddleware(requireAuth(pluginMgr.LogsHandler())))
 		mux.HandleFunc("/api/admin/plugins/{id}", loggingMiddleware(requireAuth(pluginMgr.DeleteHandler())))
 	} else if providerSvc != nil {
 		proxy := providerSvc.ProxyHandler()
