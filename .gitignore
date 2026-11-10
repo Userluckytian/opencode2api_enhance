@@ -5,6 +5,8 @@ config_history.jsonl
 call_log.jsonl
 postmortem/
 *.log
+port.txt
+*.pid
 
 # Build output
 dist/

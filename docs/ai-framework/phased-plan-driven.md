@@ -237,7 +237,7 @@ docs/superpowers/plans/YYYY-MM-DD-phase-<slug>.md
 
 ---
 
-## 10. 原则四条
+## 10. 原则清单
 
 1. **边界先于功能**  
 2. **计划必须可交接**（零上下文提示词）  
