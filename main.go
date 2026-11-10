@@ -23,6 +23,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/6Kmfi6HP/opencode2api/core/manager"
@@ -76,6 +77,12 @@ func isTopLevelStatic(p string) bool {
 }
 
 func main() {
+	// M2 P1-1：父 PID 必须在一切初始化/阻塞之前捕获（第一条语句）。
+	// POSIX 上父进程一旦退出，os.Getppid() 会变成 subreaper/init，之后再看护就把
+	// init 当父进程、永远不判死（D3 在 POSIX 上漏检）。pluginMgr.Start() 之后再取
+	// 会留下「管理面在窗口期死亡」的漏检窗口，因此这里提前捕获并显式传下去。
+	startupParentPID := os.Getppid()
+
 	// 子命令：doctor（环境自检）。
 	if len(os.Args) > 1 && os.Args[1] == "doctor" {
 		os.Exit(runDoctor(os.Args[2:]))
@@ -127,7 +134,7 @@ func main() {
 	startModelRefresh()
 
 	if providerServiceMode {
-		runProviderServiceMode(port, listenAddr)
+		runProviderServiceMode(port, listenAddr, startupParentPID)
 		return
 	}
 
@@ -193,7 +200,8 @@ func withRecover(next http.Handler) http.Handler {
 
 // runProviderServiceMode 供应商服务进程（-provider-service）：
 // 只注册模型端点 + 插件管理 API，不装配管理器/实例/引擎。
-func runProviderServiceMode(port, listenAddr string) {
+// parentPID 是 main() 第一条语句捕获的父进程 PID（M2 P1-1），不得在此重新获取。
+func runProviderServiceMode(port, listenAddr string, parentPID int) {
 	mux := http.NewServeMux()
 	// v2.0.0: 插件厂商必须绑定全局引用，否则 syncPlugins 直接 return，
 	// 插件供应商永远不会注册进聚合器（表现为 /v1/models 无插件模型）。
@@ -202,7 +210,36 @@ func runProviderServiceMode(port, listenAddr string) {
 		OnModelRefresh: onPluginModelRefresh,
 	}))
 	pluginMgr.Start()
-	defer pluginMgr.Close()
+	// 退出路径统一闸：所有 Close 经 closePlugins（sync.Once）。Once.Do 对并发调用
+	// 会阻塞到首次执行完成——看护 selfExit 与 shutdown 同时到达时，后到者必须等
+	// 插件回收结束才 os.Exit，不会打断回收留下半杀状态（复核 P1）。
+	var closeOnce sync.Once
+	closePlugins := func() { closeOnce.Do(func() { pluginMgr.Close() }) }
+	defer closePlugins()
+
+	// M2 T2 —— 父进程自检（缺陷 D3 止血）：管理面被强杀/崩溃后，本进程若存活，
+	// 其插件管理器会持续拉起插件、整棵子树沦为孤儿。看护协程每 5s 校验父进程
+	// （PID + 启动时间，防 PID 复用；连续 3 次查询失败才判死，保守），父进程消失
+	// 则回收全部插件并退出本进程。
+	//   - watchCtx 在一切正常退出路径（shutdown 接口、ListenAndServe 返回）取消，
+	//     看护不得干扰它们；
+	//   - 看护触发的 selfExit 与 shutdown 路径共用 closePlugins 闸：只 Close 一次，
+	//     且后到者阻塞等到回收完成再退出（先 Close 杀完全部插件，再 os.Exit）。
+	//   - 逃生开关：OPCODE2API_NO_PARENT_WATCH=1 关闭看护（手工独立运行/调试用，
+	//     此时本进程脱离管理面生命周期，须自行负责插件回收）。仅精确值 "1" 生效，
+	//     "0" / 其它值不关闭（与注释语义一致）。
+	watchCtx, cancelWatch := context.WithCancel(context.Background())
+	defer cancelWatch()
+	selfExit := func() {
+		closePlugins()
+		os.Exit(0)
+	}
+	if os.Getenv("OPCODE2API_NO_PARENT_WATCH") == "1" {
+		slog.Warn("parent watch disabled by OPCODE2API_NO_PARENT_WATCH")
+	} else {
+		manager.StartParentWatch(watchCtx, parentPID, selfExit)
+	}
+
 	// 本进程是真正服务自定义源的一方：定时目录刷新与活性探测都必须在这里跑，
 	// 否则管理面板的 key 冷却/熔断徽标永远停在「全部可用」。
 	startModelRefresh()
@@ -218,7 +255,8 @@ func runProviderServiceMode(port, listenAddr string) {
 		w.WriteHeader(http.StatusAccepted)
 		go func() {
 			time.Sleep(100 * time.Millisecond)
-			pluginMgr.Close()
+			cancelWatch() // 正常退出路径：先停看护，避免与 Close 并发竞争
+			closePlugins()
 			os.Exit(0)
 		}()
 	})))
@@ -241,9 +279,14 @@ func runProviderServiceMode(port, listenAddr string) {
 	}
 	slog.Info("provider service listening", "addr", addr)
 	if err := http.ListenAndServe(addr, withRecover(mux)); err != nil {
+		cancelWatch() // 退出路径统一：先停看护
+		// 先记日志再 closePlugins：回收期间若看护 selfExit 抢先赢得 once 并
+		// os.Exit，日志已落盘/输出，不会因进程退出而丢失。
 		slog.Error("provider service terminated", "error", err)
+		closePlugins() // 再同步回收插件（os.Exit 不走 defer，必须显式）
 		os.Exit(1)
 	}
+	cancelWatch()
 }
 
 func providerServiceStatusHandler(p *manager.ProviderService) http.HandlerFunc {

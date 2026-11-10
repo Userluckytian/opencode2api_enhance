@@ -17,9 +17,19 @@ func applyNoWindow(cmd *exec.Cmd) {
 	cmd.SysProcAttr = &syscall.SysProcAttr{CreationFlags: 0x08000000}
 }
 
-// killProcess 强杀（taskkill /PID <pid> /F，与 core/manager 同款）。
+// taskkillArgs 构造 taskkill 参数（纯函数，单测锁定 /T 树杀语义）。
+// M2 T1：加 /T 连进程树一并强杀——插件的子进程（node 内核 / 浏览器等）若只杀父
+// 会沦为孤儿（缺陷 D2）。core/manager/process_windows.go 的 killProcess（管
+// provider-service 的另一条路径）**不加** /T：provider-service 有优雅退出
+// （pluginMgr.Close 自行回收插件），强杀树会跳过清理。决策见
+// docs/ai-framework/plans/2026-11-10-orphan-governance-m2.md T1。
+func taskkillArgs(pid int) []string {
+	return []string{"/PID", strconv.Itoa(pid), "/T", "/F"}
+}
+
+// killProcess 强杀进程树（taskkill /PID <pid> /T /F）。
 func killProcess(pid int) error {
-	taskkill := exec.Command("taskkill", "/PID", strconv.Itoa(pid), "/F")
+	taskkill := exec.Command("taskkill", taskkillArgs(pid)...)
 	applyNoWindow(taskkill)
 	return taskkill.Run()
 }
