@@ -287,6 +287,10 @@ argv         = --provider-serve --port 0   （port 0 = OS 分配随机端口）
 > 本节回答「一个合规插件**必须**提供什么、**不得**做什么、**可**依赖什么」。
 > 宿主在加载/运行哪些点校验、违反的后果，均与 R1 实现（`core/manager/pluginprovider/`
 > `manifest.go` + `manager.go`）逐条对齐。插件作者按本节自检，宿主按本节兜底。
+>
+> **本节只管「功能契约」（能不能跑起来）**。长期运行时的内存 / goroutine / 句柄 /
+> 超时 / 子进程 / 日志容量纪律，见 [`PLUGIN-RESOURCE-CONTRACT.md`](PLUGIN-RESOURCE-CONTRACT.md)
+> （能不能长期跑）——那里有宿主真实参数、判据与四项交付前测量。
 
 ### 10.1 provider.json —— 必填与校验点
 
