@@ -29,9 +29,20 @@ make release-snapshot VERSION=v0.0.0-dev
 
 ## 提交信息
 
-建议使用简短动词开头：
+遵循 [AGENTS.md](AGENTS.md) 的提交规范：`<gitmoji><type>(<scope>): <中文描述>`。
 
-- `feat: add ...`
-- `fix: handle ...`
-- `docs: update ...`
-- `ci: improve ...`
+| type | 说明 | gitmoji |
+|------|------|---------|
+| feat | 新功能 | ✨ |
+| fix | 修复 bug | 🐛 |
+| docs | 文档更新 | 📝 |
+| style | 代码格式（不影响功能） | 🎨 |
+| refactor | 重构 | ♻️ |
+| test | 测试 | ✅ |
+| chore | 构建/工具 | 🔧 |
+| perf | 性能 | ⚡ |
+| ci | CI/CD | 🐳 |
+| revert | 回滚 | ⏪ |
+
+- 描述使用**中文**，祈使语气，结尾不加句号
+- 首行尽量不超过 50 字符

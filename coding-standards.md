@@ -78,26 +78,26 @@
 
 ## 项目专属约定
 
-> 本节为**留空填写**区，由目标项目按其实际技术栈补充，AI 与协作者据此执行。以下给出各栈的填写提示，按需勾选/填写，不需要的可整行删除。
+> 本节按项目实际结构填写（依据 go.mod、Makefile、package.json、vite.config.ts、src-tauri/、core/ 等），AI 与协作者据此执行。
 
 ### 技术栈
-- 语言/框架：____________
-- 构建/运行命令：____________
-- 包管理器：____________
-- 测试命令/工具：____________
+- 语言/框架：后端 Go 1.22（go.mod：`github.com/6Kmfi6HP/opencode2api`），HTTP 代理 + 管理面，单二进制；前端 React 19 + TypeScript + Tailwind CSS 4，Vite 8 构建；Tauri 2（Rust，`src-tauri/`）打包桌面端
+- 构建/运行命令：后端 `make build`（输出 `bin/opencode2api`）、`make release-snapshot VERSION=...`、`make clean`；前端/桌面 `npm run dev`（Vite 固定端口 1420，`/api` 代理到 `127.0.0.1:19090`）、`npm run build`（`tsc -b && vite build`）、`npm run tauri:dev` / `npm run tauri:build`
+- 包管理器：npm（仓库仅含 `package-lock.json`）
+- 测试命令/工具：后端 `make test`（即 `go test ./...`）；前端测试未约定（package.json 无 test 脚本）
 
-### 前端约定（若是前端项目）
-- 组件命名：____________（如 PascalCase）
-- 状态管理：____________
-- 样式作用域 / 主题变量：____________
-- 路由 / 目录结构：____________
+### 前端约定
+- 组件命名：PascalCase（`src/components/`，如 `Modal.tsx`、`TitleBar.tsx`）；页面文件 `XxxPage.tsx`（`src/pages/`）
+- 状态管理：未引入独立状态库，页面切换与任务状态由 `App.tsx` 内 `useState` 管理并向子组件传递
+- 样式作用域 / 主题变量：Tailwind CSS 4 工具类（`@tailwindcss/vite`）；主题 CSS 变量未约定（未见 `--app-*` 定义）
+- 路由 / 目录结构：无路由库，`App.tsx` 以 `useState<Tab>` 切换页面；目录为 `src/components/`、`src/pages/`、`src/lib/`
 
-### 后端约定（若是后端项目）
-- 分层结构：____________（如 controller/service/repository）
-- API 返回结构：____________
-- 异常/错误定义：____________
-- 数据访问方式：____________
+### 后端约定
+- 分层结构：`main.go` + 根目录功能文件（admin/auth/chat_handler/convert/models 等）+ `core/`（aggregator、contract、manager、protocol、router）+ `vendors/`（custom、remote）；`providers/`、`plugin/`、`third_party/` 为本地依赖目录
+- API 返回结构：管理面 API 经 `writeJSONResp`/`writeJSON` 辅助函数直接返回 JSON；统一响应信封未约定
+- 异常/错误定义：上游错误分类统一委托 `core/contract`（`ClassifyUpstreamError`、`RetryAfterMS`），以结构化 `CallRecord` 字段记录
+- 数据访问方式：无数据库，文件持久化——`config.json`（配置）、`stats.json`/`node_stats.json`（统计）、`call_log.jsonl`（调用日志）
 
 ### 其他
-- Lint/格式化工具与配置：____________
-- 特殊工具链 / 版本要求：____________
+- Lint/格式化工具与配置：Go 用 `gofmt`（`make fmt`，注意当前 Makefile 仅格式化 `main.go`）+ `go vet`（`make vet`）；前端未配置 ESLint/Prettier
+- 特殊工具链 / 版本要求：Go ≥ 1.22；Tauri CLI（`@tauri-apps/cli`）；版本号以 `package.json` 为准，由 vite.config.ts 注入 `__APP_VERSION__`
