@@ -4,6 +4,7 @@
 package pluginprovider
 
 import (
+	"encoding/csv"
 	"encoding/json"
 	"fmt"
 	"os/exec"
@@ -32,6 +33,66 @@ func killProcess(pid int) error {
 	taskkill := exec.Command("taskkill", taskkillArgs(pid)...)
 	applyNoWindow(taskkill)
 	return taskkill.Run()
+}
+
+// killOrphanTree Windows：M3 自动回收插件孤儿。killProcess 的 taskkill 已带 /T
+// （M2 T1），杀插件时其 node/msedge/mihomo 等后代一并回收，无需显式枚举后代。
+// 返回错误供 reapOrphans 区分「已回收」与「回收失败」两态日志（P1-2）。
+func killOrphanTree(pid int) error {
+	if pid <= 0 {
+		return nil
+	}
+	if err := killProcess(pid); err != nil {
+		return fmt.Errorf("taskkill /T 回收插件 %d 失败: %w", pid, err)
+	}
+	return nil
+}
+
+// pidAliveConservative 保守探活（P1-1）：查询失败 = 存活（true），只有 tasklist
+// 明确返回「该 PID 不存在」才判死。
+//
+// 与 pidAlive 的 fail-closed 语义相反，且**不得**改 pidAlive（它是插件子进程
+// 生命周期路径的生产语义）。reapOrphans 用它判断「插件父进程是否已死」：把未知
+// 当死亡会误杀有主插件（审查实测：宿主命令行不含 opencode2api 时旧 hosts 名称
+// 启发式会误树杀活插件），宁可漏回收一轮。
+//
+// 不解析本地化提示文案：tasklist 在中文 Windows 输出「信息: 没有运行的任务…」，
+// 只按 CSV 第二列精确比对 PID（数据行恒为数字）。
+func pidAliveConservative(pid int) bool {
+	if pid <= 0 {
+		return true // 无效 PID 属「未知」，保守按存活处理，绝不据此杀进程
+	}
+	out, err := exec.Command("tasklist", "/FI", "PID eq "+strconv.Itoa(pid), "/FO", "CSV", "/NH").Output()
+	if err != nil {
+		return true // 查询失败 = 未知 = 存活
+	}
+	return parseTasklistPIDCSV(string(out), pid)
+}
+
+// parseTasklistPIDCSV 解析 tasklist /FO CSV /NH 输出：逐行按 CSV 解析，第二列
+// （映像名称, PID, ...）必须精确等于 pid。提示行只有 1 列（或本地化文案），跳过。
+// 纯函数，便于单测（引号、空输出、PID 不匹配）。本包独立实现，不 import
+// core/manager 的未导出 parseTasklistPID。
+func parseTasklistPIDCSV(out string, pid int) bool {
+	if pid <= 0 {
+		return false
+	}
+	r := csv.NewReader(strings.NewReader(out))
+	r.FieldsPerRecord = -1
+	r.TrimLeadingSpace = true
+	for {
+		rec, err := r.Read()
+		if err != nil {
+			return false // io.EOF 或畸形输出 → 未找到匹配
+		}
+		if len(rec) < 2 {
+			continue
+		}
+		v, err := strconv.Atoi(strings.TrimSpace(rec[1]))
+		if err == nil && v == pid {
+			return true
+		}
+	}
 }
 
 // pidAlive tasklist CSV 输出按 PID 字段匹配（不依赖本地化提示文案——

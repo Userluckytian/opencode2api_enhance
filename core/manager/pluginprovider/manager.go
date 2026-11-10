@@ -27,6 +27,7 @@ import (
 	"time"
 
 	"github.com/6Kmfi6HP/opencode2api/core/manager"
+	"github.com/6Kmfi6HP/opencode2api/core/manager/internal/proctree"
 )
 
 // 插件状态（面板展示）。
@@ -683,29 +684,40 @@ func (m *Manager) notifyChange() {
 }
 
 // procInfo 系统进程枚举结果（孤儿回收用：--provider-serve 插件子进程）。
-type procInfo struct {
-	PID  int
-	PPID int // 父进程 PID（宿主存活判定）
-	Cmd  string
-}
+// 类型别名指向 core/manager/internal/proctree.Process（与 M1 孤儿扫描同一套
+// pid/ppid/cmd 结构）。共享纯逻辑下沉 internal 小包，避免依赖 core/manager 的
+// 未导出实现（本包已 import core/manager 用其导出工具，反向无 import）。
+type procInfo = proctree.Process
 
-// reapOrphans 回收本 providers 目录下宿主已退出的插件子进程残留（孤儿）。
-// 枚举系统插件子进程（--provider-serve），命令行指向本 ProvidersDir、非本管理器
-// 持活、且父进程（宿主 opencode2api/本测试二进制）已不存在的 → 杀之。宿主存活的
-// 插件子进程归其宿主进程管理（主管理器与实例子进程共享 providers 目录时互不干扰）。
+// reapOrphans 回收本 providers 目录下父进程已死的插件子进程残留（孤儿）。
+//
+// 判据与 M1 端点一致（双条件）：命令行含独立 --provider-serve token、指向本
+// ProvidersDir、非本管理器持活，且**父进程已确凿死亡**（pidAliveConservative
+// 返回 false）→ 杀之。父进程未知（PPID <= 0）或探活失败一律不杀：未知不等于
+// 死亡，误杀有主插件（主管理器/其它实例正在管理的进程）比漏回收更严重。
+// 父进程存活时插件归其宿主管理（主管理器与实例子进程共享 providers 目录时互不
+// 干扰）。
+//
+// 旧实现用「Cmd 含 opencode2api 的 PID 集合」当宿主启发式，父进程活着但命令行
+// 不含该字符串（测试二进制、重命名宿主）时会把活插件误判为孤儿并树杀——P1-1
+// 已改为真实探活，hosts map 已删除。
+//
+// M3：回收插件时连带回收其孙进程（node/msedge/mihomo）。Windows 的 taskkill /T
+// 已具备树杀能力（killOrphanTree 直接委托 killPID）；非 Windows 的 SIGKILL 不树杀，
+// killOrphanTree 在杀插件前先按 PPID 快照枚举后代并先深后浅回收（见 proc_other.go）。
+// 只按 PPID 关联，不做进程名匹配——不得误伤其它项目的同名进程（如 ARTEX mihomo）。
+//
+// 已知限制（路线 A，C8 显式接受）：POSIX reparent 后真孤儿 PPID 指向 init/subreaper
+// （存活），本判据无法识别，非 Windows 的自动回收正向场景不承诺；Windows 无
+// reparent 语义（PPID 保持创建者），是主覆盖平台。PID 复用窗口 = 枚举→探活→杀
+// 之间（极小），完整消除需路线 B 的创建时间快照。
 func (m *Manager) reapOrphans() {
 	procs, err := listProviderProcesses()
 	if err != nil {
 		slog.Debug("plugin orphan scan failed", "error", err)
 		return
 	}
-	dirLow := strings.ToLower(filepath.Clean(m.cfg.ProvidersDir))
-	hosts := map[int]bool{}
-	for _, pr := range procs {
-		if strings.Contains(strings.ToLower(pr.Cmd), "opencode2api") {
-			hosts[pr.PID] = true
-		}
-	}
+	dirLow := proctree.NormalizePath(filepath.Clean(m.cfg.ProvidersDir))
 	m.mu.Lock()
 	alive := map[int]bool{}
 	for _, p := range m.plugins {
@@ -714,9 +726,12 @@ func (m *Manager) reapOrphans() {
 		}
 	}
 	m.mu.Unlock()
+	// 同一父进程（宿主/provider-service）通常拉起多个插件：单次回收内按 PPID
+	// 记忆化探活结果，避免 N 次 tasklist/CIM 单查（仅压缩延迟，不改变语义）。
+	parentAlive := map[int]bool{}
 	for _, pr := range procs {
-		low := strings.ToLower(pr.Cmd)
-		if !strings.Contains(low, "--provider-serve") {
+		low := proctree.NormalizePath(pr.Cmd)
+		if !proctree.HasProviderServeToken(low) {
 			continue
 		}
 		if !strings.Contains(low, dirLow) {
@@ -725,11 +740,24 @@ func (m *Manager) reapOrphans() {
 		if alive[pr.PID] {
 			continue // 当前持活的子进程
 		}
-		if pr.PPID > 0 && hosts[pr.PPID] {
-			continue // 宿主存活（主管理器/其它实例子进程管理，非孤儿）
+		if pr.PPID <= 0 {
+			continue // 父进程未知：不杀（未知 ≠ 死亡）
 		}
-		slog.Info("plugin orphan reaped", "pid", pr.PID)
-		killPID(pr.PID)
+		aliveParent, ok := parentAlive[pr.PPID]
+		if !ok {
+			aliveParent = pidAliveConservative(pr.PPID)
+			parentAlive[pr.PPID] = aliveParent
+		}
+		if aliveParent {
+			continue // 父进程存活或探活未知：有主插件，归其宿主管理
+		}
+		// 父进程已确凿死亡：回收插件（Windows /T 连带后代；非 Windows 显式枚举）。
+		// 失败必须显式告警，不得打「已回收」造成成功假象（P1-2）。
+		if err := killOrphanTree(pr.PID); err != nil {
+			slog.Warn("plugin orphan reap failed", "pid", pr.PID, "ppid", pr.PPID, "error", err)
+		} else {
+			slog.Info("plugin orphan reaped", "pid", pr.PID, "ppid", pr.PPID)
+		}
 	}
 }
 

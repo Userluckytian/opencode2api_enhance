@@ -491,6 +491,10 @@ func registerHTTPRoutes(mux *http.ServeMux, managerInst *manager.Manager, plugin
 	mux.HandleFunc("/api/admin/autostart/set", loggingMiddleware(requireAuth(managerInst.AutostartSetHandler())))
 	mux.HandleFunc("/api/admin/data/clean", loggingMiddleware(requireAuth(managerInst.DataCleanHandler())))
 	mux.HandleFunc("/api/admin/open-url", loggingMiddleware(requireAuth(managerInst.OpenURLHandler())))
+	// 残留进程清理（M1）：扫描/清理「其它目录」父进程已退出的插件子进程；
+	// 本目录孤儿由插件管理器 reapOrphans 自动回收，不走此端点
+	mux.HandleFunc("/api/admin/processes/orphans", loggingMiddleware(requireAuth(managerInst.OrphanScanHandler())))
+	mux.HandleFunc("/api/admin/processes/orphans/kill", loggingMiddleware(requireAuth(managerInst.OrphanKillHandler())))
 	mux.HandleFunc("/api/config/history", loggingMiddleware(requireAuth(configHistoryHandler)))
 	mux.HandleFunc("/api/config/effective", loggingMiddleware(requireAuth(configEffectiveHandler)))
 

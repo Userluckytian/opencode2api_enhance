@@ -312,7 +312,7 @@ export default function SettingsPage({
           </button>
         </div>
         <p className="mt-1 text-[12px] text-zinc-500">
-          扫描占用本项目端口但没有对应管理进程的残留子进程（引擎/供应商服务异常退出时可能出现）。
+          扫描系统中父进程已退出的插件子进程（`--provider-serve`）。本目录的残留由宿主自动回收；此处列出的是其它目录遗留的插件进程。
         </p>
         {orphans.length > 0 ? (
           <div className="mt-3 overflow-hidden rounded-xl border border-zinc-100">
