@@ -60,6 +60,26 @@ type Config struct {
 	EngineGoKeys  []string `json:"engine_go_keys,omitempty"`
 	// EngineRetryMaxAttempts 引擎单请求重试上限（0 = 默认 3）。
 	EngineRetryMaxAttempts int `json:"engine_retry_max_attempts,omitempty"`
+	// EngineAttemptTimeoutSec 引擎单次上游尝试的超时上限（秒，0 = 不设上限，沿用请求级超时）。
+	//
+	// 为什么需要（实测痛点）：留 0 时单次尝试没有上限，一个坏掉的 WARP 出口能
+	// 独自吃掉整个请求预算 —— 日志里 `legs="uatIq:transport:25000ms"` 就是
+	// 「耗了 25 秒才判定失败」，用户侧表现为「偶尔卡半分钟然后报错」。
+	//
+	// 引擎侧依据（internal/config/config.go:258-272 AttemptTimeout）：
+	// 「Without that deadline, one hung exit can consume the entire request budget
+	// by itself, and the attempts that follow are fired against an already-expired
+	// context.」设了正数后，它同时作为 transports 的响应头等待 + 每次推理尝试的
+	// context deadline；已建立的流仍受请求级超时保护，不会被这次设置截断。
+	//
+	// 取值建议：免费层单次尝试通常 2~10s，设 20~30s 既能砍掉卡死的出口，又不会
+	// 误杀正常慢响应。0 = 保持现状（不设上限）。
+	EngineAttemptTimeoutSec int `json:"engine_attempt_timeout_sec,omitempty"`
+	// EngineFirstEventTimeoutSec 引擎等待首个 SSE 事件的超时（秒，0 = 不启用）。
+	//
+	// 与上面的区别：AttemptTimeout 管「拿到响应头之前」，这个管「已开始流式响应、
+	// 但迟迟没有第一个事件」。0 = 不启用该等待（引擎默认）。
+	EngineFirstEventTimeoutSec int `json:"engine_first_event_timeout_sec,omitempty"`
 	// EngineModelsRefreshSec 引擎模型目录刷新间隔（秒，0 = 默认 300）。
 	EngineModelsRefreshSec int `json:"engine_models_refresh_sec,omitempty"`
 	// EngineFreeOnly 只暴露/路由免费模型（写引擎 models.free_only）。
@@ -237,6 +257,10 @@ func (m *Manager) ConfigGet(key string) (string, error) {
 		return strconv.FormatBool(engineWarpEnabled(cfg)), nil
 	case "engine_warp_auto_fallback":
 		return strconv.FormatBool(engineWarpAutoFallback(cfg)), nil
+	case "engine_attempt_timeout_sec":
+		return strconv.Itoa(cfg.EngineAttemptTimeoutSec), nil
+	case "engine_first_event_timeout_sec":
+		return strconv.Itoa(cfg.EngineFirstEventTimeoutSec), nil
 	case "engine_warp_pool_size":
 		return strconv.Itoa(cfg.EngineWarpPoolSize), nil
 	case "engine_warp_source_ipv6":
@@ -343,6 +367,25 @@ func (m *Manager) ConfigSet(key, value string) error {
 			return err
 		}
 		cfg.EngineWarpAutoFallback = &b
+	case "engine_attempt_timeout_sec":
+		v, err := parseInt()
+		if err != nil {
+			return err
+		}
+		// 引擎侧校验区间 0~86400；这里收紧到 0~600，避免误配成「半小时才超时」。
+		if v < 0 || v > 600 {
+			return fmt.Errorf("engine_attempt_timeout_sec 需在 0~600 之间（0 = 不设上限）")
+		}
+		cfg.EngineAttemptTimeoutSec = int(v)
+	case "engine_first_event_timeout_sec":
+		v, err := parseInt()
+		if err != nil {
+			return err
+		}
+		if v < 0 || v > 600 {
+			return fmt.Errorf("engine_first_event_timeout_sec 需在 0~600 之间（0 = 不启用）")
+		}
+		cfg.EngineFirstEventTimeoutSec = int(v)
 	case "engine_warp_pool_size":
 		v, err := parseInt()
 		if err != nil {
@@ -527,6 +570,10 @@ type ConfigView struct {
 	EngineAnonymousBackoffThreshold int `json:"engine_anonymous_backoff_threshold"`
 	// EngineWarpAutoFallback WARP 池空时自动降级为直连（默认 true）。
 	EngineWarpAutoFallback bool `json:"engine_warp_auto_fallback"`
+	// EngineAttemptTimeoutSec 单次上游尝试超时上限（秒，0 = 不设上限）。
+	EngineAttemptTimeoutSec int `json:"engine_attempt_timeout_sec"`
+	// EngineFirstEventTimeoutSec 首个 SSE 事件等待上限（秒，0 = 不启用）。
+	EngineFirstEventTimeoutSec int `json:"engine_first_event_timeout_sec"`
 }
 
 // ConfigViewOf 生成前端视图（密码脱敏为掩码）。
@@ -566,6 +613,8 @@ func (m *Manager) ConfigViewOf() ConfigView {
 		// 熔断阈值同源下发：前端文案直接用它，不另写一份常量。
 		EngineAnonymousBackoffThreshold: anonymousBackoffThreshold,
 		EngineWarpAutoFallback:          engineWarpAutoFallback(cfg),
+		EngineAttemptTimeoutSec:         cfg.EngineAttemptTimeoutSec,
+		EngineFirstEventTimeoutSec:      cfg.EngineFirstEventTimeoutSec,
 	}
 }
 // defaultUiPollIntervalSec 界面轮询间隔默认值（秒，U3）。
