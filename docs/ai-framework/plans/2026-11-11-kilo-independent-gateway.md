@@ -69,7 +69,8 @@
 | 文件 | 动作 | 职责 |
 |------|------|------|
 | `core/manager/kilo_gateway.go` | 新建 | 独立监听器：状态结构体、Start/Stop、上游客户端、目录缓存、handler |
-| `core/manager/kilo_models.go` | 新建 | 上游 `/models` → 免费过滤（`isFree` / `:free` / `mayTrainOnYourPrompts`）+ 目录缓存与节流 |
+| ~~`core/manager/kilo_models.go`~~ | 不建（YAGNI，独立审查 B10 订正） | 目录缓存/过滤/解析仅约 120 行，按 YAGNI 并入 `kilo_gateway.go`，不单独拆文件；V-1 的 `gofmt -l core/manager/kilo_*.go` 仍覆盖 |
+| `core/manager/kilo_gateway_test.go`、`kilo_live_test.go` | 新建（11-12 `git add -f` 入库） | 契约单测 K1-K8 + B 系列回归断言 / 真上游端到端（默认 Skip，`KILO_LIVE=1` 开启） |
 | `core/manager/config.go` | 修改 | 新增 `kilo_enabled`/`kilo_port`/`kilo_free_only`/`kilo_proxy` 四字段 + ConfigGet/Set 分支 + ConfigView 下发 |
 | `main.go` | 修改 | manager 模式启动/关闭 Kilo 网关；`registerHTTPRoutes` 加 `/api/admin/kilo/{status,models,toggle}` |
 | `src/pages/KiloPage.tsx` | 新建 | 独立菜单页：警示横幅、开关、模型列表（含"实际模型"列）、端点/密钥复制、试跑 |
@@ -113,10 +114,14 @@
 
 **行为:** 四个新键可读可写；`kilo_enabled` 用 `*bool`（nil = 默认开）与 `engineEnabled(cfg)` 同款助手；`kilo_port` 走 env > config > 默认 30080；ConfigView 下发**生效值**而非原始值。
 
+> 11-12 订正（独立审查 B10）：实现为**混合** —— `KiloEnabled`/`KiloFreeOnly`/`KiloPortEffective` 是生效值，`KiloPort` 是原始值、`KiloProxy` 原始（沿用既有 raw+effective 双字段模式）。故准确措辞是「布尔下发效值、端口沿用双字段」，本行「下发生效值」按字面不完全成立，但不影响行为（K7 PASS）。
+
 **Steps:**
 1. 加字段 + `kiloEnabled(cfg)/kiloFreeOnly(cfg)/managerKiloPort()` 助手 + ConfigGet/ConfigSet 分支（`parsePort`/`parseBool` 复用现成的）。
 2. 跑：`go build ./...`；`go vet ./core/manager/` → 期望 exit 0
-3. 跑：`gofmt -l core/manager/config.go` → 期望无输出（**注意**：该文件在 HEAD 已是 gofmt-clean，别顺手 `-w` 整个仓库）
+3. 跑：`gofmt -l core/manager/config.go` → 期望无输出
+
+> 11-12 订正（独立审查 B10）：**原计划「HEAD 已 gofmt-clean」与事实不符** —— `git show main:config.go | gofmt -d` 与基线 `2238659` 均有同类差异（ConfigView 字段对齐/缺空行），属既有格式债；工作区全文件 CRLF 又会放大 gofmt 报告。按「不扩大 diff」不修，V-1 只约束 `kilo_*.go` 干净。
 4. Commit：`✨ feat(kilo): 新增独立网关配置项`
 
 ---
@@ -249,11 +254,26 @@
 | 测试有效性 | ✅ | K1-K8 + 3 补充用例在 `-race -v` 下逐条 PASS；K2 断言上游换 model 后 body 不被洗、K4 断言 403 不变 502、K4b 断言请求真的到达假上游（防「永真」）、K8 做独立性 grep 守卫；`kilo_live_test.go` 真上游 `-run TestKiloLiveEndToEnd` PASS 且需 `KILO_LIVE=1` 显式开启（不会误跑） |
 | 风格与规范 | ⚠️ | `gofmt -l core/manager/kilo_*.go` 干净；`main.go` struct tag 已修正；`config.go` 的 gofmt 报告经 `git show main:config.go` 对拍为**基线既有**（全文件 CRLF 工作区行尾），按计划约束不扩 diff；`go vet ./...`=0；提交信息符合 AGENTS.md gitmoji 中文规范；`Bearer anonymous` 是上游公开匿名档且代码有来源注释，测试 key 仅在临时目录，**无密钥/PII 入日志** |
 
-**主会话复核结论：** ✅ 六面无阻断性问题；唯一 ⚠️ 是 `config.go` 既有格式债（与本阶段无关、按计划不扩 diff）。
+**主会话复核结论（事后修正）：** ⚠️ **主会话六面复核有漏项** —— 错误地把「并发与生命周期 / 错误透传 / 测试有效性」判为全 ✅，而独立审查在这些面找到了真实缺陷（下表 B1/B2/B6/B7/B9 与 B3）。本阶段以**独立审查为准**，主会话复核表保留作「初筛记录」，不作为验收依据。教训：自验必须交叉检查，尤其是「无鉴权端点回传了什么」这类契约越界。
 
-**独立子代理结论：** ⏳ 运行中（重跑后待回传）；到达后补入本节并同步 §结论。若其发现阻断项，按「缺陷显式带入下一轮、不允许下阶段再改」处理。
+**独立子代理结论（11-12 回传）：** ❌ **不通过** —— 独立性红线守住、构建/vet/本地单测全绿，但列出 B1–B10，其中 5 项高 severity（B1–B5）。核心阻断：
 
-**结论：** ✅ **有条件通过** —— 条件 = 部署窗口未到（Global Constraints 第 5 条）、V-6 通用缺陷与测试入库两项如实留痕、不表述为「生产已生效」。
+| 编号 | 级别 | 问题 | 修复状态 |
+|---|---|---|---|
+| B1 | ❌ 高 | `/healthz` 无鉴权却整包 `Status()`，回传明文 `api_key` | ✅ 已修：`handleHealth` 只回计划 4 字段（status/models_shown/may_train/last_refresh），K5 增泄密断言 |
+| B2 | ❌ 高 | `Status():288` 用 `cErr` 无条件覆盖 `lastErr`，端口被占时真实原因被吞 | ✅ 已修：两类错误合并、启动错误优先；新增 `TestKiloB2StatusErrorMerge` |
+| B3 | ❌ 高 | 测试被 `.gitignore:57` 忽略、test commit 不含测试 → 干净 checkout 上 V-2 不可复跑 | ✅ 已修：`git add -f` 两文件入库（`7f3d3ff`）；K8 加强为三处守卫 + `go list -deps` |
+| B4 | ❌ 高 | V-6 字面 grep 判据不通过、custom 源通用缺陷仍在却写「消解」 | ✅ 已修（措辞）：拆 V-6a（去关联 ✅）/ V-6b（通用机制 ❌ 转下阶段），见验收总表；通用缺陷本身按 Global Constraints 8 不在本阶段修 |
+| B5 | ❌ 高 | V-7 生产硬证据与部署均未完成 | ⚠️ **保留**：V-7 在隔离实例完成（等价证明），生产停机实测与部署需人类授权，无法由 AI 单方完成，如实列为残留 |
+| B6 | ⚠️ 中 | `/healthz` 缺 `X-Kilo-Data-Policy` | ✅ 已修：补头 + K5 增 `/healthz` 断言 |
+| B7 | ⚠️ 中 | `free_only` 只过滤展示、chat 不校验，编付费档 id 即绕过 | ✅ 已修：`isModelBlockedByFreeOnly` 轻量边界（目录已拉取才生效，目录抖动不误伤）+ `TestKiloB7FreeOnlyChatBoundary` |
+| B8 | ⚠️ 中 | `MayTrain` 实现 AND 与 `api.ts` 注释 OR 矛盾 | ✅ 已修：改 OR |
+| B9 | ⚠️ 中 | Watchdog 无退出条件；并发 Start 可把 ready 覆盖成 failed | ✅ 已修：`startMu` 贯穿 listen+serve；`watchdogStop` channel 随 Stop 关闭；`TestKiloB9ConcurrentStart` |
+| B10 | ⚠️ 低 | 计划措辞与交付边界：Task1 称 config.go gofmt-clean 与事实不符、kilo_models.go 未建、504/502 口径不一、ConfigView 混合下发 | ✅ 已修（措辞/文档）：Task1 与 §配置契约 订正；`kilo_models.go` 按 YAGNI 并入 `kilo_gateway.go` 并在 File Structure 说明；504/502 分别对应传输失败/目录不可用，语义不同，保持 |
+
+**修复提交：** `7f3d3ff 🐛 fix(kilo): 独立审查缺陷修复并让测试入库`。改码后回归（11-12 07:51–07:53）：`go build ./...`=0、`go vet ./core/manager/ .`=0、`gofmt -l core/manager/kilo_*.go` 无输出、`go test -run Kilo -race` **15 条全 PASS**、`KILO_LIVE=1` 真上游 PASS、隔离实例 `/healthz` 只回 4 字段且无密钥、B7 付费档 400、V-7 停 50090 前后 30081 全 200、`npx tsc -b`/`npm run build`=0。整包仍只有 4 条既有时间炸弹，无新增失败。
+
+**结论：** ✅ **有条件通过（独立审查缺陷收口后复核）** —— B1/B2/B3/B4/B6/B7/B8/B9/B10 已修并回归；B5（部署 + 生产停机 V-7）按 Global Constraints 第 5 条保留为人类授权项，不表述为「生产已生效」；V-6 按 6a/6b 拆分如实不全绿。
 
 ---
 
@@ -262,17 +282,18 @@
 | # | 标准 | 结果 | 命令 + 输出摘要 |
 |---|------|------|----------------|
 | V-1 | 构建/静态检查 | ✅ | `go build ./...` exit 0；`go vet ./core/manager/` exit 0（全仓 `go vet ./...` 亦 0）；`gofmt -l core/manager/kilo_*.go` 无输出。`main.go` struct tag 已 gofmt 修正；`config.go` 的 gofmt 报告经 `git show main:config.go` 对拍为**基线既有**（全文件 CRLF 工作区行尾），按计划约束不扩 diff |
-| V-2 | 单测 | ✅ | `go test ./core/manager/ -run Kilo -count=1 -race -v` → K1-K8 + `TestKiloParseModels` + `TestKiloK4bRequestActuallyReachesUpstream` + `TestKiloK5bModelsEndpointHitsUpstream` **全 PASS**；`go test ./core/manager/ ./vendors/custom/ -count=1` → 仅既有 4 条 `callmetric_engine_test.go` 时间炸弹 FAIL（`metrics = 0, want 1/2`，OPEN.md 11-10 #5，Task 4 已豁免），`vendors/custom` ok，**无新增失败** |
+| V-2 | 单测 | ✅ | `go test ./core/manager/ -run Kilo -count=1 -race -v` → K1-K8 + 3 补充 + **4 条 B 系列回归**共 15 条 **全 PASS**（11-12 修复后复核）；测试文件已于 `7f3d3ff` `git add -f` 入库，干净 checkout 可复跑（独立审查 B3 已闭环）；`go test ./core/manager/ ./vendors/custom/ -count=1` → 仅既有 4 条 `callmetric_engine_test.go` 时间炸弹 FAIL（`metrics = 0, want 1/2`，OPEN.md 11-10 #5，Task 4 已豁免），`vendors/custom` ok，**无新增失败** |
 | V-3 | 前端 | ✅ | `npx tsc -b` exit 0；`npm run build` exit 0（vite 8.2.0，1809 模块，`dist/assets/index-unuVWMqx.js` 449.39 kB，含 Kilo 页） |
 | V-4 | 30080 端到端 | ✅ | `KILO_LIVE=1 go test ./core/manager/ -run TestKiloLiveEndToEnd -count=1 -v` → **PASS**：上游目录 12 条、免费 12、`mayTrain=12/12`（上游已从 11 漂移为 12）；真推理 `max_tokens=500` HTTP 200（2.75s）、`content` 含 `KILO-OK`、响应 `model=nvidia/nemotron-3.5-lightning:free` 原样透传、`X-Kilo-Data-Policy` 在位。`/v1/models` free_only=true 只回 12 个免费档 |
-| V-5 | 警示可见 | ✅ | 代码复核：`KiloPage.tsx:45-64` 横幅常驻、无 close handler；`kilo_gateway.go` 所有响应加 `X-Kilo-Data-Policy`。截图 `docs/design/screenshots-20261111/kilo-page.png`（Playwright + Edge，1440×1000）：横幅在位、12 行模型表带「数据去向」列、「只显示免费模型」默认勾选、控制台 0 错误。**注**：`docs/design/` 被 `.gitignore:116` 忽略 ⇒ 截图本地保留、**未入库**（如实登记，不冒称「截图入库」） |
-| V-6 | 去关联 | ⚠️ **有条件通过** | 运行配置 JSON 解析：20 个源、`has_kilo=false`、无 `kilo_*` 键、中文源名完好；**带网关密钥打生产 `50080/v1/models` → HTTP 200、20 个模型、`kilo/*` 条目为空**（真证据，非 401 兜底）；`autoCandidateModels` 因源已摘除不含 Kilo。**但** `grep -rn "ParamDataPolicyNote\|DataPolicyNote"` 仍命中 `custom_providers.go` / `registry.go`（通用 `data_policy_note` 能力，按设计保留），且 `custom.go:332` 硬编码 `Free:true` 通用缺陷未修 ⇒ 按「Kilo 去关联」判据 ✅、按计划字面 grep 判据 ❌。已如实登记为独立待办（`2026-11-12.md` #2 / OPEN.md 11-12 行），**不伪装全绿** |
+| V-5 | 警示可见 | ✅ | 代码复核：`KiloPage.tsx:45-64` 横幅常驻、无 close handler；`kilo_gateway.go` 所有响应加 `X-Kilo-Data-Policy`，**含 `/healthz`（独立审查 B6 修复后）**；K5 增 `/healthz` 泄密/字段断言（B1）。截图 `docs/design/screenshots-20261111/kilo-page.png`（Playwright + Edge，1440×1000）：横幅在位、12 行模型表带「数据去向」列、「只显示免费模型」默认勾选、控制台 0 错误。**注**：`docs/design/` 被 `.gitignore:116` 忽略 ⇒ 截图本地保留、**未入库**（如实登记，不冒称「截图入库」） |
+| V-6a | 去关联（Kilo 已从 providers 移除） | ✅ | 运行配置 JSON 解析：20 个源、`has_kilo=false`、无 `kilo_*` 键、中文源名完好；**带网关密钥打生产 `50080/v1/models` → HTTP 200、20 个模型、`kilo/*` 条目为空**（真证据，非 401 兜底）；`autoCandidateModels` 因源已摘除不含 Kilo |
+| V-6b | 通用机制（计划字面 grep 判据） | ❌ **转下阶段** | `grep -rn "ParamDataPolicyNote\|DataPolicyNote"` 仍命中 `custom_providers.go` / `registry.go`（通用 `data_policy_note` 能力按设计保留），且 `custom.go:332` 硬编码 `Free:true` + `auto_model.go:266` auto 候选缺陷未修 ⇒ 任何带训练警示的 custom 源开 `auto` 仍可能被选中。按 Global Constraints 8「本阶段保持不共享即可」不在本阶段修；已登记 `2026-11-12.md` #2 / OPEN.md 11-12 行。**独立审查 B4 判定此条不得全绿** |
 | V-7 | **独立性证明** | ✅（隔离实例等价） | 完整隔离实例（独立 exe / 数据目录 / 端口 30081+40999+50090+40090，引擎二进制不存在）：显式 `POST /api/admin/provider-service/start` → 50090 `LISTENING pid 30884` → 停前 30081 `/healthz`=200、`/v1/models`=200(12)、chat=200 且带警示头、内容 `KILO-V7-OK` → `POST /api/admin/provider-service/stop` → 50090 无 LISTEN → 停后 30081 `/healthz`=200、`/v1/models`=200(12)、chat=200 且带警示头、内容 `KILO-V7-AFTER-OK`；`/api/admin/kilo/status` 全程 `state=ready`。**未停生产 50080**（无需授权、避免影响线上）；用同一二进制的独立 provider-service 子进程，语义等价。这是「不转发、不依赖」的硬证据 |
 | V-8 | 默认值 | ✅ | `go test ./core/manager/ -run TestKiloK7PortAndToggle -count=1 -v` PASS：`kilo_enabled=nil→true`、`kilo_free_only=nil→true`、端口 env>config>默认 30080 三源优先级；隔离实例以 `OPCODE2API_KILO_PORT=30081` 实测 env 生效 |
 | V-9 | 红线 | ✅ | `stat`：`bin/opencode2api.exe` 11-06 19:59 / 12844032 字节、生产 `bin/dist/index.html` 11-07 18:20 / 488 字节，**均未替换**；隔离端口 30081/40999/50090/40090/19100/1420 全清场，生产 40000/40080/50080 全程在听；`Bearer anonymous` 是上游公开匿名档（代码注释写明来源），测试用 `sk-kilo-isolated-test` 仅在临时目录，无密钥入库 |
 | V-10 | 文档 | ✅ | `docs/issue-log/2026-11-11.md` #4（阶段 K 完整记录）+ 顶部状态汇总；`docs/issue-log/2026-11-12.md`（收口日志 + 通用缺陷待办）；`docs/issue-log/OPEN.md`（过期行改写 + 新增待办）；`top5-98-kilo-mounted.md` 加「⚠️ 已被阶段 K 取代」顶注；本计划 §状态/§阶段开头/§代码审查/§验收总表/§残留手工清单 全部回填 |
 
-**总评：** V-1~V-5、V-7~V-10 通过；V-6 按「Kilo 去关联」有条件通过、按字面判据不通过（已显式带入遗留）。**阶段 K 代码与验收收口完成，唯一未完 = 部署**（需停机窗口，属 Global Constraints 第 5 条有意留下，非缺陷）。
+**总评（独立审查修复后复核）：** V-1~V-5、V-6a、V-7~V-10 通过；V-6b 按独立审查 B4 显式判 ❌ 并转下阶段（不伪装全绿）。**阶段 K 代码与验收收口完成，唯一未完 = 部署**（需停机窗口，属 Global Constraints 第 5 条有意留下，非缺陷）。
 
 ---
 
@@ -341,4 +362,5 @@
 4. **是否把 Kilo 设为默认落地页** —— 本阶段保守保持 `opencode`，需用户决定（未决）。
 5. **P2 免费/付费 lane 是否合并统一入口** —— 需用户拍板（阶段 X 遗留，非本阶段）。
 6. **通用缺陷另立阶段**：`custom.go:332` 硬编码 `Free:true` + `auto_model.go:266` auto 候选（见 `2026-11-12.md` #2）；以及 `callmetric_engine_test.go` 4 条时间炸弹、`calllog_engine.go` 死字段映射清理。
-7. **测试入库待定**：`*_test.go` 被 `.gitignore:57` 忽略，K1-K8 + live 用例仅在本地；是否 `git add -f` 由用户决定（本次未擅改仓库既有忽略约定）。
+7. ~~**测试入库待定**~~ → ✅ **11-12 已闭环**（`7f3d3ff` `git add -f` 两文件；K8 加强；新增 B1/B2/B6/B7/B9 断言；改码后 15 条 `-race` 全 PASS）。
+8. **独立审查 B5 保留项**：生产停机实测 V-7 + 部署窗口；B4 的 V-6b 通用缺陷转下阶段（`custom.go:332` / `auto_model.go:266`，见 `2026-11-12.md` #2）。
