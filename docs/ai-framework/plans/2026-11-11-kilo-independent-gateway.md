@@ -1,8 +1,10 @@
 # 阶段 K：Kilo 独立菜单 + 30080 独立出口（与一切解耦）
 
-> **状态：** 计划已就绪，待指派实施代理
+> **状态：** ✅ 代码/测试/验收收口完成（2026-11-12），**待部署**（生产 exe/dist 未替换，需停机窗口）
+> **交付分支：** `feat/phase-k-kilo-gateway`，提交 `a32ff36` / `2c857c8` / `b1f6ad2` + 本轮收口提交（未 push）
 > **For agentic workers:** 按 Task 顺序执行；每 Task 测完再进下一 Task。验收认证据，禁止"应该能过"。
 > **元规范：** `docs/ai-framework/phased-plan-driven.md`；仓库约定 `AGENTS.md`
+> **验收结论：** V-1~V-10 见 §验收标准总表（逐条附命令与输出摘要）；独立审查见 §代码审查；完整证据在 `docs/issue-log/2026-11-11.md` #4 / `docs/issue-log/2026-11-12.md`。
 
 **Goal:** Kilo 以**独立菜单 + 独立端口 30080** 对外服务，链路直通 `https://api.kilo.ai`，**不经过 50080、不读 providers[]、不与 OpenCode/引擎/其它供应商共享任何运行路径**；页面默认只勾免费模型，并**显著标注"提示词可能被上游用于训练"**。
 
@@ -47,8 +49,8 @@
 
 | 上阶段遗留项 | 来源 | 未通过原因 | 状态 |
 |-------------|------|-----------|------|
-| Kilo 静默换模型未回写真实 `model` | `top5-98-kilo-mounted.md` §6-2 | 当时挂在 providers[]，无自有展示面 | ⬜ **本阶段处理**（Kilo 页显示"实际模型"列 + 响应原样透传上游 model 字段） |
-| auto 候选会把会训练的源选进来 | `OPEN.md` 🔴 风险条目 | `custom.go:333` 对所有 custom 源硬编码 `Free:true` | ⬜ **本阶段消解**：Kilo 从 providers[] 摘除后不再进 `visibleFreeModels`，风险源头移除；需 V-6 证明 |
+| Kilo 静默换模型未回写真实 `model` | `top5-98-kilo-mounted.md` §6-2 | 当时挂在 providers[]，无自有展示面 | ✅ **已处理**：网关 `handleChat` 原样透传上游 `model`（K2 单测 + 真上游实测 `model=nvidia/nemotron-3.5-lightning:free`）；Kilo 页「实际模型」列由试跑回填。**剩余**：静默换模型写进日志/调用分析未做（登记为 `2026-11-11.md` #4 遗留 6） |
+| auto 候选会把会训练的源选进来 | `OPEN.md` 🔴 风险条目 | `custom.go:333` 对所有 custom 源硬编码 `Free:true` | ⚠️ **Kilo 风险源头已移除，通用缺陷仍在**：摘除 `providers[].kilo` 后 Kilo 不再进 `visibleFreeModels`（V-6 按「Kilo 去关联」判据通过）；但 `custom.go:332` 硬编码 `Free:true` + `auto_model.go:266` 选候选的通用缺陷未修，任何带 `data_policy_note` 的 custom 源开 `auto` 仍可能被选中 ⇒ 另立待办，见 `docs/issue-log/2026-11-12.md` #2 / `OPEN.md` 11-12 行。**不伪装成全绿** |
 
 ---
 
@@ -57,7 +59,7 @@
 | 阶段 | 状态 | 交付 |
 |------|------|------|
 | 通道稳定性调研（11-11） | ✅ | `99-VERDICT.md` + top5 系列；止血 + v1.4.7 升级已完成 |
-| **本阶段 K** | ⬜ | Kilo 独立网关 + 独立菜单 |
+| **本阶段 K** | ✅ 代码/验收收口完成，**待部署** | 30080 独立网关 + 独立菜单 + V-1~V-10 证据；部署需停机窗口 |
 | 下阶段 P0（托管层修复） | ⬜ | 孤儿 pid 认领 / 观测优先于配置 / 引擎 reload / 漂移可视化 —— **勿塞进本阶段** |
 
 ---
@@ -249,20 +251,22 @@
 
 ---
 
-## 验收标准总表
+## 验收标准总表（2026-11-12 回填，逐条附真实输出摘要）
 
-| # | 标准 | 通过条件（命令 + 期望） | 验证责任人 |
-|---|------|------------------------|-----------|
-| V-1 | 构建/静态检查 | `go build ./...` = 0；`go vet ./...` = 0；`gofmt -l core/manager/kilo_*.go` 无输出 | 自动化 |
-| V-2 | 单测 | `go test ./core/manager/ -run Kilo -count=1 -race` 全 PASS；整包无**新增**失败 | 自动化 |
-| V-3 | 前端 | `npx tsc -b` = 0；`npm run build` = 0 | 自动化 |
-| V-4 | 30080 端到端 | 真请求 `nvidia/nemotron-3.5-lightning:free`（`max_tokens>=400`）→ HTTP 200 且 `choices[0].message.content` 非空；`/v1/models` 在 `free_only=true` 时**只含免费档**（当前上游 11 个） | 自动化 + 主会话复核 |
-| V-5 | 警示可见 | Kilo 页横幅存在且不可关闭（代码里无关闭入口）；响应含 `X-Kilo-Data-Policy`；截图入库 | 端到端（截图） |
-| V-6 | 去关联 | 50080 `/v1/models` 无 `kilo/*`；`grep -rn "ParamDataPolicyNote\|id=\"kilo\"" --include=*.go` 不再指向 providers 语义；`autoCandidateModels` 候选集不含 Kilo | 自动化 |
-| V-7 | **独立性证明** | 停掉 provider-service（50080）后，30080 仍 200、`/v1/models` 仍正常 —— 这是"不转发、不依赖"的唯一硬证据 | 端到端（需用户授权临时停 50080） |
-| V-8 | 默认值 | 空配置下 `kilo_enabled=true`、`kilo_free_only=true`、端口=30080 | 自动化 |
-| V-9 | 红线 | 无密钥入库；生产 exe/dist 未被替换（哈希对拍 `bin/opencode2api.exe`、`bin/dist/index.html`） | 自动化 |
-| V-10 | 文档 | issue-log + OPEN.md + top5 顶注三处齐 | 主会话 |
+| # | 标准 | 结果 | 命令 + 输出摘要 |
+|---|------|------|----------------|
+| V-1 | 构建/静态检查 | ✅ | `go build ./...` exit 0；`go vet ./core/manager/` exit 0（全仓 `go vet ./...` 亦 0）；`gofmt -l core/manager/kilo_*.go` 无输出。`main.go` struct tag 已 gofmt 修正；`config.go` 的 gofmt 报告经 `git show main:config.go` 对拍为**基线既有**（全文件 CRLF 工作区行尾），按计划约束不扩 diff |
+| V-2 | 单测 | ✅ | `go test ./core/manager/ -run Kilo -count=1 -race -v` → K1-K8 + `TestKiloParseModels` + `TestKiloK4bRequestActuallyReachesUpstream` + `TestKiloK5bModelsEndpointHitsUpstream` **全 PASS**；`go test ./core/manager/ ./vendors/custom/ -count=1` → 仅既有 4 条 `callmetric_engine_test.go` 时间炸弹 FAIL（`metrics = 0, want 1/2`，OPEN.md 11-10 #5，Task 4 已豁免），`vendors/custom` ok，**无新增失败** |
+| V-3 | 前端 | ✅ | `npx tsc -b` exit 0；`npm run build` exit 0（vite 8.2.0，1809 模块，`dist/assets/index-unuVWMqx.js` 449.39 kB，含 Kilo 页） |
+| V-4 | 30080 端到端 | ✅ | `KILO_LIVE=1 go test ./core/manager/ -run TestKiloLiveEndToEnd -count=1 -v` → **PASS**：上游目录 12 条、免费 12、`mayTrain=12/12`（上游已从 11 漂移为 12）；真推理 `max_tokens=500` HTTP 200（2.75s）、`content` 含 `KILO-OK`、响应 `model=nvidia/nemotron-3.5-lightning:free` 原样透传、`X-Kilo-Data-Policy` 在位。`/v1/models` free_only=true 只回 12 个免费档 |
+| V-5 | 警示可见 | ✅ | 代码复核：`KiloPage.tsx:45-64` 横幅常驻、无 close handler；`kilo_gateway.go` 所有响应加 `X-Kilo-Data-Policy`。截图 `docs/design/screenshots-20261111/kilo-page.png`（Playwright + Edge，1440×1000）：横幅在位、12 行模型表带「数据去向」列、「只显示免费模型」默认勾选、控制台 0 错误。**注**：`docs/design/` 被 `.gitignore:116` 忽略 ⇒ 截图本地保留、**未入库**（如实登记，不冒称「截图入库」） |
+| V-6 | 去关联 | ⚠️ **有条件通过** | 运行配置 JSON 解析：20 个源、`has_kilo=false`、无 `kilo_*` 键、中文源名完好；**带网关密钥打生产 `50080/v1/models` → HTTP 200、20 个模型、`kilo/*` 条目为空**（真证据，非 401 兜底）；`autoCandidateModels` 因源已摘除不含 Kilo。**但** `grep -rn "ParamDataPolicyNote\|DataPolicyNote"` 仍命中 `custom_providers.go` / `registry.go`（通用 `data_policy_note` 能力，按设计保留），且 `custom.go:332` 硬编码 `Free:true` 通用缺陷未修 ⇒ 按「Kilo 去关联」判据 ✅、按计划字面 grep 判据 ❌。已如实登记为独立待办（`2026-11-12.md` #2 / OPEN.md 11-12 行），**不伪装全绿** |
+| V-7 | **独立性证明** | ✅（隔离实例等价） | 完整隔离实例（独立 exe / 数据目录 / 端口 30081+40999+50090+40090，引擎二进制不存在）：显式 `POST /api/admin/provider-service/start` → 50090 `LISTENING pid 30884` → 停前 30081 `/healthz`=200、`/v1/models`=200(12)、chat=200 且带警示头、内容 `KILO-V7-OK` → `POST /api/admin/provider-service/stop` → 50090 无 LISTEN → 停后 30081 `/healthz`=200、`/v1/models`=200(12)、chat=200 且带警示头、内容 `KILO-V7-AFTER-OK`；`/api/admin/kilo/status` 全程 `state=ready`。**未停生产 50080**（无需授权、避免影响线上）；用同一二进制的独立 provider-service 子进程，语义等价。这是「不转发、不依赖」的硬证据 |
+| V-8 | 默认值 | ✅ | `go test ./core/manager/ -run TestKiloK7PortAndToggle -count=1 -v` PASS：`kilo_enabled=nil→true`、`kilo_free_only=nil→true`、端口 env>config>默认 30080 三源优先级；隔离实例以 `OPCODE2API_KILO_PORT=30081` 实测 env 生效 |
+| V-9 | 红线 | ✅ | `stat`：`bin/opencode2api.exe` 11-06 19:59 / 12844032 字节、生产 `bin/dist/index.html` 11-07 18:20 / 488 字节，**均未替换**；隔离端口 30081/40999/50090/40090/19100/1420 全清场，生产 40000/40080/50080 全程在听；`Bearer anonymous` 是上游公开匿名档（代码注释写明来源），测试用 `sk-kilo-isolated-test` 仅在临时目录，无密钥入库 |
+| V-10 | 文档 | ✅ | `docs/issue-log/2026-11-11.md` #4（阶段 K 完整记录）+ 顶部状态汇总；`docs/issue-log/2026-11-12.md`（收口日志 + 通用缺陷待办）；`docs/issue-log/OPEN.md`（过期行改写 + 新增待办）；`top5-98-kilo-mounted.md` 加「⚠️ 已被阶段 K 取代」顶注；本计划 §状态/§阶段开头/§代码审查/§验收总表/§残留手工清单 全部回填 |
+
+**总评：** V-1~V-5、V-7~V-10 通过；V-6 按「Kilo 去关联」有条件通过、按字面判据不通过（已显式带入遗留）。**阶段 K 代码与验收收口完成，唯一未完 = 部署**（需停机窗口，属 Global Constraints 第 5 条有意留下，非缺陷）。
 
 ---
 
@@ -323,9 +327,12 @@
 
 ---
 
-## 残留手工验收清单
+## 残留手工验收清单（2026-11-12 更新）
 
-1. **V-7 独立性证明**：需用户授权临时停 provider-service（50080）后打 30080，验完恢复。
-2. **部署**：新 `opencode2api.exe` 与被锁定的运行中 exe 交换，需停机窗口（`OPEN.md` 已多次登记该限制）。
-3. 面板 Kilo 页在真实数据下的观感（警示横幅是否够显眼、实际模型列是否看得懂）—— 用户目视确认。
-4. 是否把 Kilo 设为默认落地页 —— 本阶段保守保持 `opencode`，需用户决定。
+1. ~~**V-7 独立性证明**~~ → ✅ **11-12 已在隔离实例完成**（30081/40999/50090/40090，显式起停 provider-service 前后 30081 全 200，见 V-7）。**未停生产 50080**：语义等价且避免影响线上；若用户坚持要在生产做一次停机实测，需另行授权。
+2. **部署（唯一未完项）**：新 `opencode2api.exe` 与被锁定的运行中 exe 交换 + `bin/dist/` 替换，需停机窗口（`OPEN.md` 已多次登记该限制）。同窗口可一并上：11-06 WARP 优先通道、宿主 stderr 日志端点 `53f7902`、`data_policy_note` 徽标。部署后复核：30080 `/healthz`、`/v1/models`、`/api/admin/kilo/status`、Kilo 页真实数据。
+3. ~~面板 Kilo 页在真实数据下的观感~~ → ✅ **11-12 已截图目视**（`docs/design/screenshots-20261111/kilo-page.png`：横幅显眼、12 行模型表、「数据去向」列清晰、只免费默认勾选；本地保留不入库）。用户如需再目视可直接看该文件。
+4. **是否把 Kilo 设为默认落地页** —— 本阶段保守保持 `opencode`，需用户决定（未决）。
+5. **P2 免费/付费 lane 是否合并统一入口** —— 需用户拍板（阶段 X 遗留，非本阶段）。
+6. **通用缺陷另立阶段**：`custom.go:332` 硬编码 `Free:true` + `auto_model.go:266` auto 候选（见 `2026-11-12.md` #2）；以及 `callmetric_engine_test.go` 4 条时间炸弹、`calllog_engine.go` 死字段映射清理。
+7. **测试入库待定**：`*_test.go` 被 `.gitignore:57` 忽略，K1-K8 + live 用例仅在本地；是否 `git add -f` 由用户决定（本次未擅改仓库既有忽略约定）。

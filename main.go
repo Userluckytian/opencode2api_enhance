@@ -377,8 +377,8 @@ func kiloGatewayToggleHandler(m *manager.Manager) http.HandlerFunc {
 			return
 		}
 		var in struct {
-			Enabled   *bool `json:"enabled"`
-			FreeOnly  *bool `json:"free_only"`
+			Enabled  *bool `json:"enabled"`
+			FreeOnly *bool `json:"free_only"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
 			writeErrResp(w, http.StatusBadRequest, "请求体需为 {enabled?,free_only?}")
