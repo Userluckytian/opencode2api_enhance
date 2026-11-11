@@ -1,0 +1,331 @@
+# 阶段 K：Kilo 独立菜单 + 30080 独立出口（与一切解耦）
+
+> **状态：** 计划已就绪，待指派实施代理
+> **For agentic workers:** 按 Task 顺序执行；每 Task 测完再进下一 Task。验收认证据，禁止"应该能过"。
+> **元规范：** `docs/ai-framework/phased-plan-driven.md`；仓库约定 `AGENTS.md`
+
+**Goal:** Kilo 以**独立菜单 + 独立端口 30080** 对外服务，链路直通 `https://api.kilo.ai`，**不经过 50080、不读 providers[]、不与 OpenCode/引擎/其它供应商共享任何运行路径**；页面默认只勾免费模型，并**显著标注"提示词可能被上游用于训练"**。
+
+**Architecture:** manager 进程（40000 同进程）内新增一个独立的 `kiloGateway` HTTP 监听器：`/v1/chat/completions`、`/v1/models`、`/healthz`，自带上游客户端（`http.Client` + 自己的目录缓存 + 自己的 key 槽位 `Bearer anonymous`）。前端新增 `KiloPage`，导航**第一位**。协议转换复用 `core/protocol`（纯转换函数，无供应商耦合）。
+
+**Tech Stack:** Go 1.22 标准库（`net/http`、`encoding/json`）；React 19 + TS + Tailwind（与现有面板同款）。
+
+**实施档位：** 全能
+**子代理：** 启用（实施 + 独立审查；模型待用户指定，本会话白名单见文末）
+
+---
+
+## 前置阅读（必须）
+
+| 优先级 | 文件 |
+|--------|------|
+| P0 | `docs/ai-framework/phased-plan-driven.md`、本文件 |
+| P0 | `docs/opencode-channel-research-2026-11-11/top5-98-kilo-mounted.md`（上游实测数据、四条硬限制、静默换模型） |
+| P0 | `core/manager/freetier_engine.go`（托管层写法样板：状态结构体 / 原子写盘 / 看门狗语义） |
+| P1 | `AGENTS.md`、`coding-standards.md`、`docs/issue-log/OPEN.md` |
+
+**仓库路径：** `D:\AI_Projects\opencode2api_guide\opencode2api_enhance`
+**基线分支：** 从 `main`（tip `2238659`，本地领先 origin 1 提交）拉 `feat/phase-k-kilo-gateway`
+
+---
+
+## Global Constraints（冲突时以本节为准）
+
+1. **独立性红线（本阶段的"功能"本身就是它）**：30080 的调用链里**不得出现** `globalAgg` / `chatRouterVar` / `vendors/custom` / `ProviderService` / 50080 端口 / 40080 引擎。允许复用的只有：`core/protocol`（纯转换）、`core/manager` 的配置读写与 `effectiveGatewayKey`、`httpGetJSON` 一类的裸 HTTP 助手。
+   - 判据：拔掉 provider-service（50080）进程后，30080 必须照常 200（验收 V-7）。
+2. **摘除 providers[] 里的 `kilo` 条目**（今天 15:54 我挂的那个），否则同一上游两条链路并存 = 用户会看到重复模型，也违背"不要和别人有任何关联"。摘除**必须走整表保存 API**（`/api/admin/custom-providers/save`），且**不得用 PowerShell 读改写**（PS 5.1 会把中文源名解码成乱码并回写污染配置）——用 Go stdlib 工具或面板操作。
+3. 训练警示是**需求本体**，不是可选装饰：页面横幅 + 模型行标记 + 响应头三处都要有（V-4/V-5）。
+4. **密钥不进 git**；`Bearer anonymous` 是上游公开匿名档，可入代码，但要注释写明来源。
+5. **不重建、不替换生产 exe**（被运行中进程锁定，属已知限制）。本阶段交付 = 代码 + 测试 + 面板 dist 构建产物；**部署动作单独等用户授权**。
+6. 30080 只绑 `127.0.0.1`；鉴权沿用统一网关密钥（`effectiveGatewayKey`），与其它入口同款语义。
+7. **Git**：小步 commit，规范 `<gitmoji><type>(<scope>): 中文描述`；**默认不 push**。
+8. **YAGNI**：本阶段不做多 key 池、不做配额账本、不做 failover 到别的源、不做 `auto` 候选接入（那正是今天登记的 🔴 安全缺口，独立入口天然不共享 `Free:true` 候选集，本阶段把它**保持为不共享**即可）。
+
+---
+
+## 阶段开头：上阶段遗留
+
+| 上阶段遗留项 | 来源 | 未通过原因 | 状态 |
+|-------------|------|-----------|------|
+| Kilo 静默换模型未回写真实 `model` | `top5-98-kilo-mounted.md` §6-2 | 当时挂在 providers[]，无自有展示面 | ⬜ **本阶段处理**（Kilo 页显示"实际模型"列 + 响应原样透传上游 model 字段） |
+| auto 候选会把会训练的源选进来 | `OPEN.md` 🔴 风险条目 | `custom.go:333` 对所有 custom 源硬编码 `Free:true` | ⬜ **本阶段消解**：Kilo 从 providers[] 摘除后不再进 `visibleFreeModels`，风险源头移除；需 V-6 证明 |
+
+---
+
+## 与前后阶段
+
+| 阶段 | 状态 | 交付 |
+|------|------|------|
+| 通道稳定性调研（11-11） | ✅ | `99-VERDICT.md` + top5 系列；止血 + v1.4.7 升级已完成 |
+| **本阶段 K** | ⬜ | Kilo 独立网关 + 独立菜单 |
+| 下阶段 P0（托管层修复） | ⬜ | 孤儿 pid 认领 / 观测优先于配置 / 引擎 reload / 漂移可视化 —— **勿塞进本阶段** |
+
+---
+
+## File Structure（预期变更）
+
+| 文件 | 动作 | 职责 |
+|------|------|------|
+| `core/manager/kilo_gateway.go` | 新建 | 独立监听器：状态结构体、Start/Stop、上游客户端、目录缓存、handler |
+| `core/manager/kilo_models.go` | 新建 | 上游 `/models` → 免费过滤（`isFree` / `:free` / `mayTrainOnYourPrompts`）+ 目录缓存与节流 |
+| `core/manager/config.go` | 修改 | 新增 `kilo_enabled`/`kilo_port`/`kilo_free_only`/`kilo_proxy` 四字段 + ConfigGet/Set 分支 + ConfigView 下发 |
+| `main.go` | 修改 | manager 模式启动/关闭 Kilo 网关；`registerHTTPRoutes` 加 `/api/admin/kilo/{status,models,toggle}` |
+| `src/pages/KiloPage.tsx` | 新建 | 独立菜单页：警示横幅、开关、模型列表（含"实际模型"列）、端点/密钥复制、试跑 |
+| `src/App.tsx` | 修改 | `Tab` 加 `'kilo'`；`NAV` **首位**插 `{ id:'kilo', label:'Kilo', icon }` |
+| `src/lib/api.ts` | 修改 | `KiloStatus` / `KiloModelsView` 类型 + 三个 API 方法 |
+| `core/manager/kilo_gateway_test.go` | 新建 | 单测：免费过滤、静默换模型透传、鉴权、free_only 开关、端口配置 |
+| 删除：`%APPDATA%\...\config.json` 内 providers[].kilo | 运维动作 | 见约束 2 |
+
+---
+
+## 配置契约
+
+```jsonc
+// manager config.json 新增键（全部 omitempty，缺省即默认行为）
+{
+  "kilo_enabled": true,        // 默认 true：与 engine_enabled 同款「未设置=开」语义（用 *bool）
+  "kilo_port": 30080,          // 0 = 默认 30080；env OPCODE2API_KILO_PORT 优先
+  "kilo_free_only": true,      // 默认 true（用户明确要求默认只勾免费模型）
+  "kilo_proxy": ""             // 空 = 直连（实测 Kilo 无需代理）；可填 http/socks5
+}
+```
+
+```jsonc
+// GET /api/admin/kilo/status → KiloStatus
+{
+  "enabled": true, "running": true, "port": 30080,
+  "address": "http://127.0.0.1:30080/v1",
+  "api_key": "sk-unified-local",
+  "free_only": true,
+  "model_total": 386, "model_shown": 11,
+  "may_train": true,                      // 上游全量 mayTrainOnYourPrompts=true
+  "last_refresh": "...", "error": ""
+}
+```
+
+---
+
+## Task 1：配置字段与生效语义（manager 侧，无 UI）
+
+**Files:** `core/manager/config.go`
+
+**行为:** 四个新键可读可写；`kilo_enabled` 用 `*bool`（nil = 默认开）与 `engineEnabled(cfg)` 同款助手；`kilo_port` 走 env > config > 默认 30080；ConfigView 下发**生效值**而非原始值。
+
+**Steps:**
+1. 加字段 + `kiloEnabled(cfg)/kiloFreeOnly(cfg)/managerKiloPort()` 助手 + ConfigGet/ConfigSet 分支（`parsePort`/`parseBool` 复用现成的）。
+2. 跑：`go build ./...`；`go vet ./core/manager/` → 期望 exit 0
+3. 跑：`gofmt -l core/manager/config.go` → 期望无输出（**注意**：该文件在 HEAD 已是 gofmt-clean，别顺手 `-w` 整个仓库）
+4. Commit：`✨ feat(kilo): 新增独立网关配置项`
+
+---
+
+## Task 2：Kilo 独立网关本体
+
+**Files:** `core/manager/kilo_gateway.go`、`core/manager/kilo_models.go`
+
+**行为:**
+- `StartKiloGateway()`：`http.Server` 绑 `127.0.0.1:<port>`，路由
+  - `POST /v1/chat/completions`：读 body → 提取 `model` → 剥可选前缀 `kilo/` → 转发上游 `<base>/chat/completions`，头 `Authorization: Bearer anonymous`（来源：`refs/Opencode2api` 调研 + 今日实测，上游无账号即放行）→ **响应原样透传**（含上游真实 `model` 字段，不改写）
+  - `GET /v1/models`：目录缓存（60s 后台刷新 + 10s 节流，抄 `providerservice.go:63-68` 的缓存语义，**代码自持不共享**）；`kilo_free_only=true` 时只回 `isFree==true || id 含 ":free"` 的条目
+  - `GET /healthz`：`{status, models_shown, may_train, last_refresh}`
+- 上游 4xx/5xx **原样透传状态码与错误体**，不包装成 502（今日教训：上游把 403 洗成 502 会让人误判）。
+- 响应统一加头 `X-Kilo-Data-Policy: prompts-may-be-used-for-training`。
+- 生命周期：随 manager 起停；端口被占 → 状态记 `failed` + 错误，**不拖垮 manager 主监听**（对齐 `freetier_engine.go:159-165` 的后台启动教训：别同步等长任务）。
+
+**Steps:**
+1. 实现 + 单测（Task 4）先写失败用例再实现（红-绿）。
+2. 跑：`go test ./core/manager/ -run Kilo -count=1 -v` → 期望全 PASS
+3. 跑：`go build ./...`、`go vet ./core/manager/`、`gofmt -l core/manager/kilo_*.go` → 全 0
+4. Commit：`✨ feat(kilo): 30080 独立 Kilo 网关`
+
+---
+
+## Task 3：接入 main 生命周期 + 管理端点
+
+**Files:** `main.go`、`core/manager/kilo_gateway.go`
+
+**行为:** manager 模式（非 provider-service 模式）下随进程启动网关、`defer` 关闭；新增 `GET /api/admin/kilo/status`、`GET /api/admin/kilo/models`、`POST /api/admin/kilo/toggle`（enabled / free_only 两个开关，写盘 + 生效，不需重启）。路由挂 `requireAuth`（面板侧）而非 `apiKeyAuthMiddleware`。
+
+**Steps:**
+1. 接线。
+2. 跑：`go build ./...` → 0
+3. 手工冒烟（临时目录 + 独立端口，**不碰生产 40000/40080/50080**）：
+   ```
+   OPCODE2API_KILO_PORT=30081 <新构建的 exe> -port 40999 -config <temp config>
+   curl 127.0.0.1:30081/healthz
+   curl -H 'Authorization: Bearer sk-unified-local' -H 'Content-Type: application/json' ^
+        -d '{"model":"nvidia/nemotron-3.5-lightning:free","max_tokens":400,"messages":[{"role":"user","content":"say KILO-OK"}]}' ^
+        127.0.0.1:30081/v1/chat/completions
+   ```
+   期望：healthz 200；completions 200 且 `content` 含 `KILO-OK`；响应头有 `X-Kilo-Data-Policy`。
+   ⚠️ 探测务必 `max_tokens>=400`：这批模型多为推理型，小预算会出现 `content:null + finish_reason:length`（今日实测踩坑，会被误判为失败）。
+4. 冒烟完杀掉临时进程、删除临时目录，端口复查 `Get-NetTCPConnection -LocalPort 30081` 为空。
+5. Commit：`✨ feat(kilo): 网关接入管理生命周期与状态端点`
+
+---
+
+## Task 4：单测（红-绿顺序，覆盖以下契约）
+
+**Files:** `core/manager/kilo_gateway_test.go`
+
+| # | 用例 | 期望 |
+|---|------|------|
+| K1 | 免费过滤 | `isFree=true/false` 混合目录 + `free_only=true` → 只回免费；`free_only=false` → 全回 |
+| K2 | 静默换模型透传 | 假上游把 `model` 改成别的值 → 客户端收到的 body `model` 是**上游真实值**（不许洗成请求名） |
+| K3 | 鉴权 | 无/错 `Authorization` → 401；正确 key → 放行 |
+| K4 | 上游错误透传 | 假上游 403 + JSON 错误体 → 网关回 403 且 body 原样（**不得变 502**） |
+| K5 | 警示头 | 任一 2xx 响应含 `X-Kilo-Data-Policy` |
+| K6 | 前缀剥离 | 请求 `kilo/nvidia/...` 与裸 `nvidia/...` 命中同一模型 |
+| K7 | 端口/开关 | `kilo_port` env>config>默认 30080 三源优先级；`kilo_enabled=false` 时监听不起 |
+| K8 | 独立性（红线） | 单测里 `import` 断言：kilo 文件**不得**引用 `vendors/`、`core/router`、`aggregator`（可用 `go list -deps` 或 grep 守卫） |
+
+**Steps:**
+1. 先写 K1–K8（全 FAIL），再实现到全 PASS。
+2. 跑：`go test ./core/manager/ -run Kilo -count=1 -race` → 全绿
+3. 跑：`go test ./core/manager/ ./vendors/custom/ -count=1` → **不得新增失败**
+   （已知既有失败：`callmetric_engine_test.go` 4 条时间炸弹，见 `OPEN.md` 2026-11-10 #5，不属本阶段）
+4. Commit：`✅ test(kilo): 独立网关契约单测 K1-K8`
+
+---
+
+## Task 5：前端独立菜单页
+
+**Files:** `src/pages/KiloPage.tsx`、`src/App.tsx`、`src/lib/api.ts`
+
+**行为:**
+- `NAV` **首位**：`{ id: 'kilo', label: 'Kilo', icon: <lucide 图标> }`；默认 tab 仍为 `opencode`（**不抢默认落地页**，避免用户一进来就撞警示源；如要改默认由用户另行决定）。
+- 页面顶部**玫瑰色警示横幅**（常驻、不可关闭）：「⚠️ Kilo 免费档的上游服务条款声明：请求内容可能被用于模型训练/记录，请勿提交个人或机密数据」+ 依据来源小字。
+- 卡片：运行状态、端口、`/v1` 地址与 key 一键复制、`enabled`/`free_only` 两个开关（默认勾选只免费）、模型表（列：模型 ID / 是否支持工具 / `mayTrain` / 最近一次**实际**返回模型）。
+- 样式对齐现有面板（`bg-white rounded-2xl border`、`text-[15px]`、`text-zinc-500` 体系），**不引入新 UI 依赖**。
+- 轮询 5s，抄 `OpenCodePage.tsx:225-229` 的 `aliveRef` + `reloadRef` 防泄漏写法。
+
+**Steps:**
+1. 实现。
+2. 跑：`npx tsc -b` → exit 0
+3. 跑：`npm run build` → exit 0（产出 `dist/`；**只构建不部署**，约束 5）
+4. 面板自检：`npx vite preview`（临时端口，用完杀）截图存 `docs/design/screenshots-20261111/kilo-page.png`
+5. Commit：`✨ feat(kilo): 独立菜单页与训练警示`
+
+---
+
+## Task 6：摘除 providers[] 的 kilo 条目（去关联）
+
+**行为:** 通过管理 API 整表保存摘除今天挂载的 `id=kilo` 条目；保留其它 19 个源逐字段不变。
+
+**Steps:**
+1. **备份** `%APPDATA%\opencode2api-manager\config.json` → `%TEMP%`。
+2. 用 **Go stdlib 一次性工具**（禁 PowerShell 读改写，理由见约束 2）：GET `/api/admin/custom-providers` → 过滤掉 `kilo` → POST save。
+3. 校验：
+   - `GET 127.0.0.1:50080/v1/models` → **不再出现任何 `kilo/*`**；模型数 `31 → 20`
+   - `GET /api/admin/custom-providers` → 19 个源，`nv` 名字仍为 `英伟达`、`yn` 仍为 `越南-1亿-走代理`（**用 Go 客户端读，别用 PowerShell**，否则会把正确 UTF-8 看成假乱码——今日已踩）
+4. Commit（若产生文档/脚本变更）：`♻️ refactor(kilo): 免费源改由独立网关承载，摘除 providers 条目`
+
+---
+
+## Task 7：文档与日志（AGENTS.md 强制第 6 条）
+
+- `docs/issue-log/2026-11-11.md`：#3 状态改为「已由独立网关承载，providers 条目摘除」，新增 #4 记录本阶段（描述/分析/修改结果/验证证据/遗留）。
+- `docs/issue-log/OPEN.md`：更新对应行（🔴 auto 候选风险应随 providers 条目摘除而**关闭**，写明证据）。
+- `docs/opencode-channel-research-2026-11-11/top5-98-kilo-mounted.md`：加「⚠️ 已被阶段 K 取代」顶注，保留历史。
+
+---
+
+## 代码审查（阶段级环节，验收前）
+
+**审查方：** 独立角色子代理（非实施者），模型待用户指定
+
+**审查面：** 独立性红线（约束 1）是否真守住 / 并发与生命周期（goroutine 泄漏、端口重绑、`defer` 关闭）/ 上游错误是否被洗 / 警示是否可能被 UI 绕过 / 密钥与 PII 入日志 / 测试是否真断言（防"永真用例"）/ 与既有面板风格一致性 / `gofmt` 与 `coding-standards.md`
+
+| 审查项 | 结论（✅/⚠️/❌） | 问题清单 |
+|--------|------------------|----------|
+| 独立性红线 | | |
+| 并发与生命周期 | | |
+| 错误透传语义 | | |
+| 警示不可绕过 | | |
+| 测试有效性 | | |
+| 风格与规范 | | |
+
+**结论：** ⬜
+
+---
+
+## 验收标准总表
+
+| # | 标准 | 通过条件（命令 + 期望） | 验证责任人 |
+|---|------|------------------------|-----------|
+| V-1 | 构建/静态检查 | `go build ./...` = 0；`go vet ./...` = 0；`gofmt -l core/manager/kilo_*.go` 无输出 | 自动化 |
+| V-2 | 单测 | `go test ./core/manager/ -run Kilo -count=1 -race` 全 PASS；整包无**新增**失败 | 自动化 |
+| V-3 | 前端 | `npx tsc -b` = 0；`npm run build` = 0 | 自动化 |
+| V-4 | 30080 端到端 | 真请求 `nvidia/nemotron-3.5-lightning:free`（`max_tokens>=400`）→ HTTP 200 且 `choices[0].message.content` 非空；`/v1/models` 在 `free_only=true` 时**只含免费档**（当前上游 11 个） | 自动化 + 主会话复核 |
+| V-5 | 警示可见 | Kilo 页横幅存在且不可关闭（代码里无关闭入口）；响应含 `X-Kilo-Data-Policy`；截图入库 | 端到端（截图） |
+| V-6 | 去关联 | 50080 `/v1/models` 无 `kilo/*`；`grep -rn "ParamDataPolicyNote\|id=\"kilo\"" --include=*.go` 不再指向 providers 语义；`autoCandidateModels` 候选集不含 Kilo | 自动化 |
+| V-7 | **独立性证明** | 停掉 provider-service（50080）后，30080 仍 200、`/v1/models` 仍正常 —— 这是"不转发、不依赖"的唯一硬证据 | 端到端（需用户授权临时停 50080） |
+| V-8 | 默认值 | 空配置下 `kilo_enabled=true`、`kilo_free_only=true`、端口=30080 | 自动化 |
+| V-9 | 红线 | 无密钥入库；生产 exe/dist 未被替换（哈希对拍 `bin/opencode2api.exe`、`bin/dist/index.html`） | 自动化 |
+| V-10 | 文档 | issue-log + OPEN.md + top5 顶注三处齐 | 主会话 |
+
+---
+
+## 风险与降级
+
+| 风险 | 缓解 |
+|------|------|
+| Kilo 上游目录漂移（其默认链今日已 2/7 死） | 网关每次启动 + 后台刷新都实拉 `/models` 按 `isFree` 过滤，**不硬编码模型清单**；`/v1/models` 空结果时回退上次缓存（抄 `providerservice.go` 语义） |
+| 免费端点未来要求账号 | 上游返回 401/403 → 状态端点透出 `error`，页面红字显示，不改行为、不重试烧额度 |
+| 用户把私有代码误接到 30080 | 警示三处（横幅/模型列/响应头）+ README 段落；文档明确"默认只免费档 = 全部会训练" |
+| 与 40080 引擎抢 CPU/连接 | 独立 `http.Client`，`MaxIdleConns` 保守（64）；本阶段不做限流（YAGNI） |
+| 端口 30080 被占 | 配置/env 可改；启动失败只标 `failed` 不影响 manager 主服务 |
+| 审查发现违反独立性红线 | ❌ 不通过 → 返工，缺陷显式带入下一轮，不允许"下阶段再改" |
+
+---
+
+## 给接手 AI 的完整提示词（零上下文可直接粘贴）
+
+---
+
+你是负责 **opencode2api_enhance** 的实现代理。请**完整执行本阶段**，不要只写方案。
+
+### 基线
+- 目录：`D:\AI_Projects\opencode2api_guide\opencode2api_enhance`（Windows，PowerShell）
+- 从 `main`（tip `2238659`）创建并切换：`feat/phase-k-kilo-gateway`
+- 唯一实施计划：`docs/ai-framework/plans/2026-11-11-kilo-independent-gateway.md`
+- 必读：`AGENTS.md`、`coding-standards.md`、`docs/ai-framework/phased-plan-driven.md`、
+  `docs/opencode-channel-research-2026-11-11/top5-98-kilo-mounted.md`
+- 环境事实：Go 1.22 在 PATH；`npm/npx` 可用；**PowerShell 5.1，读 UTF-8 文件必须显式指定编码**（`[IO.File]::ReadAllText($p,[Text.UTF8Encoding]::new($false))`），否则中文全乱码。
+
+### 做（按 Task 1→7 顺序，每 Task 测过再 commit）
+1. Task 1 配置四键（`*bool` 默认开语义，抄 `engineEnabled` 写法）
+2. Task 2 `core/manager/kilo_gateway.go` + `kilo_models.go`：**独立** `http.Client` / 目录缓存 / handler
+3. Task 3 接入 `main.go` 生命周期 + `/api/admin/kilo/*`，临时端口 30081 手工冒烟后杀净
+4. Task 4 单测 K1–K8 **先红后绿**，含 `-race`
+5. Task 5 `KiloPage.tsx` + `App.tsx` NAV **首位** + `api.ts`；`tsc -b` 与 `npm run build` 必须 0
+6. Task 6 **Go stdlib 工具**摘除 `providers[].kilo`（**禁止 PowerShell 读改写 config.json**），复核 19 源无损、50080 无 `kilo/*`
+7. Task 7 issue-log / OPEN.md / top5 顶注三处文档
+
+### 不做
+- ❌ 不引用 `globalAgg`/`chatRouterVar`/`vendors/custom`/`ProviderService`/50080/40080 —— 独立性是本阶段的功能本身
+- ❌ 不替换/不重启生产 `bin/*.exe` 与 `bin/dist`（部署另行授权）；不停生产 40000/40080/50080
+- ❌ 不做多 key 池、配额账本、跨源 failover、auto 候选接入
+- ❌ 不 `gofmt -w` 整仓库（`core/manager/config.go` 等文件在 HEAD 已 clean，`registry.go` 的 gofmt 报告是**既有**问题，别顺手改扩大 diff）
+- ❌ 不提交密钥；不 `git push`
+
+### 工作方式
+1. 开工先跑基线：`go build ./...`、`go test ./core/manager/ -run Kilo`（应报"无此测试"而非编译错）、`npx tsc -b`，确认干净。
+2. 证据优先：完成前重跑计划里每条验证命令，把**真实输出**贴进交付说明；禁止"应该能过"。
+3. 上游试跑 `max_tokens>=400`（推理型模型小预算会假失败）。
+4. 用简体中文汇报；代码标识符保持原样。
+5. 实验一律用独立端口（30081/40999）+ 临时目录，结束杀进程并复查端口为空。
+
+### 交卷
+分支名、提交列表、V-1～V-10 自评表（每条附命令与输出摘要）、`go test`/`tsc`/`build` 结果、面板截图路径、残留风险与需人类执行项（V-7 停 50080 需授权、部署需停机窗口）。
+
+现在开始：读完计划，从 Task 1 执行到最后。
+
+---
+
+## 残留手工验收清单
+
+1. **V-7 独立性证明**：需用户授权临时停 provider-service（50080）后打 30080，验完恢复。
+2. **部署**：新 `opencode2api.exe` 与被锁定的运行中 exe 交换，需停机窗口（`OPEN.md` 已多次登记该限制）。
+3. 面板 Kilo 页在真实数据下的观感（警示横幅是否够显眼、实际模型列是否看得懂）—— 用户目视确认。
+4. 是否把 Kilo 设为默认落地页 —— 本阶段保守保持 `opencode`，需用户决定。
