@@ -31,6 +31,13 @@ const (
 	ParamUseProxy = "use_proxy"
 	// ParamKey403Cooldown 401/403 失效冷却时长（秒）：>0 到期自动回池重试；0 = 永久禁用（旧行为）。
 	ParamKey403Cooldown = "key_403_cooldown"
+	// ParamDataPolicyNote 数据去向提示（如「提示词可能被上游用于训练」）；空 = 无提示。
+	//
+	// 为什么要这个字段：有些免费上游在服务条款里明确要求「不得提交敏感数据」，
+	// 而它在面板里看起来和其它源一模一样，用户完全可能把私有代码选到这类通道上。
+	// 把提示做成配置数据（而不是把某个 id 写死在 UI 里），换上游、加中转站时同样能标。
+	// 只影响管理面板展示，不参与路由与出站请求。
+	ParamDataPolicyNote = "data_policy_note"
 )
 
 func init() {

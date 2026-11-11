@@ -506,6 +506,8 @@ export default function CustomModelsPage({ toast }: { toast: (msg: string, ok?: 
       enabled: p.enabled,
       // 带上当前白名单（空 = 该源本就是全部暴露，序列化后键省略、后端不误伤）
       allowed_models: p.allowed_models && p.allowed_models.length > 0 ? p.allowed_models : undefined,
+      // 数据去向提示同样原样带回（表单没有这一项，靠回传维持；缺键后端=保留旧值）
+      data_policy_note: p.data_policy_note || undefined,
     }))
 
   const doDelete = async (id: string) => {
@@ -989,6 +991,17 @@ export default function CustomModelsPage({ toast }: { toast: (msg: string, ok?: 
                     <span className="text-[11px] px-1.5 py-0.5 rounded bg-zinc-100 text-zinc-600 font-mono">{p.protocol}</span>
                     {!p.enabled && <span className="text-[11px] px-1.5 py-0.5 rounded bg-zinc-200 text-zinc-500">已停用</span>}
                     {p.use_proxy && <span className="text-[11px] px-1.5 py-0.5 rounded bg-amber-50 text-amber-700">走代理</span>}
+                    {/* 数据去向提示：上游明确会把请求内容用于训练/记录的源，必须一眼可见
+                        （Kilo Free 档 11/11 模型 mayTrainOnYourPrompts=true，见
+                        docs/opencode-channel-research-2026-11-11/top5-99-consolidation-and-upgrade.md §8） */}
+                    {p.data_policy_note && (
+                      <span
+                        className="text-[11px] px-1.5 py-0.5 rounded bg-rose-50 text-rose-700 border border-rose-200"
+                        title={p.data_policy_note}
+                      >
+                        ⚠ {p.data_policy_note}
+                      </span>
+                    )}
                     {p.keys_total > 1 && (
                       <span className="text-[11px] px-1.5 py-0.5 rounded bg-zinc-100 text-zinc-600">
                         {p.keys_total} key

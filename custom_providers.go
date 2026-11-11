@@ -260,6 +260,8 @@ type customProviderView struct {
 	ModelsAll     []string `json:"models_all"`             // 全量模型清单（上游 ID，编辑勾选用）
 	AllowedModels []string `json:"allowed_models"`         // 暴露白名单（空 = 全部暴露）
 	LastSuccess   string   `json:"last_success,omitempty"` // 最近一次成功（探测/请求）
+	// DataPolicyNote 数据去向提示（如「提示词可能被上游用于训练」），面板徽标用。
+	DataPolicyNote string `json:"data_policy_note,omitempty"`
 	// key 健康计数（运行时快照；无活实例时全 0）
 	KeysTotal       int    `json:"keys_total"`
 	KeysAvailable   int    `json:"keys_available"`
@@ -289,8 +291,11 @@ type customProviderInput struct {
 	UseProxy bool `json:"use_proxy"`
 	// UseLocalProxy 测试专用：测试拉取模型走本机系统代理（http.ProxyFromEnvironment），
 	// 优先于 Proxy 字段；默认 false = 直连或按 Proxy 走指定代理。
-	UseLocalProxy bool  `json:"use_local_proxy"`
-	Enabled       *bool `json:"enabled"`
+	UseLocalProxy bool `json:"use_local_proxy"`
+	// DataPolicyNote 数据去向提示（面板徽标）；提交缺键 = 保留旧值，
+	// 显式空串 = 清除提示（与 allowed_models 同款语义，防整表提交把提示洗掉）。
+	DataPolicyNote *string `json:"data_policy_note"`
+	Enabled        *bool   `json:"enabled"`
 }
 
 // localProxyTransport 测试专用的 Transport：经本机系统代理（默认 http.ProxyFromEnvironment，
@@ -394,7 +399,8 @@ func customProviderViews() []customProviderView {
 			APIKeys: keys, APIKey: firstKey, APIKeySet: len(keys) > 0,
 			KeyStrategy: strategy, Key403Cooldown: key403,
 			Proxy: rawProxy, ProxyEffective: effectiveProxy, UseProxy: useProxy, Enabled: enabled,
-			Models: counts[pc.ID], LastError: vendorLastErr(pc.ID),
+			DataPolicyNote: dataPolicyNoteFromParams(p),
+			Models:         counts[pc.ID], LastError: vendorLastErr(pc.ID),
 			ModelsAll: vendorFullModels(pc.ID), AllowedModels: allowedIDs,
 			LastSuccess: vendorLastSuccess(pc.ID),
 			KeysTotal:   kh.Total, KeysAvailable: kh.Available, KeysCooling: kh.Cooling,
@@ -485,6 +491,8 @@ func applyCustomProvidersSave(m *manager.Manager, inputs []customProviderInput) 
 	// 旧 custom 条目的模型白名单（按 id）：整表提交缺 allowed_models 键时保留旧值，
 	// 避免「改启停洗掉白名单」（问题 4，对齐 keys 的「留空=保留旧」惯例）。
 	oldAllowed := map[string][]string{}
+	// 旧 custom 条目的数据去向提示（按 id）：同款语义，防整表提交洗掉提示。
+	oldNote := map[string]string{}
 	for _, pc := range cfg.Providers {
 		if pc.Type == "custom" {
 			if ks := customKeyListFromParams(pc.Params); len(ks) > 0 {
@@ -492,6 +500,9 @@ func applyCustomProvidersSave(m *manager.Manager, inputs []customProviderInput) 
 			}
 			if am := customAllowedListFromParams(pc.Params); len(am) > 0 {
 				oldAllowed[pc.ID] = am
+			}
+			if n := dataPolicyNoteFromParams(pc.Params); n != "" {
+				oldNote[pc.ID] = n
 			}
 		}
 	}
@@ -563,6 +574,14 @@ func applyCustomProvidersSave(m *manager.Manager, inputs []customProviderInput) 
 			}
 		} else if old, ok := oldAllowed[in.ID]; ok {
 			params[custom.ParamAllowedModels] = old
+		}
+		// data_policy_note：同款三态——nil（缺键）保留旧值；非空写入；空串清除。
+		if in.DataPolicyNote != nil {
+			if n := strings.TrimSpace(*in.DataPolicyNote); n != "" {
+				params[custom.ParamDataPolicyNote] = n
+			}
+		} else if old, ok := oldNote[in.ID]; ok {
+			params[custom.ParamDataPolicyNote] = old
 		}
 		pc := ProviderCfg{
 			ID: in.ID, Type: "custom", Name: strings.TrimSpace(in.Name),
@@ -754,6 +773,12 @@ func customUseProxyFromParams(p map[string]any) bool {
 	useProxy, _ := p[custom.ParamUseProxy].(bool)
 	legacy, _ := p[custom.ParamViaProxy].(bool)
 	return useProxy || legacy
+}
+
+// dataPolicyNoteFromParams 读条目的数据去向提示（面板徽标用；缺省/空白 = 无提示）。
+func dataPolicyNoteFromParams(p map[string]any) string {
+	s, _ := p[custom.ParamDataPolicyNote].(string)
+	return strings.TrimSpace(s)
 }
 
 // customKeyListFromParams 合并条目 params 里的 api_keys + api_key（去空去重）。

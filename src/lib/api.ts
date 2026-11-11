@@ -142,6 +142,8 @@ export type CustomProviderView = {
   keys_circuit_open: number
   keys_disabled: number
   last_error?: string
+  /** 数据去向提示（如「提示词可能被上游用于训练」）；空 = 无提示，面板徽标用 */
+  data_policy_note?: string
 }
 
 export type CustomProviderInput = {
@@ -164,6 +166,8 @@ export type CustomProviderInput = {
   use_proxy?: boolean
   /** 仅「测试并获取模型」生效：走本机系统代理（http.ProxyFromEnvironment），不写入配置 */
   use_local_proxy?: boolean
+  /** 数据去向提示；提交缺键 = 保留旧值，空串 = 清除（与 allowed_models 同款三态） */
+  data_policy_note?: string
   enabled?: boolean
 }
 
