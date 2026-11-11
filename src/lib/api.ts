@@ -526,6 +526,63 @@ export type MetricSuggestions = {
   suggestions: MetricSuggestion[]
 }
 
+/**
+ * Kilo 独立网关（30080）状态。
+ *
+ * 阶段 K：Kilo 是与 OpenCode(40080)/自定义源(50080) **完全解耦**的独立入口，
+ * 直通 https://api.kilo.ai。它与 opencode2api 的其它入口不共享任何运行路径。
+ */
+export type KiloGatewayStatus = {
+  /** stopped | ready | failed */
+  state: string
+  /** 是否启用（配置值） */
+  enabled: boolean
+  /** 监听端口（默认 30080） */
+  port: number
+  /** 客户端 base URL（OpenAI 兼容） */
+  address: string
+  /** 统一网关密钥（本地默认 sk-unified-local） */
+  api_key: string
+  /** 是否只暴露免费档模型 */
+  free_only: boolean
+  /** 上游出站代理（空 = 直连） */
+  proxy: string
+  running: boolean
+  /** 上游目录总数 */
+  model_total: number
+  /** 当前视图内模型数（受 free_only 影响） */
+  model_shown: number
+  /** 当前视图内是否存在「提示词可能被用于训练」的模型 */
+  may_train: boolean
+  /** 目录最近刷新时刻（RFC3339） */
+  last_refresh?: string
+  /** 启动/运行错误 */
+  last_error?: string
+  error?: string
+}
+
+/** Kilo 单模型条目 */
+export type KiloModelEntry = {
+  id: string
+  /** 上游标注的免费档 */
+  free: boolean
+  /** 上游标注：提示词可能被用于训练 */
+  may_train: boolean
+  supports_tools: boolean
+  context_window?: number
+  provider_name?: string
+}
+
+/** Kilo 模型列表响应 */
+export type KiloModelsView = {
+  models: KiloModelEntry[]
+  status: KiloGatewayStatus
+  /** 机器可读的数据政策标识 */
+  data_policy: string
+  /** 政策依据出处 */
+  data_policy_reference: string
+}
+
 /** 免费层引擎（40080）状态 */
 export type FreeTierEngineStatus = {
   /** stopped | starting | ready | failed */
@@ -1127,6 +1184,13 @@ export const api = {
   freeTierRetryWarp: () =>
     req<{ status: string; hint: string }>('POST', '/free-tier/retry-warp'),
   freeTierModels: () => req<FreeTierModelsView>('GET', '/free-tier/models'),
+
+  // Kilo 独立网关（30080，阶段 K）：与 40080/50080 解耦的独立入口
+  kiloStatus: () => req<KiloGatewayStatus>('GET', '/kilo/status'),
+  kiloModels: () => req<KiloModelsView>('GET', '/kilo/models'),
+  /** 开关（enabled / free_only 至少给一个）；返回切换后的生效状态 */
+  kiloToggle: (patch: { enabled?: boolean; free_only?: boolean }) =>
+    req<KiloGatewayStatus>('POST', '/kilo/toggle', patch),
   freeTierProbe: (model?: string) =>
     req<ModelProbeResponse>('POST', '/free-tier/probe', { model: model ?? '' }),
   diag: () => req<DiagReport>('GET', '/diag'),

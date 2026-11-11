@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import clsx from 'clsx'
-import { Zap, Settings, BarChart3, ScrollText, Plug, Sparkles, Stethoscope } from 'lucide-react'
+import { Zap, Settings, BarChart3, ScrollText, Plug, Sparkles, Stethoscope, Cloud } from 'lucide-react'
 import { api } from './lib/api'
 import { useUpdateCheck } from './lib/updates'
 import { nativeUpdateSupported } from './lib/nativeUpdate'
@@ -9,15 +9,20 @@ import { TitleBar } from './components/TitleBar'
 import TaskPanel from './components/TaskPanel'
 import UpdateModal from './components/UpdateModal'
 import OpenCodePage from './pages/OpenCodePage'
+import KiloPage from './pages/KiloPage'
 import CustomModelsPage from './pages/CustomModelsPage'
 import SettingsPage from './pages/SettingsPage'
 import StatsPage from './pages/StatsPage'
 import LogsPage from './pages/LogsPage'
 import DiagPage from './pages/DiagPage'
 
-type Tab = 'opencode' | 'custom' | 'stats' | 'logs' | 'diag' | 'settings'
+type Tab = 'kilo' | 'opencode' | 'custom' | 'stats' | 'logs' | 'diag' | 'settings'
 
+// 导航顺序：Kilo 排第一位（用户要求「像 OpenCode 一样独立菜单，放第一个」）。
+// 默认落地页仍是 OpenCode —— 避免一进面板就撞上「提示词会被训练」的警示源；
+// 是否把默认落地页改成 Kilo 由用户另行决定。
 const NAV: { id: Tab; label: string; icon: typeof Zap }[] = [
+  { id: 'kilo', label: 'Kilo', icon: Cloud },
   { id: 'opencode', label: 'OpenCode', icon: Zap },
   { id: 'custom', label: '自定义模型', icon: Plug },
   { id: 'stats', label: '统计', icon: BarChart3 },
@@ -283,6 +288,7 @@ export default function App() {
 
         {/* 内容区 */}
         <main className="flex-1 min-w-0 overflow-y-auto">
+          {tab === 'kilo' && <KiloPage toast={showToast} />}
           {tab === 'opencode' && <OpenCodePage toast={showToast} />}
           {tab === 'custom' && <CustomModelsPage toast={showToast} />}
           {tab === 'stats' && <StatsPage toast={showToast} />}
