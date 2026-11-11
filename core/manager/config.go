@@ -107,7 +107,23 @@ type Config struct {
 	// 降级后不会自动切回：WARP 池空往往是环境性的（无 IPv6 / 出口被封），反复重试
 	// 只会反复烧出口。用户在面板点「重试 WARP」或重新开启 WARP 开关即可再试。
 	EngineWarpAutoFallback *bool `json:"engine_warp_auto_fallback,omitempty"`
+
+	// ---- Kilo 独立网关（30080，阶段 K）----
+	// 红线：这条链路与 50080/40080/vendors 完全无交集，是管理进程内的独立监听器，
+	// 直通 https://api.kilo.ai。见 plans/2026-11-11-kilo-independent-gateway.md。
+	// KiloEnabled 未设置（nil）默认开启：与 engine_enabled 同款三态语义。
+	KiloEnabled *bool `json:"kilo_enabled,omitempty"`
+	// KiloPort 监听端口（0 = 默认 30080；env OPCODE2API_KILO_PORT 优先）。
+	KiloPort uint16 `json:"kilo_port,omitempty"`
+	// KiloFreeOnly 只暴露上游免费档模型（nil = 默认开启）。用户明确要求
+	// 「默认也是只勾选免费模型」——上游 386 个模型里只有 11 个 isFree，
+	// 其余是付费档，全量暴露会诱导误用。
+	KiloFreeOnly *bool `json:"kilo_free_only,omitempty"`
+	// KiloProxy 上游出站代理（http/socks5 等；空 = 直连）。实测 Kilo 不需要
+	// 海外出口（与 OpenCode 不同），留配置位是给「以后上游变政策」的余量。
+	KiloProxy string `json:"kilo_proxy,omitempty"`
 }
+
 func (m *Manager) configPath() string {
 	return filepath.Join(m.paths.DataDir, "config.json")
 }
@@ -251,6 +267,14 @@ func (m *Manager) ConfigGet(key string) (string, error) {
 		return strconv.Itoa(int(cfg.GatewayPort)), nil
 	case "provider_port":
 		return strconv.Itoa(int(cfg.ProviderPort)), nil
+	case "kilo_enabled":
+		return strconv.FormatBool(kiloEnabled(cfg)), nil
+	case "kilo_port":
+		return strconv.Itoa(int(cfg.KiloPort)), nil
+	case "kilo_free_only":
+		return strconv.FormatBool(kiloFreeOnly(cfg)), nil
+	case "kilo_proxy":
+		return cfg.KiloProxy, nil
 	case "engine_enabled":
 		return strconv.FormatBool(engineEnabled(cfg)), nil
 	case "engine_warp_enabled":
@@ -349,6 +373,26 @@ func (m *Manager) ConfigSet(key, value string) error {
 			return err
 		}
 		cfg.ProviderPort = p
+	case "kilo_enabled":
+		b, err := parseBool()
+		if err != nil {
+			return err
+		}
+		cfg.KiloEnabled = &b
+	case "kilo_port":
+		p, err := parsePort()
+		if err != nil {
+			return err
+		}
+		cfg.KiloPort = p
+	case "kilo_free_only":
+		b, err := parseBool()
+		if err != nil {
+			return err
+		}
+		cfg.KiloFreeOnly = &b
+	case "kilo_proxy":
+		cfg.KiloProxy = strings.TrimSpace(value)
 	case "engine_enabled":
 		b, err := parseBool()
 		if err != nil {
@@ -500,6 +544,40 @@ func engineFreeOnly(cfg Config) bool {
 	return *cfg.EngineFreeOnly
 }
 
+// ---- Kilo 独立网关生效值助手（阶段 K；nil = 默认，与 engine* 同款三态） ----
+
+// kiloEnabled 独立网关开关（nil = 默认开启）。
+func kiloEnabled(cfg Config) bool {
+	if cfg.KiloEnabled == nil {
+		return true
+	}
+	return *cfg.KiloEnabled
+}
+
+// kiloFreeOnly 只暴露免费档（nil = 默认开启）。
+func kiloFreeOnly(cfg Config) bool {
+	if cfg.KiloFreeOnly == nil {
+		return true
+	}
+	return *cfg.KiloFreeOnly
+}
+
+// managerKiloPort 生效端口：env OPCODE2API_KILO_PORT > config.kilo_port > 默认 30080。
+// 优先级口径与 managerGatewayPort/managerProviderPort 完全一致（槽位表可被壳层覆盖）。
+func (m *Manager) managerKiloPort() uint16 {
+	if s := os.Getenv("OPCODE2API_KILO_PORT"); s != "" {
+		if n, err := strconv.Atoi(s); err == nil && n > 0 && n < 65536 {
+			return uint16(n)
+		}
+	}
+	if m != nil {
+		if p := m.loadConfig().KiloPort; p > 0 {
+			return p
+		}
+	}
+	return kiloGatewayPortDefault
+}
+
 // 免费通道的顺序档位。
 const (
 	// ChannelOrderWarpFirst：先走 WARP 出口（引擎匿名通道），不通再用 key。
@@ -516,8 +594,7 @@ const (
 	ChannelOrderKeyFirst = "key_first"
 )
 
-// engineChannelOrder 生效的通道顺序（空/非法值 = 默认 warp_first）。
-//
+// engineChannelOrder 生效的通道顺序（空/非法值 = 默认 warp_first）。//
 // 为什么不把非法值当错误：配置文件可能被手改过，一个手滑的值不该让整个
 // 免费层起不来。回落默认值 + 面板显示实际生效值，比启动失败友好。
 func engineChannelOrder(cfg Config) string {
@@ -546,6 +623,13 @@ type ConfigView struct {
 	// 生效值（含环境槽位/默认值），供设置页「端口占用」展示
 	GatewayPortEffective  uint16 `json:"gateway_port_effective"`
 	ProviderPortEffective uint16 `json:"provider_port_effective"`
+
+	// Kilo 独立网关（30080，阶段 K）
+	KiloEnabled       bool   `json:"kilo_enabled"`
+	KiloFreeOnly      bool   `json:"kilo_free_only"`
+	KiloProxy         string `json:"kilo_proxy"`
+	KiloPort          uint16 `json:"kilo_port"`
+	KiloPortEffective uint16 `json:"kilo_port_effective"`
 
 	// 免费层引擎（40080）
 	EngineEnabled          bool     `json:"engine_enabled"`
@@ -596,6 +680,11 @@ func (m *Manager) ConfigViewOf() ConfigView {
 		ProviderPort:          cfg.ProviderPort,
 		GatewayPortEffective:  m.managerGatewayPort(),
 		ProviderPortEffective: m.managerProviderPort(),
+		KiloEnabled:           kiloEnabled(cfg),
+		KiloFreeOnly:          kiloFreeOnly(cfg),
+		KiloProxy:             cfg.KiloProxy,
+		KiloPort:              cfg.KiloPort,
+		KiloPortEffective:     m.managerKiloPort(),
 
 		EngineEnabled:          engineEnabled(cfg),
 		EngineWarpEnabled:      engineWarpEnabled(cfg),

@@ -27,6 +27,8 @@ type Manager struct {
 	runner Runner
 	// engine 免费层引擎（40080）托管状态。
 	engine *freeTierEngine
+	// kilo Kilo 独立网关（30080）托管状态。阶段 K：与引擎/vendors 无交集。
+	kilo *kiloGateway
 
 	// retryAfterMu 保护 retryAfter：模型 ID → 额度重置时刻。
 	//
