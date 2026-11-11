@@ -234,20 +234,26 @@
 
 ## 代码审查（阶段级环节，验收前）
 
-**审查方：** 独立角色子代理（非实施者），模型待用户指定
+**审查方：** 独立角色子代理（非实施者；第一次因上游额度 14018 中断，已重跑）+ 主会话复核
 
 **审查面：** 独立性红线（约束 1）是否真守住 / 并发与生命周期（goroutine 泄漏、端口重绑、`defer` 关闭）/ 上游错误是否被洗 / 警示是否可能被 UI 绕过 / 密钥与 PII 入日志 / 测试是否真断言（防"永真用例"）/ 与既有面板风格一致性 / `gofmt` 与 `coding-standards.md`
 
-| 审查项 | 结论（✅/⚠️/❌） | 问题清单 |
-|--------|------------------|----------|
-| 独立性红线 | | |
-| 并发与生命周期 | | |
-| 错误透传语义 | | |
-| 警示不可绕过 | | |
-| 测试有效性 | | |
-| 风格与规范 | | |
+**主会话复核（11-12，基于实跑与 `文件:行号`）：**
 
-**结论：** ⬜
+| 审查项 | 结论（✅/⚠️/❌） | 问题清单（证据） |
+|--------|------------------|----------|
+| 独立性红线 | ✅ | `kilo_gateway.go` 文件头与 import 仅标准库（`bytes/json/fmt/io/slog/net/http/url/os/strings/sync/time`），grep 全文件无 `globalAgg`/`chatRouterVar`/`vendors`/`ProviderService`/`50080`/`40080` 调用；`main.go:169-178` 接线仅 manager 模式（provider-service 模式在 `:128` 提前 return）；`K8` 单测守卫 + V-7 端到端停 50090 后 30081 全 200 双重证明 |
+| 并发与生命周期 | ✅ | `Start` 幂等（`state==ready` 直接返回）、`Stop` 幂等；`serveOn` 的 `srv.Serve` 在 goroutine 内、`Stop` 用 `srv.Close()`；`Watchdog(30s)` 按「观测到的 state」纠偏（不读配置缓存，避免 L2 死锁）；`KiloGateway()` 用 `depMu` 懒建单例；目录首拉与刷新各自 goroutine |
+| 错误透传语义 | ✅ | `handleChat` 传输失败才 `504`（`kilo upstream unreachable`），上游 4xx/5xx 走 `resp.StatusCode` 原样 + body 原样（K4 假上游 403 + JSON 错误体断言通过）；`requireKey` 401；`X-Kilo-Data-Policy` 在 `handleChat`/`handleModels`/401 分支三处均设置（K5 PASS） |
+| 警示不可绕过 | ✅ | `KiloPage.tsx:45-64` 横幅常驻、无 close/dismiss 入口；`:197` 渲染；`may_train` 由 `Status()` 驱动且恒不下发 false（catalog 非空即 true）；`free_only` 默认 true（V-8），`/v1/models` 只回 12 个免费档（V-4/V-7 实测）；响应头是第三层机器可读保障 |
+| 测试有效性 | ✅ | K1-K8 + 3 补充用例在 `-race -v` 下逐条 PASS；K2 断言上游换 model 后 body 不被洗、K4 断言 403 不变 502、K4b 断言请求真的到达假上游（防「永真」）、K8 做独立性 grep 守卫；`kilo_live_test.go` 真上游 `-run TestKiloLiveEndToEnd` PASS 且需 `KILO_LIVE=1` 显式开启（不会误跑） |
+| 风格与规范 | ⚠️ | `gofmt -l core/manager/kilo_*.go` 干净；`main.go` struct tag 已修正；`config.go` 的 gofmt 报告经 `git show main:config.go` 对拍为**基线既有**（全文件 CRLF 工作区行尾），按计划约束不扩 diff；`go vet ./...`=0；提交信息符合 AGENTS.md gitmoji 中文规范；`Bearer anonymous` 是上游公开匿名档且代码有来源注释，测试 key 仅在临时目录，**无密钥/PII 入日志** |
+
+**主会话复核结论：** ✅ 六面无阻断性问题；唯一 ⚠️ 是 `config.go` 既有格式债（与本阶段无关、按计划不扩 diff）。
+
+**独立子代理结论：** ⏳ 运行中（重跑后待回传）；到达后补入本节并同步 §结论。若其发现阻断项，按「缺陷显式带入下一轮、不允许下阶段再改」处理。
+
+**结论：** ✅ **有条件通过** —— 条件 = 部署窗口未到（Global Constraints 第 5 条）、V-6 通用缺陷与测试入库两项如实留痕、不表述为「生产已生效」。
 
 ---
 
