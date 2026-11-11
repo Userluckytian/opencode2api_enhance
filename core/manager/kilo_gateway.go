@@ -82,11 +82,17 @@ type KiloGatewayStatus struct {
 type kiloGateway struct {
 	mgr *Manager // 读配置（端口/开关/密钥）用；不构成链路依赖
 
-	mu      sync.Mutex
+	mu sync.Mutex
+	// startMu 串行化 Start：main 后台启动 / toggle / Watchdog 三处都可能调。
+	startMu sync.Mutex
 	state   string
 	lastErr string
 	srv     *http.Server
 	ln      net.Listener
+	// watchdogStop 让 Watchdog 随 Stop 退出（独立审查 B9：原 for range t.C
+	// 无退出路径，进程退出前 goroutine 常驻）。close 幂等由 sync.Once 保证。
+	watchdogStop     chan struct{}
+	watchdogStopOnce sync.Once
 
 	cMu        sync.Mutex
 	catalog    []KiloModelEntry // 最近一次成功目录（全量，含付费档）
@@ -142,7 +148,14 @@ func (g *kiloGateway) upstreamClient() (*http.Client, error) {
 //
 // 与 StartFreeTierEngine 同款教训：长等待放锁外、失败不拖垮管理面 ——
 // 这里 ListenAndServe 失败只记 failed + lastErr，返回错误由调用方降级为 warn。
+// 独立审查 B9：listen 与状态登记原先分两段持锁，main 后台 / toggle /
+// Watchdog 三处并发触发时，第二个 Start 会 bind 失败并把已经 ready 的状态
+// 覆盖成 failed。现在用一把 startMu 贯穿「判重 → listen → 登记」，从根上
+// 消除竞态（不用 mu 是因为 listen 期间不能占着状态锁）。
 func (g *kiloGateway) Start() error {
+	g.startMu.Lock()
+	defer g.startMu.Unlock()
+
 	g.mu.Lock()
 	if g.state == "ready" {
 		g.mu.Unlock()
@@ -216,6 +229,13 @@ func (g *kiloGateway) Stop() error {
 	st := g.state
 	g.state = "stopped"
 	g.mu.Unlock()
+	// 看门狗与监听同生命周期：停网关就停看门狗，避免它 30s 后又按配置
+	// 把网关拉起来（独立审查 B9）。
+	g.watchdogStopOnce.Do(func() {
+		if g.watchdogStop != nil {
+			close(g.watchdogStop)
+		}
+	})
 	if srv != nil && st == "ready" {
 		// 15s 宽限：让在途流结束，超时就掐。
 		return srv.Close()
@@ -226,9 +246,21 @@ func (g *kiloGateway) Stop() error {
 // Watchdog 周期核对「配置期望 vs 实际监听」，漂移即纠正 —— 与引擎看门狗同一
 // 设计原则（判据来自观测，不来自配置缓存；这正是阶段调研里 L2 死锁的教训）。
 func (g *kiloGateway) Watchdog(interval time.Duration) {
+	g.mu.Lock()
+	if g.watchdogStop == nil {
+		g.watchdogStop = make(chan struct{})
+	}
+	stop := g.watchdogStop
+	g.mu.Unlock()
+
 	t := time.NewTicker(interval)
 	defer t.Stop()
-	for range t.C {
+	for {
+		select {
+		case <-stop:
+			return
+		case <-t.C:
+		}
 		cfg := g.mgr.loadConfig()
 		want := kiloEnabled(cfg)
 		g.mu.Lock()
@@ -273,19 +305,29 @@ func (g *kiloGateway) Status() KiloGatewayStatus {
 	st.ModelTotal = len(g.catalog)
 	shown := g.catalogFilteredLocked(kiloFreeOnly(cfg))
 	st.ModelShown = len(shown)
-	if len(g.catalog) > 0 {
-		st.MayTrain = true // 实测 12/12 免费档 mayTrainOnYourPrompts=true
-		for _, e := range shown {
-			if !e.MayTrain {
-				st.MayTrain = false
-				break
-			}
+	// 独立审查 B8：OR 口径 —— 视图内「存在」任一可能用于训练的模型即 true，
+	// 与 api.ts 的 may_train 注释一致。此前写成 AND，全 true 时凑巧等价，
+	// 一旦上游混入一个不训练的模型就会误报「无风险」，进而弱化警示。
+	st.MayTrain = false
+	for _, e := range shown {
+		if e.MayTrain {
+			st.MayTrain = true
+			break
 		}
 	}
 	if !g.cLast.IsZero() {
 		st.LastRefresh = g.cLast.Format(time.RFC3339)
 	}
-	st.LastError = g.cErr
+	// 独立审查 B2：两个错误源都要露出来，且**启动/监听错误优先**——
+	// 端口被占时 state=failed，若被目录错误无条件覆盖（原实现），面板
+	// 只显示「目录拉取失败」，真正的「起不来」原因被吞，无法排障。
+	if g.cErr != "" {
+		if lastErr != "" {
+			st.LastError = lastErr + "；目录: " + g.cErr
+		} else {
+			st.LastError = g.cErr
+		}
+	}
 	g.cMu.Unlock()
 	return st
 }
@@ -439,6 +481,27 @@ func catalogFilterFree(cat []KiloModelEntry) []KiloModelEntry {
 	return out
 }
 
+// isModelBlockedByFreeOnly 判断请求模型是否应被 free_only 边界拦下。
+// 返回 (false, "") 的三类情形：目录尚未拉到（放行，避免上游抖动误伤）、
+// 命中免费档、空 model（交给上游裁决，别在这里编错误）。
+func (g *kiloGateway) isModelBlockedByFreeOnly(model string) (bool, string) {
+	if strings.TrimSpace(model) == "" {
+		return false, ""
+	}
+	g.cMu.Lock()
+	cat := append([]KiloModelEntry(nil), g.catalog...)
+	g.cMu.Unlock()
+	if len(cat) == 0 {
+		return false, ""
+	}
+	for _, e := range cat {
+		if e.ID == model && e.Free {
+			return false, ""
+		}
+	}
+	return true, "model 不在上游免费档目录内（kilo_free_only=true）；关闭该开关或使用 /v1/models 列出的免费档。目录尚未刷新时此边界暂不生效"
+}
+
 // catalogFilteredLocked 在已持 cMu 时过滤。
 func (g *kiloGateway) catalogFilteredLocked(freeOnly bool) []KiloModelEntry {
 	if !freeOnly {
@@ -476,10 +539,23 @@ func (g *kiloGateway) requireKey(next http.HandlerFunc) http.HandlerFunc {
 	}
 }
 
+// handleHealth 只回计划 §Task 2 约定的 4 个字段（status / models_shown /
+// may_train / last_refresh）+ 警示头。
+//
+// 独立审查 B1：这里**绝不能**把 Status() 整个序列化出去 —— 那是管理端点
+// (/api/admin/kilo/status, 挂 requireAuth) 的契约，其中 api_key 是明文统一
+// 网关密钥；/healthz 无鉴权，本机任意进程都能读，整包外泄等于把 40000 的
+// 门禁交出去。B6：警示头在每条响应都要有，健康探活也不例外。
 func (g *kiloGateway) handleHealth(w http.ResponseWriter, r *http.Request) {
-	st := g.Status()
+	w.Header().Set(kiloDataPolicyHeader, kiloDataPolicyHeaderValue)
 	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(st)
+	st := g.Status()
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"status":       st.State,
+		"models_shown": st.ModelShown,
+		"may_train":    st.MayTrain,
+		"last_refresh": st.LastRefresh,
+	})
 }
 
 func (g *kiloGateway) handleModels(w http.ResponseWriter, r *http.Request) {
@@ -530,8 +606,21 @@ func (g *kiloGateway) handleChat(w http.ResponseWriter, r *http.Request) {
 	}
 	_ = json.Unmarshal(body, &peek) // 解析失败不拦：原样转发由上游裁决，别在这里编错误
 	upBody := body
-	if strings.HasPrefix(peek.Model, "kilo/") {
-		upBody = rewriteModel(body, strings.TrimPrefix(peek.Model, "kilo/"))
+	modelID := peek.Model
+	if strings.HasPrefix(modelID, "kilo/") {
+		modelID = strings.TrimPrefix(modelID, "kilo/")
+		upBody = rewriteModel(body, modelID)
+	}
+
+	// 独立审查 B7：free_only 不能只是展示过滤，否则客户端编一个付费档 id
+	// 就绕过「只勾免费模型」直接打上游（还可能产生非预期计费/训练口径）。
+	// 轻量边界：仅在目录**已成功拉取**时校验；目录不可用/尚未首拉时放行，
+	// 不因上游抖动把整条推理链打死（与「失败不拖垮管理面」同原则）。
+	if kiloFreeOnly(g.mgr.loadConfig()) {
+		if blocked, reason := g.isModelBlockedByFreeOnly(modelID); blocked {
+			writeKiloError(w, http.StatusBadRequest, reason)
+			return
+		}
 	}
 
 	client, err := g.upstreamClient()
