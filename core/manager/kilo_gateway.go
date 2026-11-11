@@ -158,8 +158,7 @@ func (g *kiloGateway) Start() error {
 		return nil
 	}
 	port := g.mgr.managerKiloPort()
-	addr := fmt.Sprintf("127.0.0.1:%d", port)
-	ln, err := net.Listen("tcp", addr)
+	ln, err := g.listenOn(port)
 	if err != nil {
 		g.mu.Lock()
 		g.state = "failed"
@@ -167,7 +166,18 @@ func (g *kiloGateway) Start() error {
 		g.mu.Unlock()
 		return err
 	}
+	g.serveOn(ln)
+	return nil
+}
 
+// listenOn 在指定端口建立监听（0 = 由系统分配，测试用）。
+func (g *kiloGateway) listenOn(port uint16) (net.Listener, error) {
+	addr := fmt.Sprintf("127.0.0.1:%d", port)
+	return net.Listen("tcp", addr)
+}
+
+// serveOn 在已有监听上起服务并登记状态（Start 与单测共用）。
+func (g *kiloGateway) serveOn(ln net.Listener) {
 	srv := &http.Server{
 		Handler:           g.apiMux(),
 		ReadHeaderTimeout: 15 * time.Second,
@@ -178,6 +188,7 @@ func (g *kiloGateway) Start() error {
 	g.lastErr = ""
 	g.mu.Unlock()
 
+	addr := ln.Addr().String()
 	go func() {
 		slog.Info("kilo gateway listening", "addr", addr)
 		if err := srv.Serve(ln); err != nil && err != http.ErrServerClosed {
@@ -195,7 +206,6 @@ func (g *kiloGateway) Start() error {
 			slog.Warn("kilo catalog initial refresh failed", "error", err)
 		}
 	}()
-	return nil
 }
 
 // Stop 停止监听（幂等）。
