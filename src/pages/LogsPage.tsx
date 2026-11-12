@@ -14,6 +14,7 @@ import {
   Trash2,
 } from 'lucide-react'
 import { api, type CallLogRecord } from '../lib/api'
+import { VENDOR_OPTIONS, VENDOR_LABEL, vendorOf, vendorMatches, type VendorKind } from '../lib/vendor'
 
 const fmtTime = (ts: string) => {
   try {
@@ -236,9 +237,14 @@ const LogRow = memo(function LogRow({
             {issueLabel(rec)}
           </span>
         )}
-        {rec.source && (
-          <span className="shrink-0 text-[11px] text-indigo-700 bg-indigo-100 rounded-md px-2 py-0.5">
-            {rec.source}
+        {/* 阶段 L E3：显示供应商分类标签（旧 source 实测多为空，改为稳定口径） */}
+        <span className="shrink-0 text-[11px] text-indigo-700 bg-indigo-100 rounded-md px-2 py-0.5">
+          {VENDOR_LABEL[vendorOf(rec)]}
+        </span>
+        {/* Kilo 会静默换模型：直接展示上游实际返回的 model */}
+        {rec.actual_model && rec.actual_model !== rec.model && (
+          <span className="shrink-0 text-[11px] text-amber-700 bg-amber-50 rounded-md px-2 py-0.5" title="上游实际返回的模型">
+            实际: {rec.actual_model}
           </span>
         )}
         <span className="text-zinc-500 text-xs tabular-nums shrink-0">{fmtTime(rec.ts)}</span>
@@ -321,6 +327,8 @@ export default function LogsPage({
   const [onlyIssues, setOnlyIssues] = useState(false)
   // 按天筛选：'' = 全部日期
   const [dateFilter, setDateFilter] = useState('')
+  // 阶段 L：供应商筛选（'' = 全部；与日期/关键词/只看失败联动）
+  const [vendorFilter, setVendorFilter] = useState<VendorKind>('')
   // 视图切换：日志列表 / 时段分析 / 节点分析 / 错误分析
   const [view, setView] = useState<'list' | 'hour' | 'node' | 'error'>('list')
   const [expanded, setExpanded] = useState<Set<string>>(new Set())
@@ -415,13 +423,15 @@ export default function LogsPage({
     return logs.filter((l) => {
       if (onlyIssues && !hasIssue(l)) return false
       if (dateFilter && (l.ts || '').slice(0, 10) !== dateFilter) return false
+      // 阶段 L：供应商维度（口径见 src/lib/vendor.ts，与后端 ClassifyVendor 同款）
+      if (!vendorMatches(l, vendorFilter)) return false
       if (keyword) {
         const hay = [l.model || '', l.path || '', l.err_msg || '', l.req_id || ''].join(' ')
         if (!hay.includes(keyword)) return false
       }
       return true
     })
-  }, [logs, onlyIssues, dateFilter, keyword])
+  }, [logs, onlyIssues, dateFilter, vendorFilter, keyword])
 
   // 前端分页：每页 100 条；页码 clamp 到有效范围（清空/删除/筛选收窄后安全复位，不跳页）
   const totalPages = Math.max(1, Math.ceil(visible.length / PAGE_SIZE))
@@ -517,6 +527,17 @@ export default function LogsPage({
             异常/切换 <b>{issueCount}</b>
           </span>
         </div>
+        {/* 阶段 L：供应商筛选（始终渲染，不依赖日期数量） */}
+        <select
+          value={vendorFilter}
+          onChange={(e) => { setVendorFilter(e.target.value as VendorKind); setPage(1) }}
+          className="px-2.5 py-1.5 rounded-lg border border-zinc-200 bg-white text-[13px] text-zinc-600 outline-none"
+          title="按供应商筛选"
+        >
+          {VENDOR_OPTIONS.map((o) => (
+            <option key={o.value} value={o.value}>{o.label}</option>
+          ))}
+        </select>
         {dates.length > 1 && (
         <select
           value={dateFilter}
@@ -598,17 +619,17 @@ export default function LogsPage({
       {logs.length > 0 && visible.length === 0 && null}
       <div className="flex items-center gap-2 text-zinc-400 text-xs mt-4">
         <Activity size={12} />
-        每 5 秒自动刷新 · 保留上限可在设置页调整
+        每 5 秒自动刷新 · 日志保留上限可在设置页调整 · 供应商筛选与日期/关键词联动
       </div>
       </>
       )}
 
-      {/* 时段分析（阶段4填充） */}
-      {view === 'hour' && <HourAnalysisView logs={logs} />}
+      {/* 时段分析（阶段4填充）；阶段 L E1：传 visible，让日期/关键词/供应商/只看失败筛选联动 */}
+      {view === 'hour' && <HourAnalysisView logs={visible} />}
       {/* 节点分析（阶段4填充） */}
-      {view === 'node' && <NodeAnalysisView logs={logs} />}
+      {view === 'node' && <NodeAnalysisView logs={visible} />}
       {/* 错误分析：429/错误码分布与恢复时间（结构化字段，供策略调参与离线挖掘） */}
-      {view === 'error' && <ErrorAnalysisView logs={logs} />}
+      {view === 'error' && <ErrorAnalysisView logs={visible} />}
     </div>
   )
 }

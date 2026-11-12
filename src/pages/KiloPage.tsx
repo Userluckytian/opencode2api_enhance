@@ -9,7 +9,7 @@ import {
   ShieldAlert,
   Square,
 } from 'lucide-react'
-import { api, type KiloCallRecord, type KiloGatewayStatus, type KiloModelEntry } from '../lib/api'
+import { api, type KiloGatewayStatus, type KiloModelEntry } from '../lib/api'
 
 /**
  * Kilo 独立网关页面（阶段 K）。
@@ -50,7 +50,6 @@ function DataPolicyBanner() {
 export default function KiloPage({ toast }: { toast: (msg: string, ok?: boolean) => void }) {
   const [status, setStatus] = useState<KiloGatewayStatus | null>(null)
   const [models, setModels] = useState<KiloModelEntry[]>([])
-  const [calls, setCalls] = useState<KiloCallRecord[]>([])
   const [loading, setLoading] = useState(true)
   const [busy, setBusy] = useState<'start' | 'stop' | 'toggle' | 'refresh' | null>(null)
 
@@ -68,12 +67,6 @@ export default function KiloPage({ toast }: { toast: (msg: string, ok?: boolean)
       if (aliveRef.current) setModels(mv.models ?? [])
     } catch {
       /* 目录读不到不阻断页面 */
-    }
-    try {
-      const c = await api.kiloCalls()
-      if (aliveRef.current) setCalls(c.calls ?? [])
-    } catch {
-      /* 观测账本读不到不阻断页面 */
     }
     if (aliveRef.current) setLoading(false)
   }, [])
@@ -376,66 +369,10 @@ export default function KiloPage({ toast }: { toast: (msg: string, ok?: boolean)
         </div>
       </div>
 
-      {/* 需求 #1：每次请求的上游真实响应模型 */}
-      <div className="rounded-2xl border border-zinc-200 bg-white p-4">
-        <div className="mb-2 flex items-center justify-between">
-          <div className="text-[15px] font-semibold text-zinc-800">最近调用 · 实际模型</div>
-          <span className="text-[11.5px] text-zinc-400">
-            上游会静默换模型，此处展示每次请求真实返回的 model
-          </span>
-        </div>
-        {calls.length === 0 ? (
-          <div className="rounded-xl border border-zinc-200 bg-zinc-50/60 px-3 py-5 text-center text-[12.5px] text-zinc-400">
-            暂无调用记录（点「试跑」或从 30080 发一次请求）
-          </div>
-        ) : (
-          <div className="max-h-[300px] overflow-y-auto overflow-x-hidden rounded-xl border border-zinc-200">
-            <table className="w-full text-[12.5px]">
-              <thead className="sticky top-0 z-10 bg-zinc-50 text-left text-zinc-500 shadow-[0_1px_0_0_#e4e4e7]">
-                <tr>
-                  <th className="px-3 py-2 font-medium">时间</th>
-                  <th className="px-3 py-2 font-medium">请求模型</th>
-                  <th className="px-3 py-2 font-medium">实际返回</th>
-                  <th className="px-3 py-2 font-medium">状态</th>
-                  <th className="px-3 py-2 font-medium">耗时</th>
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-zinc-100">
-                {calls.slice(0, 10).map((c, i) => (
-                  <tr key={`${c.time}-${i}`} className="hover:bg-zinc-50/60">
-                    <td className="px-3 py-2 text-zinc-500">{c.time}</td>
-                    <td className="px-3 py-2 font-mono text-zinc-600">{c.requested || '—'}</td>
-                    <td className="px-3 py-2 font-mono text-zinc-800">
-                      {c.actual_known ? (
-                        <span className={clsx(c.actual !== c.requested && 'text-amber-700')}>
-                          {c.actual}
-                          {c.actual !== c.requested && (
-                            <span className="ml-1.5 text-[11px] text-amber-600">≠ 请求名</span>
-                          )}
-                        </span>
-                      ) : (
-                        <span className="text-zinc-400">未取到</span>
-                      )}
-                    </td>
-                    <td className="px-3 py-2">
-                      <span
-                        className={clsx(
-                          'rounded px-1.5 py-0.5 text-[11px]',
-                          c.status === 200
-                            ? 'bg-green-50 text-green-700'
-                            : 'bg-rose-50 text-rose-700',
-                        )}
-                      >
-                        {c.status}
-                      </span>
-                    </td>
-                    <td className="px-3 py-2 text-zinc-500">{c.duration_ms} ms</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        )}
+      {/* 阶段 L：调用记录已持久化并并入统一日志，见【日志】页（可按供应商筛选） */}
+      <div className="rounded-2xl border border-zinc-200 bg-zinc-50/60 px-4 py-3 text-[12.5px] text-zinc-500">
+        每次调用的真实响应模型已并入<b className="text-zinc-700">「日志」</b>页（持久化、重启不丢），
+        在日志页用「供应商 → Kilo」筛选即可查看。
       </div>
     </div>
   )
