@@ -583,6 +583,17 @@ export type KiloModelsView = {
   data_policy_reference: string
 }
 
+/** 一次 Kilo chat 调用的真实模型观测（需求 #1） */
+export type KiloCallRecord = {
+  time: string
+  requested: string
+  actual: string
+  status: number
+  duration_ms: number
+  stream: boolean
+  actual_known: boolean
+}
+
 /** 免费层引擎（40080）状态 */
 export type FreeTierEngineStatus = {
   /** stopped | starting | ready | failed */
@@ -1191,6 +1202,10 @@ export const api = {
   /** 开关（enabled / free_only 至少给一个）；返回切换后的生效状态 */
   kiloToggle: (patch: { enabled?: boolean; free_only?: boolean }) =>
     req<KiloGatewayStatus>('POST', '/kilo/toggle', patch),
+  /** 最近调用的真实模型观测（新→旧） */
+  kiloCalls: () => req<{ calls: KiloCallRecord[] }>('GET', '/kilo/calls'),
+  /** 手动强制实拉上游目录（绕过节流）；返回刷新后的状态 */
+  kiloRefresh: () => req<{ total: number; status: KiloGatewayStatus }>('POST', '/kilo/refresh'),
   freeTierProbe: (model?: string) =>
     req<ModelProbeResponse>('POST', '/free-tier/probe', { model: model ?? '' }),
   diag: () => req<DiagReport>('GET', '/diag'),

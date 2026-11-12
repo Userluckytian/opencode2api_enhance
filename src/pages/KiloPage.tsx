@@ -1,7 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import clsx from 'clsx'
 import {
-  AlertTriangle,
   Copy,
   Loader2,
   Play,
@@ -10,21 +9,17 @@ import {
   ShieldAlert,
   Square,
 } from 'lucide-react'
-import { api, type KiloGatewayStatus, type KiloModelEntry } from '../lib/api'
+import { api, type KiloCallRecord, type KiloGatewayStatus, type KiloModelEntry } from '../lib/api'
 
 /**
  * Kilo 独立网关页面（阶段 K）。
  *
- * 设计要点（每条都有理由，不是装饰）：
- *  1. **训练警示横幅常驻、不可关闭**：Kilo 免费档的上游条款写明请求内容可能被
- *     用于模型训练（实测 12/12 免费模型 `mayTrainOnYourPrompts=true`）。这是
- *     需求本体，所以不给「×」按钮 —— 用户可以无视，但不会被界面骗。
- *  2. **默认只勾免费模型**：上游目录 385 个模型里只有 12 个是免费档，其余是
- *     付费档；默认全开会诱导误用。
- *  3. **「实际模型」列**：上游会静默换模型（请求 kilo-auto/free，实测返回
- *     nemotron-3-ultra-550b），不显示实际模型等于让用户误判自己在用哪个模型。
- *  4. **独立入口**：本页对应 30080 端口，与 OpenCode(40080)/自定义源(50080)
- *     没有任何关联，地址与密钥单独展示。
+ * 设计要点：
+ *  1. 训练警示横幅常驻、不可关闭（需求本体），按用户意见精简为一句话；
+ *  2. 只保留「只显示免费模型」一个开关：勾选=只免费，不勾=全部；
+ *  3. 目录来自上游实时拉取且会漂移，提供手动强制刷新；
+ *  4. 「最近调用」展示每次请求上游**真实返回**的模型（上游会静默换模型），
+ *     网关只旁路观测、不改响应体。
  */
 
 /** 上下文窗口展示：1048576 → 1M，128000 → 128K。 */
@@ -42,29 +37,12 @@ function stateBadge(state: string, running: boolean): [string, string] {
   return ['bg-zinc-100 text-zinc-500', '已停止']
 }
 
-/** 数据政策警示横幅：常驻、不可关闭。 */
-function DataPolicyBanner({ models }: { models: KiloModelEntry[] }) {
-  const risky = models.filter((m) => m.may_train).length
+/** 数据政策警示横幅：常驻、不可关闭（2-1：按用户意见只保留一句）。 */
+function DataPolicyBanner() {
   return (
-    <div className="rounded-2xl border border-rose-200 bg-rose-50/80 px-4 py-3">
-      <div className="flex items-start gap-2.5">
-        <ShieldAlert className="mt-0.5 h-4.5 w-4.5 shrink-0 text-rose-600" />
-        <div className="min-w-0">
-          <div className="text-[14px] font-semibold text-rose-800">
-            提示词可能被上游用于训练
-          </div>
-          <div className="mt-1 text-[12.5px] leading-relaxed text-rose-700">
-            Kilo 免费档的服务条款声明：你发送的请求内容可能被用于模型训练与记录。
-            当前目录中 <b>{risky}</b> 个模型带此标注
-            {models.length > 0 && `（共 ${models.length} 个在列）`}。
-            <b>请勿提交个人隐私、密钥或机密业务数据。</b>
-          </div>
-          <div className="mt-1.5 text-[11.5px] text-rose-600/80">
-            依据：NVIDIA API Trial 使用条款「do not submit personal or confidential data」；
-            上游响应带 <code className="font-mono">X-Kilo-Data-Policy</code> 头标记本策略。
-          </div>
-        </div>
-      </div>
+    <div className="flex items-center gap-2 rounded-2xl border border-rose-200 bg-rose-50/80 px-4 py-2.5">
+      <ShieldAlert className="h-4 w-4 shrink-0 text-rose-600" />
+      <span className="text-[13.5px] font-medium text-rose-800">数据可能被上游训练</span>
     </div>
   )
 }
@@ -72,31 +50,32 @@ function DataPolicyBanner({ models }: { models: KiloModelEntry[] }) {
 export default function KiloPage({ toast }: { toast: (msg: string, ok?: boolean) => void }) {
   const [status, setStatus] = useState<KiloGatewayStatus | null>(null)
   const [models, setModels] = useState<KiloModelEntry[]>([])
+  const [calls, setCalls] = useState<KiloCallRecord[]>([])
   const [loading, setLoading] = useState(true)
-  const [busy, setBusy] = useState<'start' | 'stop' | 'toggle' | null>(null)
-  const [showAll, setShowAll] = useState(false)
-  // 最近一次真实调用返回的模型（用于「实际模型」列）
-  const [lastActual, setLastActual] = useState<string>('')
+  const [busy, setBusy] = useState<'start' | 'stop' | 'toggle' | 'refresh' | null>(null)
 
   const aliveRef = useRef(true)
 
   const reload = useCallback(async () => {
     try {
       const s = await api.kiloStatus()
-      if (!aliveRef.current) return
-      setStatus(s)
+      if (aliveRef.current) setStatus(s)
     } catch {
       /* 状态读不到不阻断页面 */
     }
     try {
       const mv = await api.kiloModels()
-      if (!aliveRef.current) return
-      setModels(mv.models ?? [])
+      if (aliveRef.current) setModels(mv.models ?? [])
     } catch {
       /* 目录读不到不阻断页面 */
-    } finally {
-      if (aliveRef.current) setLoading(false)
     }
+    try {
+      const c = await api.kiloCalls()
+      if (aliveRef.current) setCalls(c.calls ?? [])
+    } catch {
+      /* 观测账本读不到不阻断页面 */
+    }
+    if (aliveRef.current) setLoading(false)
   }, [])
 
   useEffect(() => {
@@ -126,7 +105,7 @@ export default function KiloPage({ toast }: { toast: (msg: string, ok?: boolean)
       const next = !status.enabled
       const s = await api.kiloToggle({ enabled: next })
       setStatus(s)
-      toast(next ? 'Kilo 网关已启用' : 'Kilo 网关已停用', next)
+      toast(next ? 'Kilo 网关已启用' : 'Kilo 网关停用', next)
       void reload()
     } catch (e) {
       toast((e as Error).message, false)
@@ -135,6 +114,7 @@ export default function KiloPage({ toast }: { toast: (msg: string, ok?: boolean)
     }
   }
 
+  /** 2-2：唯一开关，勾选=只免费，不勾=全部（直接写后端配置）。 */
   const toggleFreeOnly = async () => {
     if (!status) return
     setBusy('toggle')
@@ -142,7 +122,7 @@ export default function KiloPage({ toast }: { toast: (msg: string, ok?: boolean)
       const next = !status.free_only
       const s = await api.kiloToggle({ free_only: next })
       setStatus(s)
-      toast(next ? '已切回「只显示免费模型」' : '已显示全部模型（含付费档）', true)
+      toast(next ? '只显示免费模型' : '显示全部模型（含付费档）', true)
       void reload()
     } catch (e) {
       toast((e as Error).message, false)
@@ -151,7 +131,22 @@ export default function KiloPage({ toast }: { toast: (msg: string, ok?: boolean)
     }
   }
 
-  // 试跑一次：直连 30080（绕过面板），把上游真实模型名记下来。
+  /** 2-3：手动强制实拉上游目录（绕过 10s 节流）。 */
+  const refreshCatalog = async () => {
+    setBusy('refresh')
+    try {
+      const r = await api.kiloRefresh()
+      setStatus(r.status)
+      toast(`目录已刷新：上游共 ${r.total} 个模型`, true)
+      void reload()
+    } catch (e) {
+      toast((e as Error).message, false)
+    } finally {
+      setBusy(null)
+    }
+  }
+
+  // 试跑一次：直连 30080，真实模型由后端观测账本统一记录。
   const probe = async () => {
     if (!status) return
     setBusy('start')
@@ -175,13 +170,13 @@ export default function KiloPage({ toast }: { toast: (msg: string, ok?: boolean)
       }
       const j = JSON.parse(text)
       const content = j?.choices?.[0]?.message?.content ?? ''
-      if (j?.model) setLastActual(j.model)
       toast(
         content
           ? `试跑成功：${content.slice(0, 60)}`
           : '试跑返回了空内容（推理型模型可能需要更大 max_tokens）',
         Boolean(content),
       )
+      void reload()
     } catch (e) {
       toast((e as Error).message, false)
     } finally {
@@ -190,12 +185,13 @@ export default function KiloPage({ toast }: { toast: (msg: string, ok?: boolean)
   }
 
   const [badgeCls, badgeText] = stateBadge(status?.state ?? 'stopped', status?.running ?? false)
-  const visible = showAll ? models : models.filter((m) => m.free)
+  // 2-2：后端已按 free_only 过滤，这里不再二次过滤（两个勾选合并为一个）。
+  const visible = models
 
   return (
     <div className="space-y-4">
       {/* 训练警示：常驻、不可关闭 */}
-      <DataPolicyBanner models={models} />
+      <DataPolicyBanner />
 
       {/* 状态卡 */}
       <div className="rounded-2xl border border-zinc-200 bg-white p-4">
@@ -211,11 +207,17 @@ export default function KiloPage({ toast }: { toast: (msg: string, ok?: boolean)
           </div>
           <div className="flex items-center gap-2">
             <button
-              onClick={() => void reload()}
-              className="rounded-lg border border-zinc-200 px-2.5 py-1.5 text-[12.5px] text-zinc-600 hover:bg-zinc-50"
+              onClick={() => void refreshCatalog()}
+              disabled={busy !== null}
+              title="强制实拉上游 /models（上游免费档会漂移）"
+              className="rounded-lg border border-zinc-200 px-2.5 py-1.5 text-[12.5px] text-zinc-600 hover:bg-zinc-50 disabled:opacity-40"
             >
-              <RefreshCw className="mr-1 inline h-3.5 w-3.5" />
-              刷新
+              {busy === 'refresh' ? (
+                <Loader2 className="mr-1 inline h-3.5 w-3.5 animate-spin" />
+              ) : (
+                <RefreshCw className="mr-1 inline h-3.5 w-3.5" />
+              )}
+              刷新目录
             </button>
             <button
               onClick={() => void probe()}
@@ -303,34 +305,17 @@ export default function KiloPage({ toast }: { toast: (msg: string, ok?: boolean)
       <div className="rounded-2xl border border-zinc-200 bg-white p-4">
         <div className="flex flex-wrap items-center justify-between gap-3">
           <div className="text-[15px] font-semibold text-zinc-800">可用模型</div>
-          <div className="flex items-center gap-4">
-            <label className="flex cursor-pointer items-center gap-1.5 text-[12.5px] text-zinc-600">
-              <input
-                type="checkbox"
-                checked={status?.free_only ?? true}
-                onChange={() => void toggleFreeOnly()}
-                disabled={busy !== null}
-              />
-              只显示免费模型
-            </label>
-            <label className="flex cursor-pointer items-center gap-1.5 text-[12.5px] text-zinc-600">
-              <input
-                type="checkbox"
-                checked={showAll}
-                onChange={() => setShowAll((v) => !v)}
-              />
-              显示全部目录
-            </label>
-          </div>
+          {/* 2-2：只保留一个开关 */}
+          <label className="flex cursor-pointer items-center gap-1.5 text-[12.5px] text-zinc-600">
+            <input
+              type="checkbox"
+              checked={status?.free_only ?? true}
+              onChange={() => void toggleFreeOnly()}
+              disabled={busy !== null}
+            />
+            只显示免费模型
+          </label>
         </div>
-
-        {lastActual && (
-          <div className="mt-2.5 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-[12.5px] text-amber-800">
-            最近一次试跑，上游<strong>实际返回</strong>的模型是{' '}
-            <code className="font-mono">{lastActual}</code>
-            {lastActual !== models[0]?.id && '（上游会静默换模型，故单独展示）'}
-          </div>
-        )}
 
         <div className="mt-3 overflow-hidden rounded-xl border border-zinc-200">
           <table className="w-full text-[12.5px]">
@@ -340,19 +325,18 @@ export default function KiloPage({ toast }: { toast: (msg: string, ok?: boolean)
                 <th className="px-3 py-2 font-medium">档位</th>
                 <th className="px-3 py-2 font-medium">工具调用</th>
                 <th className="px-3 py-2 font-medium">上下文</th>
-                <th className="px-3 py-2 font-medium">数据去向</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-zinc-100">
               {loading ? (
                 <tr>
-                  <td colSpan={5} className="px-3 py-6 text-center text-zinc-400">
+                  <td colSpan={4} className="px-3 py-6 text-center text-zinc-400">
                     <Loader2 className="mx-auto h-4 w-4 animate-spin" />
                   </td>
                 </tr>
               ) : visible.length === 0 ? (
                 <tr>
-                  <td colSpan={5} className="px-3 py-6 text-center text-zinc-400">
+                  <td colSpan={4} className="px-3 py-6 text-center text-zinc-400">
                     目录为空（上游未拉通或已全被过滤）
                   </td>
                 </tr>
@@ -380,19 +364,6 @@ export default function KiloPage({ toast }: { toast: (msg: string, ok?: boolean)
                       {m.supports_tools ? '支持' : '不支持'}
                     </td>
                     <td className="px-3 py-2 text-zinc-500">{fmtCtx(m.context_window)}</td>
-                    <td className="px-3 py-2">
-                      {m.may_train ? (
-                        <span
-                          className="inline-flex items-center gap-1 rounded bg-rose-50 px-1.5 py-0.5 text-[11px] text-rose-700"
-                          title="上游声明：请求内容可能被用于模型训练"
-                        >
-                          <AlertTriangle className="h-3 w-3" />
-                          可能用于训练
-                        </span>
-                      ) : (
-                        <span className="text-[11px] text-zinc-400">未标注</span>
-                      )}
-                    </td>
                   </tr>
                 ))
               )}
@@ -400,8 +371,70 @@ export default function KiloPage({ toast }: { toast: (msg: string, ok?: boolean)
           </table>
         </div>
         <div className="mt-2 text-[11.5px] text-zinc-400">
-          目录来自上游实时拉取（不硬编码）；上游免费档会漂移 —— 2026-11-11 实测为 12 个。
+          目录来自上游实时拉取（不硬编码）；上游免费档会漂移，可点「刷新目录」强制重拉。
         </div>
+      </div>
+
+      {/* 需求 #1：每次请求的上游真实响应模型 */}
+      <div className="rounded-2xl border border-zinc-200 bg-white p-4">
+        <div className="mb-2 flex items-center justify-between">
+          <div className="text-[15px] font-semibold text-zinc-800">最近调用 · 实际模型</div>
+          <span className="text-[11.5px] text-zinc-400">
+            上游会静默换模型，此处展示每次请求真实返回的 model
+          </span>
+        </div>
+        {calls.length === 0 ? (
+          <div className="rounded-xl border border-zinc-200 bg-zinc-50/60 px-3 py-5 text-center text-[12.5px] text-zinc-400">
+            暂无调用记录（点「试跑」或从 30080 发一次请求）
+          </div>
+        ) : (
+          <div className="overflow-hidden rounded-xl border border-zinc-200">
+            <table className="w-full text-[12.5px]">
+              <thead className="bg-zinc-50 text-left text-zinc-500">
+                <tr>
+                  <th className="px-3 py-2 font-medium">时间</th>
+                  <th className="px-3 py-2 font-medium">请求模型</th>
+                  <th className="px-3 py-2 font-medium">实际返回</th>
+                  <th className="px-3 py-2 font-medium">状态</th>
+                  <th className="px-3 py-2 font-medium">耗时</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-zinc-100">
+                {calls.slice(0, 10).map((c, i) => (
+                  <tr key={`${c.time}-${i}`} className="hover:bg-zinc-50/60">
+                    <td className="px-3 py-2 text-zinc-500">{c.time}</td>
+                    <td className="px-3 py-2 font-mono text-zinc-600">{c.requested || '—'}</td>
+                    <td className="px-3 py-2 font-mono text-zinc-800">
+                      {c.actual_known ? (
+                        <span className={clsx(c.actual !== c.requested && 'text-amber-700')}>
+                          {c.actual}
+                          {c.actual !== c.requested && (
+                            <span className="ml-1.5 text-[11px] text-amber-600">≠ 请求名</span>
+                          )}
+                        </span>
+                      ) : (
+                        <span className="text-zinc-400">未取到</span>
+                      )}
+                    </td>
+                    <td className="px-3 py-2">
+                      <span
+                        className={clsx(
+                          'rounded px-1.5 py-0.5 text-[11px]',
+                          c.status === 200
+                            ? 'bg-green-50 text-green-700'
+                            : 'bg-rose-50 text-rose-700',
+                        )}
+                      >
+                        {c.status}
+                      </span>
+                    </td>
+                    <td className="px-3 py-2 text-zinc-500">{c.duration_ms} ms</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
       </div>
     </div>
   )

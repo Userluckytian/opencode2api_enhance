@@ -59,6 +59,22 @@ type KiloModelEntry struct {
 	ProviderName  string `json:"provider_name,omitempty"`
 }
 
+// KiloCallRecord 一次 chat 调用的真实模型记录（阶段 K 后续需求 #1）。
+//
+// 上游会静默换模型（kilo-auto/free 实测返回 nemotron-3-ultra-550b），
+// 网关坚持「响应体原样透传」，所以这里额外记一份**观测账本**：请求名、
+// 上游真实返回的 model、状态码、耗时。仅内存保留最近 N 条，不落盘、
+// 不含请求内容/密钥（避免 PII 与秘密外泄）。
+type KiloCallRecord struct {
+	Time        string `json:"time"`
+	Requested   string `json:"requested"`
+	Actual      string `json:"actual"`
+	Status      int    `json:"status"`
+	DurationMs  int64  `json:"duration_ms"`
+	Stream      bool   `json:"stream"`
+	ActualKnown bool   `json:"actual_known"`
+}
+
 // KiloGatewayStatus 独立网关状态快照（前端契约，对齐 FreeTierEngineStatus 风格）。
 type KiloGatewayStatus struct {
 	State      string `json:"state"` // stopped | ready | failed
@@ -99,7 +115,14 @@ type kiloGateway struct {
 	cLast      time.Time
 	cErr       string
 	cLastTryAt time.Time // 节流戳（含失败尝试，防热循环）
+
+	// 最近调用观测账本（需求 #1：每次请求看真实响应模型）。
+	callMu sync.Mutex
+	calls  []KiloCallRecord
+	callsN int
 }
+
+const kiloCallHistoryMax = 30
 
 // 上游请求注入点：单测把 KiloUpstreamBase/Client 换成本地假上游。
 var (
@@ -639,18 +662,129 @@ func (g *kiloGateway) handleChat(w http.ResponseWriter, r *http.Request) {
 		upReq.Header.Set("Accept", "text/event-stream")
 	}
 
+	// 需求 #1：计时从「发上游请求前」开始（等到首个响应头 + 复制响应体都在内），
+	// 否则只统计本地 io.Copy 会恒为 0ms，面板上的耗时没有意义。
+	started := time.Now()
 	resp, err := client.Do(upReq)
 	if err != nil {
+		// 传输失败也要入账：用户要的是「每次请求」都能看到结果，失败同样可见。
+		g.recordCall(KiloCallRecord{
+			Time:       started.Format("15:04:05"),
+			Requested:  peek.Model,
+			Actual:     "",
+			Status:     http.StatusGatewayTimeout,
+			DurationMs: time.Since(started).Milliseconds(),
+			Stream:     peek.Stream,
+		})
 		// 传输失败才是我们的错误；上游业务错误在下面的 status 分支透传。
 		writeKiloError(w, http.StatusGatewayTimeout, "kilo upstream unreachable: "+err.Error())
 		return
 	}
 	defer resp.Body.Close()
 
+	// 需求 #1：观测上游**真实**返回的 model。响应体原样透传不变，只在
+	// 复制流的同时旁路解析前若干字节（JSON 完整响应 / SSE 首个 data chunk
+	// 都带 model 字段），记入内存账本供面板「最近调用」展示。
+	obs := &kiloModelObserver{buf: make([]byte, 0, 4096)}
+	streamBody := io.TeeReader(resp.Body, obs)
+
 	// 状态码与 Content-Type 原样复制 + 警示头（上面已 Set，这里再保证错误路径也在）。
 	copyHeadersPassthrough(w, resp.Header)
 	w.WriteHeader(resp.StatusCode)
-	_, _ = io.Copy(w, resp.Body)
+	_, _ = io.Copy(w, streamBody)
+
+	g.recordCall(KiloCallRecord{
+		Time:        started.Format("15:04:05"),
+		Requested:   peek.Model,
+		Actual:      obs.Model(),
+		Status:      resp.StatusCode,
+		DurationMs:  time.Since(started).Milliseconds(),
+		Stream:      peek.Stream,
+		ActualKnown: obs.Model() != "",
+	})
+}
+
+// kiloModelObserver 从透传字节流里提取上游真实 model。
+// 只看前 8KB（JSON 头部或 SSE 首个 data 行必带 model），避免缓冲整个流；
+// 用 io.TeeReader 旁路，不改变写回客户端的内容。
+type kiloModelObserver struct {
+	buf []byte
+}
+
+func (o *kiloModelObserver) Write(p []byte) (int, error) {
+	if len(o.buf) < 8192 {
+		o.buf = append(o.buf, p[:min(len(p), 8192-len(o.buf))]...)
+	}
+	return len(p), nil
+}
+
+// Model 从已观测字节里解析 model：先试整段 JSON，再逐行找 SSE 的 data: {...}。
+func (o *kiloModelObserver) Model() string {
+	if m := modelFromJSON(o.buf); m != "" {
+		return m
+	}
+	for _, line := range strings.Split(string(o.buf), "\n") {
+		line = strings.TrimSpace(line)
+		if !strings.HasPrefix(line, "data:") {
+			continue
+		}
+		payload := strings.TrimSpace(strings.TrimPrefix(line, "data:"))
+		if payload == "" || payload == "[DONE]" {
+			continue
+		}
+		if m := modelFromJSON([]byte(payload)); m != "" {
+			return m
+		}
+	}
+	return ""
+}
+
+func modelFromJSON(b []byte) string {
+	var v struct {
+		Model string `json:"model"`
+	}
+	if json.Unmarshal(b, &v) == nil {
+		return strings.TrimSpace(v.Model)
+	}
+	// 完整响应可能被截断在 8KB 边界：退化为正则式抽取顶层 "model":"..."。
+	if i := strings.Index(string(b), `"model"`); i >= 0 {
+		rest := b[i+7:]
+		if j := strings.IndexByte(string(rest), '"'); j >= 0 {
+			rest = rest[j+1:]
+			if k := strings.IndexByte(string(rest), '"'); k >= 0 {
+				return string(rest[:k])
+			}
+		}
+	}
+	return ""
+}
+
+// recordCall 追加一条观测（有界环形，最新在前）。
+func (g *kiloGateway) recordCall(rec KiloCallRecord) {
+	g.callMu.Lock()
+	defer g.callMu.Unlock()
+	g.calls = append([]KiloCallRecord{rec}, g.calls...)
+	if len(g.calls) > kiloCallHistoryMax {
+		g.calls = g.calls[:kiloCallHistoryMax]
+	}
+	g.callsN++
+}
+
+// RecentCalls 返回最近调用观测（新→旧）。
+func (g *kiloGateway) RecentCalls() []KiloCallRecord {
+	g.callMu.Lock()
+	defer g.callMu.Unlock()
+	return append([]KiloCallRecord(nil), g.calls...)
+}
+
+// RefreshCatalogNow 强制实拉上游目录（需求 #2-3 的手动刷新），
+// 绕过 10s 节流；成功才替换缓存。
+func (g *kiloGateway) RefreshCatalogNow() (int, error) {
+	entries, err := g.refreshCatalog()
+	if err != nil {
+		return 0, err
+	}
+	return len(entries), nil
 }
 
 // writeKiloError 网关自身错误的 JSON 形态（仅用于传输/内部错误）。

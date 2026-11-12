@@ -552,6 +552,101 @@ func TestKiloK4bRequestActuallyReachesUpstream(t *testing.T) {
 	}
 }
 
+// ---- 需求 #1：每次请求的上游真实响应模型观测 ----
+
+// TestKiloCallRecordsActualModel：非流式 + 流式（SSE）都要记下真实 model，
+// 且响应体必须原样透传（观测不能改写客户端拿到的内容）。
+func TestKiloCallRecordsActualModel(t *testing.T) {
+	models := `{"data":[{"id":"a:free","isFree":true,"mayTrainOnYourPrompts":true}]}`
+	t.Run("json", func(t *testing.T) {
+		var gotBody string
+		up := newKiloFakeUpstream(t, models, func(w http.ResponseWriter, r *http.Request, body []byte) {
+			gotBody = string(body)
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(w, `{"model":"nvidia/real-model:free","choices":[{"message":{"content":"hi"}}]}`)
+		})
+		m := kiloTestManager(t, up.srv.URL)
+		g, base := kiloTestGW(t, m)
+		resp, body := kiloPost(t, base, `{"model":"a:free","messages":[]}`)
+		if resp.StatusCode != 200 || !strings.Contains(body, "nvidia/real-model:free") {
+			t.Fatalf("响应必须原样透传，实际 %d: %s", resp.StatusCode, body)
+		}
+		if !strings.Contains(gotBody, `"model":"a:free"`) {
+			t.Fatalf("上游没收到请求: %s", gotBody)
+		}
+		calls := g.RecentCalls()
+		if len(calls) != 1 {
+			t.Fatalf("应记 1 条调用，实际 %d", len(calls))
+		}
+		if calls[0].Requested != "a:free" || calls[0].Actual != "nvidia/real-model:free" || !calls[0].ActualKnown {
+			t.Fatalf("真实模型观测错误: %+v", calls[0])
+		}
+		if calls[0].Status != 200 || calls[0].Stream {
+			t.Fatalf("状态/流标记错误: %+v", calls[0])
+		}
+	})
+
+	t.Run("sse", func(t *testing.T) {
+		up := newKiloFakeUpstream(t, models, func(w http.ResponseWriter, r *http.Request, body []byte) {
+			w.Header().Set("Content-Type", "text/event-stream")
+			_, _ = io.WriteString(w, "data: {\"model\":\"sse/real:free\",\"choices\":[{\"delta\":{\"content\":\"x\"}}]}\n\n")
+			_, _ = io.WriteString(w, "data: [DONE]\n\n")
+		})
+		m := kiloTestManager(t, up.srv.URL)
+		g, base := kiloTestGW(t, m)
+		req, _ := http.NewRequest(http.MethodPost, base+"/v1/chat/completions",
+			strings.NewReader(`{"model":"a:free","stream":true,"messages":[]}`))
+		req.Header.Set("Authorization", "Bearer "+unifiedGatewayKey)
+		req.Header.Set("Content-Type", "application/json")
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatalf("请求失败: %v", err)
+		}
+		raw, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if !strings.Contains(string(raw), "sse/real:free") {
+			t.Fatalf("SSE 响应未原样透传: %s", raw)
+		}
+		calls := g.RecentCalls()
+		if len(calls) != 1 || calls[0].Actual != "sse/real:free" || !calls[0].Stream {
+			t.Fatalf("SSE 真实模型观测错误: %+v", calls)
+		}
+	})
+}
+
+// TestKiloCallHistoryBounded：观测账本有界，不会无限增长。
+func TestKiloCallHistoryBounded(t *testing.T) {
+	m := New(t.TempDir())
+	g := m.KiloGateway()
+	for i := 0; i < kiloCallHistoryMax+10; i++ {
+		g.recordCall(KiloCallRecord{Time: "t", Requested: "r", Actual: "a"})
+	}
+	if got := len(g.RecentCalls()); got != kiloCallHistoryMax {
+		t.Fatalf("账本应有界 %d，实际 %d", kiloCallHistoryMax, got)
+	}
+	if g.RecentCalls()[0].Actual != "a" {
+		t.Fatal("最新记录应在最前")
+	}
+}
+
+// TestKiloRefreshCatalogNow：手动刷新绕过节流，强制实拉上游。
+func TestKiloRefreshCatalogNow(t *testing.T) {
+	up := newKiloFakeUpstream(t, `{"data":[{"id":"fresh:free","isFree":true}]}`, nil)
+	m := kiloTestManager(t, up.srv.URL)
+	g := m.KiloGateway()
+	if _, err := g.refreshCatalog(); err != nil {
+		t.Fatalf("首次拉取: %v", err)
+	}
+	// 立刻强制刷新（10s 节流内），应仍发起真实上游请求并成功
+	n, err := g.RefreshCatalogNow()
+	if err != nil {
+		t.Fatalf("强制刷新失败: %v", err)
+	}
+	if n != 1 {
+		t.Fatalf("目录条数 = %d, want 1", n)
+	}
+}
+
 // TestKiloK5bModelsEndpointHitsUpstream：/v1/models 必须真的来自上游目录，
 // 不能是硬编码清单（上游免费档会漂移：11-11 一天内 11→12 个）。
 func TestKiloK5bModelsEndpointHitsUpstream(t *testing.T) {

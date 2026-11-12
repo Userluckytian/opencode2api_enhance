@@ -367,6 +367,30 @@ func kiloGatewayModelsHandler(m *manager.Manager) http.HandlerFunc {
 	}
 }
 
+// kiloGatewayCallsHandler：最近调用观测（需求 #1，展示上游真实返回的 model）。
+func kiloGatewayCallsHandler(m *manager.Manager) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		writeJSONResp(w, map[string]any{"calls": m.KiloGateway().RecentCalls()})
+	}
+}
+
+// kiloGatewayRefreshHandler：手动强制实拉上游目录（需求 #2-3），
+// 绕过 10s 节流，返回刷新后的状态。
+func kiloGatewayRefreshHandler(m *manager.Manager) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			writeErrResp(w, http.StatusMethodNotAllowed, "POST only")
+			return
+		}
+		n, err := m.KiloGateway().RefreshCatalogNow()
+		if err != nil {
+			writeErrResp(w, http.StatusBadGateway, "目录刷新失败: "+err.Error())
+			return
+		}
+		writeJSONResp(w, map[string]any{"total": n, "status": m.KiloGateway().Status()})
+	}
+}
+
 // kiloGatewayToggleHandler POST body {enabled?:bool, free_only?:bool}：
 // 写配置（ConfigSet 持久化）+ 立即生效（Start/Stop），两段结果都回给前端，
 // 任何一段失败都不假装成功（引擎 reload 教训：成功=观测到期望值）。
@@ -598,6 +622,8 @@ func registerHTTPRoutes(mux *http.ServeMux, managerInst *manager.Manager, plugin
 	mux.HandleFunc("/api/admin/kilo/status", loggingMiddleware(requireAuth(kiloGatewayStatusHandler(managerInst))))
 	mux.HandleFunc("/api/admin/kilo/models", loggingMiddleware(requireAuth(kiloGatewayModelsHandler(managerInst))))
 	mux.HandleFunc("/api/admin/kilo/toggle", loggingMiddleware(requireAuth(kiloGatewayToggleHandler(managerInst))))
+	mux.HandleFunc("/api/admin/kilo/calls", loggingMiddleware(requireAuth(kiloGatewayCallsHandler(managerInst))))
+	mux.HandleFunc("/api/admin/kilo/refresh", loggingMiddleware(requireAuth(kiloGatewayRefreshHandler(managerInst))))
 	// 手动探测：对引擎发一次最小请求，用真实状态码判定模型可用性
 	mux.HandleFunc("/api/admin/free-tier/probe", loggingMiddleware(requireAuth(modelProbeHandler(managerInst))))
 	// 诊断：三端口自检 + 配置/二进制检查
