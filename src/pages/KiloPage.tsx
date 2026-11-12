@@ -317,9 +317,10 @@ export default function KiloPage({ toast }: { toast: (msg: string, ok?: boolean)
           </label>
         </div>
 
-        <div className="mt-3 overflow-hidden rounded-xl border border-zinc-200">
+        {/* 列表限高：超出内部滚动，表头吸顶（关掉 free_only 后 383 个模型也不会把页面撑爆）。 */}
+        <div className="mt-3 max-h-[420px] overflow-y-auto overflow-x-hidden rounded-xl border border-zinc-200">
           <table className="w-full text-[12.5px]">
-            <thead className="bg-zinc-50 text-left text-zinc-500">
+            <thead className="sticky top-0 z-10 bg-zinc-50 text-left text-zinc-500 shadow-[0_1px_0_0_#e4e4e7]">
               <tr>
                 <th className="px-3 py-2 font-medium">模型 ID</th>
                 <th className="px-3 py-2 font-medium">档位</th>
@@ -388,9 +389,9 @@ export default function KiloPage({ toast }: { toast: (msg: string, ok?: boolean)
             暂无调用记录（点「试跑」或从 30080 发一次请求）
           </div>
         ) : (
-          <div className="overflow-hidden rounded-xl border border-zinc-200">
+          <div className="max-h-[300px] overflow-y-auto overflow-x-hidden rounded-xl border border-zinc-200">
             <table className="w-full text-[12.5px]">
-              <thead className="bg-zinc-50 text-left text-zinc-500">
+              <thead className="sticky top-0 z-10 bg-zinc-50 text-left text-zinc-500 shadow-[0_1px_0_0_#e4e4e7]">
                 <tr>
                   <th className="px-3 py-2 font-medium">时间</th>
                   <th className="px-3 py-2 font-medium">请求模型</th>
