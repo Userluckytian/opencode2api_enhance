@@ -126,6 +126,8 @@ type kiloGateway struct {
 	callsN int
 	// callWriter 阶段 L：把观测持久化成 JSONL，供 ReadCallLog 合并。
 	callWriter *kiloCallWriter
+	// virtual 阶段 M：命名虚拟模型配置（独立 JSON，见 kilo_virtual.go）。
+	virtual *kiloVirtualStore
 }
 
 const kiloCallHistoryMax = 30
@@ -150,6 +152,7 @@ func (m *Manager) KiloGateway() *kiloGateway {
 	if m.kilo == nil {
 		m.kilo = &kiloGateway{mgr: m, state: "stopped"}
 		m.kilo.callWriter = newKiloCallWriter(m.KiloCallsLogPath())
+		m.kilo.virtual = newKiloVirtualStore(m)
 	}
 	return m.kilo
 }
