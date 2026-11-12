@@ -949,7 +949,8 @@ export type DayStats = {
   total_completion_tokens: number
   total_tokens: number
   by_model: ModelStat[]
-  by_node: GatewayNodeStat[]
+  /** 阶段 L E5：后端 stats_day.go 实际不返回该字段（历史契约不一致），保留可选以免运行时崩 */
+  by_node?: GatewayNodeStat[]
 }
 
 /** 失败原因计数器（阶段7）：节点 → 原因 → 次数 */

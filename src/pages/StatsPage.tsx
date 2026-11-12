@@ -2,12 +2,11 @@ import { Fragment, useCallback, useEffect, useRef, useState, type ReactNode } fr
 import clsx from 'clsx'
 import { BarChart3, ChevronDown, ChevronRight, RefreshCw, RotateCcw, Inbox, CalendarDays, Loader2 } from 'lucide-react'
 import { api, type StatsSummary, type DayStats, type FailCounts } from '../lib/api'
+import { VENDOR_OPTIONS, vendorOf, vendorMatches, type VendorKind } from '../lib/vendor'
 
 /** 千分位格式化 */
 const fmt = (n: number) => n.toLocaleString('en-US')
 
-/** 统一网关在统计表中的展示名（与后端 unifiedGatewayName 一致） */
-const GATEWAY_DISPLAY = '统一网关'
 /** 按天趋势条最多展示的天数 */
 const TREND_DAYS = 14
 
@@ -164,6 +163,8 @@ export default function StatsPage({
   const [day, setDay] = useState('')
   const [dayStats, setDayStats] = useState<DayStats | null>(null)
   const [dayBusy, setDayBusy] = useState(false)
+  // 阶段 L：供应商筛选（作用于调用日志派生的趋势/总数；累计来源表按统计文件口径不变）
+  const [vendorFilter, setVendorFilter] = useState<VendorKind>('')
   // 迷你条图数据（来自调用日志聚合）：每来源成功/失败、按天请求量/成功率
   const [insOkFail, setInsOkFail] = useState<Record<string, { ok: number; fail: number }>>({})
   const [dayTrend, setDayTrend] = useState<DayTrendPoint[]>([])
@@ -192,6 +193,8 @@ export default function StatsPage({
           const ts = Date.parse(l.ts)
           if (!Number.isNaN(ts) && ts < resetAtRef.current) continue
         }
+        // 阶段 L：供应商筛选（E7：Kilo 记录已并入 call_log，此处自动被统计/过滤）
+        if (!vendorMatches(l, vendorFilter)) continue
         const d = (l.ts || '').slice(0, 10)
         if (d) s.add(d)
         const ok = l.status === 'ok'
@@ -200,8 +203,8 @@ export default function StatsPage({
         else totals.fail++
         totals.pt += l.prompt_tokens || 0
         totals.ct += l.completion_tokens || 0
-  // 来源标注：按调用日志里的来源名（当前为「供应商服务」）
-        const src = (l.source || '').trim() || GATEWAY_DISPLAY
+        // 阶段 L E6：按供应商分类聚合成功/失败，不再依赖实测多为空的 source 字段
+        const src = vendorOf(l)
         const a = bySrc.get(src)
         if (a) {
           if (ok) a.ok++
@@ -237,7 +240,7 @@ export default function StatsPage({
       setDayTrend([])
       setLogTotals(EMPTY_LOG_TOTALS)
     }
-  }, [])
+  }, [vendorFilter])
 
   // 累计统计的 reset_at 变化时重新聚合日期/趋势：按天视图从重置时刻起算，
   // 避免“累计 Token 已清零、日期列表仍显示旧数据”。
@@ -381,8 +384,8 @@ export default function StatsPage({
         </div>
       </div>
 
-      {/* 按天查看 */}
-      <div className="flex items-center gap-3">
+      {/* 按天查看 + 供应商筛选 */}
+      <div className="flex flex-wrap items-center gap-3">
         <div className="flex items-center gap-1.5 rounded-lg border border-zinc-200 bg-white px-2.5 py-1.5">
           <CalendarDays size={14} className="text-zinc-400" />
           <select
@@ -399,6 +402,17 @@ export default function StatsPage({
             ))}
           </select>
         </div>
+        {/* 阶段 L：供应商筛选（作用于调用日志派生的趋势/总数；累计来源表按统计文件口径不变） */}
+        <select
+          value={vendorFilter}
+          onChange={(e) => setVendorFilter(e.target.value as VendorKind)}
+          className="rounded-lg border border-zinc-200 bg-white px-2.5 py-1.5 text-[13px] text-zinc-600 outline-none"
+          title="按供应商筛选（调用日志派生数据）"
+        >
+          {VENDOR_OPTIONS.map((o) => (
+            <option key={o.value} value={o.value}>{o.label}</option>
+          ))}
+        </select>
         {dayBusy ? (
           <Loader2 size={14} className="animate-spin text-zinc-400" />
         ) : (
@@ -440,7 +454,8 @@ export default function StatsPage({
         )}
       </div>
       <p className="text-[11px] text-zinc-400">
-            全部日期 = 各日期之和（调用日志，含失败请求）；下方来源表为统计文件累计
+        全部日期 = 各日期之和（调用日志，含失败请求）；下方来源表为统计文件累计，
+        <b>不随供应商筛选拆分</b>（统计文件暂无供应商维度）。供应商筛选作用于上方趋势与总数（调用日志派生，Kilo 已并入）。
       </p>
 
       {/* 按天视图：请求量 / 成功率趋势条（纯 CSS 柱状，复用 Card 组件） */}
@@ -536,8 +551,8 @@ export default function StatsPage({
               )}
             </div>
 
-            {/* 当日节点用量 */}
-            {dayStats.by_node.length > 0 && (
+            {/* 当日节点用量：阶段 L E5 —— 后端 DayStats 实际不返回 by_node，安全隐藏，不显示恒空表 */}
+            {(dayStats.by_node?.length ?? 0) > 0 && (
               <div>
                 <div className="text-[13px] font-semibold text-zinc-800 mb-2">当日节点用量（经统一网关路由）</div>
                 <table className="w-full text-[13px]">
@@ -551,7 +566,7 @@ export default function StatsPage({
                     </tr>
                   </thead>
                   <tbody>
-                    {dayStats.by_node.map((n) => (
+                    {(dayStats.by_node ?? []).map((n) => (
                       <tr key={n.addr} className="border-b border-zinc-50">
                         <td className="py-2 pr-3 text-zinc-800">{n.name}</td>
                         <td className="py-2 pr-3 text-right tabular-nums text-zinc-600">{fmt(n.requests)}</td>
@@ -589,7 +604,14 @@ export default function StatsPage({
               {sources.map((ins) => {
                 const open = expanded.has(ins.name)
                 const hasDetail = (ins.models?.length ?? 0) > 0
-                const of = insOkFail[ins.name]
+                // 阶段 L E6：日志成功/失败按供应商分类聚合；累计来源表按统计文件口径，
+                // 不随供应商筛选拆分（筛选只作用于调用日志派生数据）。
+                const of = vendorFilter
+                  ? insOkFail[vendorFilter]
+                  : Object.values(insOkFail).reduce(
+                      (acc, v) => ({ ok: acc.ok + v.ok, fail: acc.fail + v.fail }),
+                      { ok: 0, fail: 0 },
+                    )
                 const ok = of?.ok ?? 0
                 const fail = of?.fail ?? 0
                 return (
