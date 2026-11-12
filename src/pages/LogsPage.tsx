@@ -975,7 +975,10 @@ function ErrorAnalysisView({ logs }: { logs: CallLogRecord[] }) {
   const [scope, setScope] = useState<ErrScope>('pool')
 
   const stats = useMemo(() => {
-    const vendorOf = (r: CallLogRecord) => {
+    // 注意：这里是「具体厂商 ID」（用于按厂商展示 429 明细），与共享
+    // vendorOf() 的三大类（kilo/opencode/custom，用于筛选）语义不同，
+    // 不要合并 —— 合并会让错误分析表退化成 3 行，丢掉具体厂商名。
+    const vendorIdOf = (r: CallLogRecord) => {
       if (r.vendor) return r.vendor
       const m = r.model || ''
       const i = m.indexOf('/')
@@ -1190,7 +1193,7 @@ function ErrorAnalysisView({ logs }: { logs: CallLogRecord[] }) {
       policyVers: [...policyVers].sort((a, b) => b[1] - a[1]),
       hourly: [...hourly].sort((a, b) => (a[0] < b[0] ? 1 : -1)).slice(0, 18),
       final429Rows,
-      vendorOf,
+      vendorIdOf,
     }
   }, [logs, scope])
 
@@ -1211,7 +1214,7 @@ function ErrorAnalysisView({ logs }: { logs: CallLogRecord[] }) {
       const kind = stats.final429Rows.includes(r) ? 'final' : 'transient'
       lines.push(
         [
-          r.ts, r.req_id, kind, stats.vendorOf(r), r.model, r.nodes?.slice(-1)[0] || empty,
+          r.ts, r.req_id, kind, stats.vendorIdOf(r), r.model, r.nodes?.slice(-1)[0] || empty,
           r.upstream_status ?? '', r.error_class ?? '', r.error_code ?? '', atts,
           r.decision?.reason ?? '', r.pool?.available ?? '',
           r.pool ? r.pool.bad_quota + r.pool.bad_auth + r.pool.bad_link : '',

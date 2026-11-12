@@ -411,6 +411,9 @@ func TestKiloK8IndependenceRedLine(t *testing.T) {
 		"providerservice",
 		"40080",
 		"50080",
+		// 阶段 L：持久化模块不得反向依赖 main 包（EventLog 在 main 包，
+		// 反向 import 会循环依赖，也破坏独立性红线）。
+		`"github.com/6Kmfi6HP/opencode2api"`,
 	}
 	// 去掉整行 // 注释再比对（注释里允许解释红线本身）；行内注释不算代码。
 	stripComments := func(b []byte) string {
@@ -423,15 +426,17 @@ func TestKiloK8IndependenceRedLine(t *testing.T) {
 		}
 		return strings.Join(codeLines, "\n")
 	}
-	// (1) 网关本体：整文件零引用
-	b, err := os.ReadFile("kilo_gateway.go")
-	if err != nil {
-		t.Fatalf("读 kilo_gateway.go 失败: %v", err)
-	}
-	code := stripComments(b)
-	for _, ban := range banned {
-		if strings.Contains(code, ban) {
-			t.Fatalf("kilo_gateway.go 代码里出现被禁引用 %q（独立性红线）", ban)
+	// (1) 网关本体 + 持久化模块：整文件零引用被禁符号
+	for _, name := range []string{"kilo_gateway.go", "kilo_calls_log.go"} {
+		b, err := os.ReadFile(name)
+		if err != nil {
+			t.Fatalf("读 %s 失败: %v", name, err)
+		}
+		code := stripComments(b)
+		for _, ban := range banned {
+			if strings.Contains(code, ban) {
+				t.Fatalf("%s 代码里出现被禁引用 %q（独立性红线）", name, ban)
+			}
 		}
 	}
 	// (2) main.go 的 Kilo 段：只准用 managerInst.KiloGateway() 与配置/状态，
