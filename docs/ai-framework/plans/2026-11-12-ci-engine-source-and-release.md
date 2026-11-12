@@ -1,10 +1,10 @@
-# 阶段 N：修复 CI 引擎源 + 发布 v2.0.5
+# 阶段 N：修复 CI 引擎源 + 发布 v2.0.5 / v2.0.6
 
-> **状态：** ✅ 已完成（2026-11-12，v2.0.5 Release 已发布）
+> **状态：** ✅ 已完成（2026-11-12）：v2.0.5 修复 CI 引擎源并发布；随后按用户要求 bump 三处版本号到 2.0.6 重发，**v2.0.6 为当前 Release**（产物名 / `latest.json` / 应用内版本三者对齐）。
 > **For agentic workers:** 按 Task 顺序执行；每 Task 测完再进下一 Task。验收认证据，禁止「应该能过」。
 > **元规范:** `docs/ai-framework/phased-plan-driven.md`；仓库约定 `AGENTS.md`
 > **基线分支：** `main`（tip `3df13f0`，已 push 到 origin，本地 2 分支与线上一致）
-> **交付提交：** `5ea9e74`(计划) / `f142f6e`(CI 引擎源) / `f8ec61f`(CHANGELOG) / `68d3ddf`(CI 空提交)；tag `v2.0.5`（object `2d504e6`）
+> **交付提交：** `5ea9e74`(计划) / `f142f6e`(CI 引擎源) / `f8ec61f`(CHANGELOG) / `68d3ddf`(CI 空提交)；tag `v2.0.5`（object `2d504e6`）；版本统一重发 `ac81afb`(bump 2.0.6) + tag `v2.0.6`（object `436df5b`，当前）。v2.0.6 tag run `43159025397` success。
 
 **Goal:** 把 CI 里已 404 的引擎源码源 `wbi35772/opencode2api-win@9964407` 换成真上游 `jasonxu114514/opencode2api@v1.4.7`（11-11 调研已实测兼容），修复三平台 build，然后写 v2.0.5 CHANGELOG、打 tag 推送，触发完整打包 + 发 GitHub Release。
 
