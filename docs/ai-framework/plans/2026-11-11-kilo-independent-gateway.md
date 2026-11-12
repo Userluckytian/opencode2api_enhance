@@ -356,6 +356,8 @@
 
 ## 残留手工验收清单（2026-11-12 更新）
 
+0. **`npm run tauri:dev` 是免部署的验证/使用路径（用户 11-12 提醒，已实测）**：dev 槽位 44100/44180/44280 + 独立数据目录 + vite 1420，与生产完全隔离；重新 `go build -o bin/opencode2api.exe .` + `npm run build` + `touch src-tauri/src/main.rs` 触发 cargo 重嵌后，`tauri:dev` 会拉起**含阶段 K 的新 core**。实测（设 `OPCODE2API_KILO_PORT=30082` 避免占用）：30082 `/healthz` 只回 4 字段且带警示头、44100 `/api/admin/kilo/status` 返回完整状态、30082 `/v1/models` 12 条、chat 真推理 200 且内容 `KILO-TAURI-DEV-OK`、44100 SPA 资源含 Kilo 页与警示文案；生产 40000/40080/50080 全程未受影响、生产 30080 仍 000。**注意**：①只 `go build` 不重新内嵌会跑旧 core（README 已警告）；②vite 的 `/api` 代理指向 19090（当前被 mihomo 占用），**Tauri 窗口内可用**（同源打到 44100），单独开浏览器访问 1420 需设 `VITE_API_BASE`。这条路径把「验证/日常使用」与「生产部署」解耦，**不替代正式部署**。
+
 1. ~~**V-7 独立性证明**~~ → ✅ **11-12 已在隔离实例完成**（30081/40999/50090/40090，显式起停 provider-service 前后 30081 全 200，见 V-7）。**未停生产 50080**：语义等价且避免影响线上；若用户坚持要在生产做一次停机实测，需另行授权。
 2. **部署（唯一未完项）**：新 `opencode2api.exe` 与被锁定的运行中 exe 交换 + `bin/dist/` 替换，需停机窗口（`OPEN.md` 已多次登记该限制）。同窗口可一并上：11-06 WARP 优先通道、宿主 stderr 日志端点 `53f7902`、`data_policy_note` 徽标。部署后复核：30080 `/healthz`、`/v1/models`、`/api/admin/kilo/status`、Kilo 页真实数据。
 3. ~~面板 Kilo 页在真实数据下的观感~~ → ✅ **11-12 已截图目视**（`docs/design/screenshots-20261111/kilo-page.png`：横幅显眼、12 行模型表、「数据去向」列清晰、只免费默认勾选；本地保留不入库）。用户如需再目视可直接看该文件。
