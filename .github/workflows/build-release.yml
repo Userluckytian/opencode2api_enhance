@@ -88,20 +88,22 @@ jobs:
           go build -trimpath -ldflags "-s -w -X main.version=${GITHUB_REF_NAME}" -o bin/${{ matrix.go_bin }} .
           ls -lh bin/
 
-      # 免费层引擎（40080）：上游 opencode2api-win（GPL-3.0，
-      # https://github.com/wbi35772/opencode2api-win）没有可下载的 release 资产，
-      # 因此在 CI 内按**固定提交**从源码交叉构建（ENGINE_COMMIT，与
-      # third_party/opencode2api-win/SOURCE.txt 保持一致）。
-      # 运行期由管理器以独立子进程 + HTTP 使用（mere aggregation：不链接其代码），
-      # 产物名与 embed.rs / Go 侧 platform_name("opencode2api-win") 对齐。
+      # 免费层引擎（40080）：原分叉 wbi35772/opencode2api-win 于 2026-11-11 起
+      # 404（仓库已删除），CI 的 git clone 必挂。改用真上游
+      # jasonxu114514/opencode2api 的 v1.4.7 固定提交交叉构建（11-11 调研
+      # top5-99 已实测 stock v1.4.7 兼容现有配置：healthz 12/44、推理 3/3 200）。
+      # 与 third_party/opencode2api-win/SOURCE.txt 保持一致（GPL-3.0 合规）。
+      # 运行期由管理器以独立子进程 + HTTP 使用（mere aggregation），产物名与
+      # embed.rs / platform_name("opencode2api-win") 对齐。
       - name: Build free-tier engine (opencode2api-win)
         shell: bash
         env:
-          ENGINE_COMMIT: 9964407
+          ENGINE_REPO: https://github.com/jasonxu114514/opencode2api.git
+          ENGINE_COMMIT: b296a61d0e3ef93b4df58e298be2c4e34e397322 # v1.4.7
         run: |
           set -euo pipefail
           rm -rf engine-src
-          git clone --no-checkout https://github.com/wbi35772/opencode2api-win.git engine-src
+          git clone --no-checkout "$ENGINE_REPO" engine-src
           git -C engine-src checkout "$ENGINE_COMMIT"
           mkdir -p bin
           ( cd engine-src && CGO_ENABLED=0 GOOS=${{ matrix.goos }} GOARCH=${{ matrix.goarch }} \

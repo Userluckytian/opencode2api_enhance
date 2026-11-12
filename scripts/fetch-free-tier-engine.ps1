@@ -1,12 +1,13 @@
 ﻿# fetch-free-tier-engine.ps1
 # ============================================================
-# 获取免费层引擎（40080）二进制：github.com/wbi35772/opencode2api-win
-# （GPL-3.0 独立程序，本项目以独立进程 + HTTP 方式使用，见
-#   third_party/opencode2api-win/ 的 LICENSE / SOURCE.txt）
+# 获取免费层引擎（40080）二进制：github.com/jasonxu114514/opencode2api
+# （v1.4.7；原分叉 wbi35772/opencode2api-win 已于 2026-11-11 起 404，
+#   自 v2.0.5 起改用真上游 stock 版本。GPL-3.0 独立程序，本项目以独立
+#   进程 + HTTP 方式使用，见 third_party/opencode2api-win/ 的 LICENSE / SOURCE.txt）
 #
 # 用法：
 #   powershell -ExecutionPolicy Bypass -File scripts\fetch-free-tier-engine.ps1
-#   powershell ... -Commit 9964407
+#   powershell ... -Commit b296a61d0e3ef93b4df58e298be2c4e34e397322
 #   powershell ... -SkipClone          # 复用临时目录里已克隆的源码
 #
 # 为什么是「源码构建」而不是下载 release 资产：上游仓库当前没有可下载的
@@ -28,8 +29,8 @@
 
 param(
     # 固定提交（pinned）：与 SOURCE.txt 保持一致，勿随意改成 "main"。
-    [string]$Commit = "9964407",
-    [string]$Repo = "https://github.com/wbi35772/opencode2api-win.git",
+    [string]$Commit = "b296a61d0e3ef93b4df58e298be2c4e34e397322",
+    [string]$Repo = "https://github.com/jasonxu114514/opencode2api.git",
     # 留空 = 按当前 OS 选择（Windows 加 .exe）。
     [string]$OutBin = "",
     # 复用已存在的 engine-src 目录（离线/重复构建时用）。

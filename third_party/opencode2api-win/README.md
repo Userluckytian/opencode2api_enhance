@@ -1,8 +1,8 @@
 # opencode2api-win（免费层引擎）
 
 本目录存放**第三方组件**的许可证与来源声明：40080 端口上运行的 OpenCode
-免费层引擎 `opencode2api-win`，来自 https://github.com/wbi35772/opencode2api-win
-（上游提交 9964407，许可证 **GPL-3.0**）。
+免费层引擎 `opencode2api-win`，来自 https://github.com/jasonxu114514/opencode2api
+（v1.4.7 / commit b296a61；原分叉 wbi35772/opencode2api-win 已 404，自 v2.0.5 改用真上游），许可证 **GPL-3.0**。
 
 本项目与引擎的关系是**独立进程 + HTTP 调用**（mere aggregation）：管理器
 （40000）只负责生成配置、启停、健康检查与统计；不链接、不修改引擎源码，

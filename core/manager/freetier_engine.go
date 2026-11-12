@@ -2,7 +2,8 @@
 // 生成配置、启停、健康检查与看门狗。
 //
 // 为什么是「托管」而不是「内置」：
-//   - 引擎是 GPL-3.0 的独立程序（github.com/wbi35772/opencode2api-win），
+//   - 引擎是 GPL-3.0 的独立程序（真上游 github.com/jasonxu114514/opencode2api
+//     v1.4.7；原分叉 wbi35772/opencode2api-win 已 404），
 //     我们以独立进程 + HTTP 通信方式使用（mere aggregation），不链接其代码，
 //     因此本项目许可证不受其传染；
 //   - 引擎自己实现 OpenCode 免费层的客户端形态伪装、WARP 出口池、会话亲和
