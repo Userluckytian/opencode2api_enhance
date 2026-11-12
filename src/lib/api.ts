@@ -705,8 +705,10 @@ export type CallLogRecord = {
   /** 来源标注：空 = 统一网关；否则为独享实例名（S4 聚合读取） */
   source?: string
   tier?: "free" | "paid"
-  /** 本次请求命中的厂商 ID（opencode / 自定义插件）；旧记录为空 */
+  /** 本次请求命中的厂商 ID（opencode / kilo / 自定义插件）；旧记录为空 */
   vendor?: string
+  /** 阶段 L：上游实际返回的模型（Kilo 会静默换模型）；旧记录为空 */
+  actual_model?: string
   route_verdict?: RouteVerdict
   serving_port?: string
   /** 实际使用的 key 末 4 位；写入侧尚未接线，当前恒为空 */
@@ -1050,6 +1052,8 @@ export type CallLogFilter = {
   node?: string
   keyword?: string
   status?: 'ok' | 'error'
+  /** 阶段 L：供应商维度 kilo / opencode / custom；空 = 不过滤 */
+  vendor?: string
   limit?: number
   offset?: number
   from_ts?: string

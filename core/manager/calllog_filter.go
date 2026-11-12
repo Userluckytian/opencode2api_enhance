@@ -15,10 +15,13 @@ type CallLogFilter struct {
 	Node    string `json:"node,omitempty"`    // nodes 数组中任一元素包含该串即匹配
 	Keyword string `json:"keyword,omitempty"` // 匹配 model / path / err_msg / req_id
 	Status  string `json:"status,omitempty"`  // ok=无异常；error=有异常/切换；其他不过滤
-	Limit   int    `json:"limit,omitempty"`
-	Offset  int    `json:"offset,omitempty"`
-	FromTS  string `json:"from_ts,omitempty"` // ISO 字符串，字典序即时间序
-	ToTS    string `json:"to_ts,omitempty"`
+	// Vendor 供应商维度（阶段 L）：kilo / opencode / custom；空 = 不过滤。
+	// 分类规则见 calllog_vendor.go 的 ClassifyVendor（后端单一真源）。
+	Vendor string `json:"vendor,omitempty"`
+	Limit  int    `json:"limit,omitempty"`
+	Offset int    `json:"offset,omitempty"`
+	FromTS string `json:"from_ts,omitempty"` // ISO 字符串，字典序即时间序
+	ToTS   string `json:"to_ts,omitempty"`
 }
 
 // matches 单条记录是否满足过滤条件（语义与 main CallLogFilter::matches 一致）。
@@ -50,6 +53,10 @@ func (f *CallLogFilter) matches(r *CallLogRecord) bool {
 		if !r.HasIssue() {
 			return false
 		}
+	}
+	// 阶段 L：供应商维度（三类口径由 ClassifyVendor 统一判定）
+	if f.Vendor != "" && ClassifyVendor(r) != strings.ToLower(strings.TrimSpace(f.Vendor)) {
+		return false
 	}
 	if f.FromTS != "" && r.TS < f.FromTS {
 		return false
