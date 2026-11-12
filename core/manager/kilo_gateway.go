@@ -66,7 +66,11 @@ type KiloModelEntry struct {
 // 上游真实返回的 model、状态码、耗时。仅内存保留最近 N 条，不落盘、
 // 不含请求内容/密钥（避免 PII 与秘密外泄）。
 type KiloCallRecord struct {
-	Time        string `json:"time"`
+	Time string `json:"time"`
+	// TS 是 ISO8601 完整时间戳，供统一调用日志排序/日期筛选使用
+	// （Time 只是 HH:MM:SS 展示串，不能用于跨天排序）。
+	TS          string `json:"ts,omitempty"`
+	ReqID       string `json:"req_id,omitempty"`
 	Requested   string `json:"requested"`
 	Actual      string `json:"actual"`
 	Status      int    `json:"status"`
@@ -120,6 +124,8 @@ type kiloGateway struct {
 	callMu sync.Mutex
 	calls  []KiloCallRecord
 	callsN int
+	// callWriter 阶段 L：把观测持久化成 JSONL，供 ReadCallLog 合并。
+	callWriter *kiloCallWriter
 }
 
 const kiloCallHistoryMax = 30
@@ -143,6 +149,7 @@ func (m *Manager) KiloGateway() *kiloGateway {
 	defer m.depMu.Unlock()
 	if m.kilo == nil {
 		m.kilo = &kiloGateway{mgr: m, state: "stopped"}
+		m.kilo.callWriter = newKiloCallWriter(m.KiloCallsLogPath())
 	}
 	return m.kilo
 }
@@ -759,15 +766,32 @@ func modelFromJSON(b []byte) string {
 	return ""
 }
 
-// recordCall 追加一条观测（有界环形，最新在前）。
+// recordCall 追加一条观测（内存环形 + 异步落盘，供统一日志合并）。
 func (g *kiloGateway) recordCall(rec KiloCallRecord) {
+	now := time.Now()
+	if rec.TS == "" {
+		rec.TS = now.Format(time.RFC3339)
+	}
+	if rec.Time == "" {
+		rec.Time = now.Format("15:04:05")
+	}
+	if rec.ReqID == "" {
+		rec.ReqID = fmt.Sprintf("kilo-%d-%d", now.UnixNano(), g.callsN+1)
+	}
+
 	g.callMu.Lock()
-	defer g.callMu.Unlock()
 	g.calls = append([]KiloCallRecord{rec}, g.calls...)
 	if len(g.calls) > kiloCallHistoryMax {
 		g.calls = g.calls[:kiloCallHistoryMax]
 	}
 	g.callsN++
+	g.callMu.Unlock()
+
+	// 阶段 L：持久化。同步落盘（本地 append 微秒级），失败只告警，
+	// 不影响响应路径，也不需要 flush 生命周期。
+	if g.callWriter != nil {
+		g.callWriter.write(kiloCallToLogRecord(rec, g.mgr.managerKiloPort()))
+	}
 }
 
 // RecentCalls 返回最近调用观测（新→旧）。

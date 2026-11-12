@@ -64,6 +64,9 @@ type CallLogRecord struct {
 	KeyTail string `json:"key_tail,omitempty"`
 	// TraceID 分布式追踪 ID（阶段3），与 main 包 CallRecord.TraceID 镜像；omitempty 保持旧记录兼容。
 	TraceID string `json:"trace_id,omitempty"`
+	// ActualModel 上游实际返回的模型（Kilo 会静默换模型；阶段 L 新增）。
+	// 旧记录无此字段，omitempty 保持兼容。
+	ActualModel string `json:"actual_model,omitempty"`
 	// SchemaVersion call_log 结构化字段版本（2 = 含错误分类/池快照）。
 	SchemaVersion int `json:"schema_version,omitempty"`
 	// UpstreamStatus 最后一次上游 HTTP 状态码（网络错误/未拿到响应为 0）。
@@ -116,24 +119,26 @@ func (m *Manager) ProviderServiceCallLogPath() string {
 	return filepath.Join(m.paths.RuntimeDir, providerServiceDirBase, "call_log.jsonl")
 }
 
-// ReadCallLog 读取调用日志（当前唯一来源：供应商服务）。
-// max<=0 = 全部历史；max>0 = 只取最近 max 条。缺失/损坏 → 空数组。
+// ReadCallLog 读取并合并调用日志（供应商服务 JSONL + Kilo 独立网关 JSONL +
+// OpenCode 引擎 stdout 事件）。max<=0 = 全部历史；max>0 = 只取最近 max 条。
+// 缺失/损坏 → 空数组。三个来源按时间升序合并，前端按 vendor 维度筛选。
 //
-// 注意：OpenCode 引擎（40080）不写 call_log.jsonl —— 它只把调用事件放在
-// 进程内的 ring buffer 里，经 WebUI 的 /api/logs 暴露（且需登录）。因此
-// 免费模型的调用明细在当前架构下无法通过本函数读到，日志页只覆盖供应商服务。
+// 阶段 L 起 Kilo 也写入统一日志（kilo_calls.jsonl），日志页/统计页因此能
+// 覆盖 Kilo；引擎仍只通过 stdout 事件解析（不写 JSONL）。
 func (m *Manager) ReadCallLog(max int) []CallLogRecord {
 	allRequested := max <= 0
 	tail := max
 	if allRequested {
 		tail = 0
 	}
-	// v2.1：两个真正承接推理的进程各有不同日志形态：
+	// 阶段 L：三个来源（Kilo 独立网关 30080 走自己的 JSONL，见 kilo_calls_log.go）。
 	//   - 供应商服务：写 JSONL（call_log.jsonl），直接按行解析；
+	//   - Kilo 独立网关：写 JSONL（kilo_calls.jsonl），格式与 CallLogRecord 兼容；
 	//   - OpenCode 引擎：不写 JSONL，只把 request_routed 事件打进 stdout，
 	//     由 readEngineCallLog 解析（见 calllog_engine.go）。
 	files := []struct{ path, source string }{
 		{m.ProviderServiceCallLogPath(), "供应商服务"},
+		{m.KiloCallsLogPath(), "Kilo 独立网关"},
 	}
 	// 并发读各文件尾部：每 goroutine 只写下标 i 自己的槽位（无共享写竞态）。
 	parts := make([][]CallLogRecord, len(files)+1)
