@@ -174,7 +174,7 @@ export default function KiloPage({ toast }: { toast: (msg: string, ok?: boolean)
           <Cloud size={18} className="text-teal-700" />
           <h1 className="text-[16px] font-semibold text-zinc-900">Kilo</h1>
           <span className={clsx('flex items-center gap-1.5 rounded-full px-2.5 py-1 text-xs font-medium', badgeCls)}>
-            <span className={clsx('h-1.5 w-1.5 rounded-full', status?.running ? 'bg-green-500' : 'bg-zinc-400')} />
+            <span className={clsx('h-1.5 w-1.5 rounded-full', status?.state === 'failed' ? 'bg-red-500' : status?.running ? 'bg-green-500' : 'bg-zinc-400')} />
             {badgeText}
           </span>
           <span className="hidden text-[12px] text-zinc-500 sm:inline">独立网关 · 直通 api.kilo.ai，不经过 OpenCode / 自定义源</span>
@@ -236,7 +236,7 @@ export default function KiloPage({ toast }: { toast: (msg: string, ok?: boolean)
               <code className="break-all font-mono text-[13px] text-zinc-900">{status?.address ?? '—'}</code>
               <button
                 onClick={() => void copyText(status?.address ?? '', '地址')}
-                className="shrink-0 rounded border border-zinc-200 bg-white px-1.5 py-1 text-zinc-500 hover:text-zinc-800"
+                className="shrink-0 rounded border border-zinc-200 bg-white p-1.5 text-zinc-500 hover:text-zinc-800"
               >
                 <Copy className="h-3.5 w-3.5" />
               </button>
@@ -249,7 +249,7 @@ export default function KiloPage({ toast }: { toast: (msg: string, ok?: boolean)
               <code className="break-all font-mono text-[13px] text-zinc-900">{status?.api_key ?? '—'}</code>
               <button
                 onClick={() => void copyText(status?.api_key ?? '', '密钥')}
-                className="shrink-0 rounded border border-zinc-200 bg-white px-1.5 py-1 text-zinc-500 hover:text-zinc-800"
+                className="shrink-0 rounded border border-zinc-200 bg-white p-1.5 text-zinc-500 hover:text-zinc-800"
               >
                 <Copy className="h-3.5 w-3.5" />
               </button>

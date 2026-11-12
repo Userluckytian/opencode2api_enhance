@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from 'react'
 import clsx from 'clsx'
-import { AlertTriangle, Copy, Loader2, Pencil, Plus, Trash2 } from 'lucide-react'
+import { AlertTriangle, Copy, Loader2, Pencil, Plus, Trash2, Workflow } from 'lucide-react'
 import { api, type KiloModelEntry, type KiloVirtualModel } from '../lib/api'
 
 /**
@@ -142,6 +142,7 @@ export default function VirtualModelsCard({
     <div className="rounded-2xl border border-zinc-200 bg-white p-5 shadow-sm">
       <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
         <div className="flex items-center gap-2">
+          <Workflow size={16} className="shrink-0 text-teal-600" />
           <h3 className="text-[15px] font-semibold text-zinc-900">虚拟模型</h3>
           <span className="text-[11.5px] text-zinc-400">
             把一个名字绑到一组候选模型，客户端用 <code className="font-mono">kilo/名字</code> 调用；上游真实响应模型原样透传
