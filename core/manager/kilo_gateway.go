@@ -645,6 +645,27 @@ func (g *kiloGateway) handleChat(w http.ResponseWriter, r *http.Request) {
 		upBody = rewriteModel(body, modelID)
 	}
 
+	// 阶段 M：命中命名虚拟模型 → 按策略选路，胜出响应原样透传。
+	// 虚拟路径自己管每个候选的 free_only 边界，不复用下面的单模型校验。
+	started := time.Now()
+	if vr, tag, err := g.resolveVirtual(r.Context(), upBody, modelID); err != nil {
+		writeKiloError(w, http.StatusBadRequest, "虚拟模型: "+err.Error())
+		return
+	} else if vr != nil {
+		writeForwardResult(w, *vr)
+		g.recordCall(KiloCallRecord{
+			Time:        started.Format("15:04:05"),
+			Requested:   peek.Model,
+			Actual:      vr.model,
+			Status:      vr.status,
+			DurationMs:  time.Since(started).Milliseconds(),
+			Stream:      peek.Stream,
+			ActualKnown: vr.model != "" && vr.status >= 200 && vr.status < 300,
+		})
+		_ = tag // 选路标签暂不入账本（避免改变日志结构），后续可加独立字段
+		return
+	}
+
 	// 独立审查 B7：free_only 不能只是展示过滤，否则客户端编一个付费档 id
 	// 就绕过「只勾免费模型」直接打上游（还可能产生非预期计费/训练口径）。
 	// 轻量边界：仅在目录**已成功拉取**时校验；目录不可用/尚未首拉时放行，
@@ -672,9 +693,8 @@ func (g *kiloGateway) handleChat(w http.ResponseWriter, r *http.Request) {
 		upReq.Header.Set("Accept", "text/event-stream")
 	}
 
-	// 需求 #1：计时从「发上游请求前」开始（等到首个响应头 + 复制响应体都在内），
+	// 需求 #1：计时从「发上游请求前」开始（start 已在虚拟模型分支前初始化），
 	// 否则只统计本地 io.Copy 会恒为 0ms，面板上的耗时没有意义。
-	started := time.Now()
 	resp, err := client.Do(upReq)
 	if err != nil {
 		// 传输失败也要入账：用户要的是「每次请求」都能看到结果，失败同样可见。
