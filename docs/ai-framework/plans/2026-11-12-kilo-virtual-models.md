@@ -1,9 +1,10 @@
 # 阶段 M：Kilo 虚拟模型（命名组合 + 多策略选路）
 
-> **状态：** 计划已就绪，待批准后实施
+> **状态：** ✅ 代码/测试/浏览器验收完成（2026-11-12），**待部署**（生产 exe/dist 未替换，需停机窗口）；独立审查结论见 §代码审查
 > **For agentic workers:** 按 Task 顺序执行；每 Task 测完再进下一 Task。验收认证据，禁止「应该能过」。
 > **元规范:** `docs/ai-framework/phased-plan-driven.md`；仓库约定 `AGENTS.md`
 > **基线分支：** 当前 `feat/phase-k-kilo-gateway`（tip `3710d03`），**不新开分支**，小步 commit，不 push
+> **交付提交：** `f4e1983`(计划) / `5ce19cb` / `0f37fe8` / `62b5187` / `fb3db5a` / `c2d2495`（均未 push）
 
 **Goal:** 在 Kilo 独立网关（30080）内支持用户创建**多个命名虚拟模型**：客户端请求虚拟名，网关在用户勾选的一组候选模型里按策略选一个（或并发竞速），把胜出者的响应原样透传。
 
@@ -205,33 +206,42 @@
 
 **审查方：** 独立角色子代理（非实施者）
 
-| 审查项 | 结论 | 问题清单 |
-|---|---|---|
-| 独立性红线（零 main 包 / 50080 / auto_model） | | |
-| 竞速正确性（只回胜出者 / 取消其余 / SSE 首个 data 判定 / 连接不泄漏） | | |
-| 原样透传与警示头（虚拟路径不洗状态码、不改 model） | | |
-| free_only 边界（虚拟模型不绕过、付费候选需显式关） | | |
-| 配置安全（原子写、名称校验、禁止自引用、无密钥） | | |
-| 测试有效性（三策略真断言、无永真用例） | | |
+**主会话自查（11-12，实跑 + 代码复核）：**
 
-**结论：** ⬜
+| 审查项 | 结论 | 问题清单（含修复） |
+|--------|------|----------|
+| 独立性红线 | ✅ | `kilo_virtual.go` / `kilo_virtual_race.go` 只用标准库 + `Manager.Paths()` / `writeFileAtomic` / `upstreamClient`；零 main 包 / `globalAgg` / `vendors` / `auto_model` / 50080 / 40080 引用；不接入 50080 auto（阶段 K 红线延续） |
+| 竞速正确性 | ✅（已修 1 处） | `writeForwardResult` 只写一次 w；`ch` 容量=候选数不阻塞；**自查发现** `for range ch` 会等最慢候选响应 cancel 才返回 → 改为首个 2xx 立即 `break` + 后台 drain goroutine 排空（`c2d2495`），新增 0.06s 返回断言 |
+| 原样透传与警示头 | ✅ | 虚拟路径 `writeForwardResult` 复制上游 header + `X-Kilo-Data-Policy` + 原状态码/body；`forwardOne` 只观测不改写 model；全败返回最后一个上游错误体（单测断言不洗 502） |
+| free_only 边界 | ✅ | 虚拟分支在单模型 free_only 校验**之前**，但 `selectByFallback`/`selectByRace` 对每个候选都调 `isModelBlockedByFreeOnly`；付费候选需先关 `kilo_free_only`，UI 已注明 |
+| 配置与端点安全 | ✅ | 独立 JSON 原子写；名称 `^[a-zA-Z0-9_-]{1,48}$`；候选去重/上限 12/策略白名单；`resolveVirtualCandidates` 跳过虚拟名互指；POST/DELETE 参数校验；配置只存模型 ID/策略，无密钥/请求体 |
+| 测试与前端 | ✅ | 11 组新增单测真断言（竞速 `fastWins==1`、0.06s 立即返回、全败不洗码、轮询轮换）；UI `save/remove/toggle` 均有 busy 与 try/finally；候选列表来自 `api.kiloModels()`（关 free_only 后含付费档） |
+
+**主会话自查结论：** ✅ 六面无阻断项；自查中发现并修复 1 处（竞速等慢候选）。
+
+**独立子代理结论：** ⏳ 已启动、待回传（上游速率较慢）。到达后补入本节并同步 M-10；若发现阻断项按「缺陷显式带入下一轮」处理。
+
+**结论：** ✅ **有条件通过** —— 条件 = 独立审查待回传、部署窗口未到、SSE 流式不支持与 `race` 代价按已知限制如实登记、阶段 K/L 遗留按「阶段开头遗留」带入，不伪装全绿。
 
 ---
 
-## 验收标准总表
+## 验收标准总表（2026-11-12 回填，逐条附真实输出）
 
-| # | 标准 | 通过条件 | 责任人 |
-|---|---|---|---|
-| M-1 | 构建/静态 | `go build ./...`=0；`go vet . ./core/manager/`=0；`gofmt -l core/manager/kilo_*.go` 无输出；`npx tsc -b`=0；`npm run build`=0 | 自动化 |
-| M-2 | 单测 | `go test ./core/manager/ -run 'Kilo\|Virtual' -race` 全 PASS；整包无新增失败 | 自动化 |
-| M-3 | 配置 | CRUD/校验/轮询/并发安全单测；重启后虚拟模型仍在（独立 JSON 持久化） | 自动化 |
-| M-4 | 三策略 | 假上游：`fallback` 失败换下一个、`round_robin` 轮换、`race` 只回胜出者且取消其余；全败返回最后一个错误不洗 502 | 自动化 |
-| M-5 | 端到端 | dev 真实上游：两个虚拟模型各 1 次 200、响应 `model` 为真实胜出模型；日志页记 `Requested=虚拟名/Actual=真实模型`；`round_robin` 3 次轮换 | 浏览器 + curl |
-| M-6 | /v1/models | 虚拟项出现且 `owned_by=kilo-virtual`；禁用的不出现 | curl |
-| M-7 | UI | 增删改/候选多选/策略/`race` 代价提示/复制调用名 全部可操作 | 内置浏览器 |
-| M-8 | 红线 | 无密钥入库；生产 exe/dist 未替换；隔离端口清场；生产 40000/40080/50080 在听；K8 守卫覆盖新文件 | 自动化 + 主会话 |
-| M-9 | 文档 | issue-log / OPEN.md / 计划回填 / 阶段 K 交叉引用 | 主会话 |
-| M-10 | 独立审查 | 6 面结论 + 阻断项清单，不通过项返工复验 | 子代理 |
+| # | 标准 | 结果 | 命令 + 输出摘要 |
+|---|------|------|----------------|
+| M-1 | 构建/静态 | ✅ | `go build ./...`=0；`go vet . ./core/manager/`=0；`gofmt -l core/manager/kilo_*.go main.go diag_api.go` 无输出；`npx tsc -b`=0；`npm run build`=0（463 kB） |
+| M-2 | 单测 | ✅ | `go test ./core/manager/ -run 'Kilo\|Virtual\|CallLog\|Vendor\|Classify' -race` 全 PASS（含新增 `kilo_virtual_test.go` 4 组、`kilo_virtual_race_test.go` 7 组）；整包 `go test ./core/manager/ ./vendors/custom/` 仅既有 4 条时间炸弹 FAIL，无新增失败 |
+| M-3 | 配置 | ✅ | CRUD/名称校验/候选去重/上限 12/策略校验/轮询游标/并发 Upsert 单测全 PASS；`TestKiloVirtualPersistAndRoundRobin` 验证新建 Manager 指向同目录仍读到配置（重启不丢） |
+| M-4 | 三策略 | ✅ | 假上游单测：`fallback` 429→换下一个、全败返回 503 且错误体不洗 502；`round_robin` 起点 0/1/2/0 轮换；`race` 只回胜出者且取消其余（0.01s 返回）；`TestKiloVirtualRaceReturnsImmediately` 断言首个 2xx 0.06s 返回不等 800ms 慢候选；`resolveVirtual` 真实上游静默换模型时 `Actual=nvidia/real:free` 不改写 |
+| M-5 | 端到端 | ✅ | dev 30082 创建 `m-fb`/`m-rr`/`m-race` → `/v1/models` 12→15；三策略真请求全 200 + `X-Kilo-Data-Policy`：`fallback` 6.79s / `race` **2.53s** 胜出 `stealth/glyph-cluster` / `round_robin` 三次起点轮换（第 3 次 `kilo-auto/free` 被上游换成 `nemotron-3-ultra-550b` 且真实 model 原样透传）；观测账本 5 条 `Requested=kilo/m-*` / `Actual=真实胜出模型` |
+| M-6 | /v1/models | ✅ | 3 个虚拟项出现且 `owned_by=kilo-virtual`；DELETE 三个后回到 12；GET `/api/admin/kilo/virtual` 返回三策略配置正确 |
+| M-7 | UI | ✅ | 内置浏览器：虚拟模型卡片三行（启用/策略/候选数/操作按钮）、新建表单（14 个候选勾选框 + 名称 + 策略下拉 + 启用）、选 `race` 红字「同一份提示词同时发给全部 N 个候选…N 倍计费」、复制 `kilo/名称` 按钮；截图存 artifacts |
+| M-8 | 红线 | ✅ | 新文件零 main 包/50080/40080/auto_model 引用（见 §代码审查）；生产 40000/40080/50080 全程在听；生产 `bin/dist` 未替换；测试数据已删除；隔离端口清场 |
+| M-9 | 文档 | ✅ | `docs/issue-log/2026-11-12.md` 追加阶段 M；`OPEN.md` 更新 Kilo 行；阶段 K 计划 Global Constraints 8 补阶段 M 交叉引用；本计划状态/验收表/审查表回填 |
+| M-10 | 独立审查 | ⏳ | 独立子代理已启动，结论到达后补入 §代码审查；主会话已自查并修复 1 处（竞速等慢候选，`c2d2495`） |
+
+**总评：** M-1~M-9 通过；M-10 独立审查待回传。**阶段 M 代码与验收完成，唯一未完 = 部署**（需停机窗口，非缺陷）。
+**已知限制（如实登记）**：虚拟模型暂不支持 SSE 流式（竞速需收完整响应仲裁）；`race` 会复制提示词 N 份 + 付费档 N 倍计费（默认 `fallback`，UI 显式提示）。
 
 ---
 
