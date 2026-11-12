@@ -277,9 +277,21 @@
 
 **主会话自查结论：** ✅ 六面无阻断项；自查中发现并修复 2 处（K8 守卫覆盖不全、LogsPage 同名函数口径混淆）。
 
-**独立子代理结论：** ⏳ 已启动、待回传（上游速率较慢）。到达后补入本节并同步 L-10；若发现阻断项按「缺陷显式带入下一轮」处理。
+**独立子代理结论（11-12 回传）：⚠️ 有条件通过** —— 六面无 ❌（面 1/2/4 ✅，面 3/5/6 ⚠️），核心目标均已落地；但列出 1 个 **P0 阻断项 B** 与 A/C/D/E/F/H 低中优先项。逐项处置：
 
-**结论：** ✅ **有条件通过** —— 条件 = 独立审查待回传、部署窗口未到、V-6b / 累计统计 vendor 维度 / 4 条时间炸弹等按「阶段开头遗留」如实带入，不伪装全绿。
+| 编号 | 级别 | 问题 | 处置 |
+|---|---|---|---|
+| **B** | **P0 阻断** | `ClearCallLog()` 未清 Kilo 第三来源 → 用户「清空日志」后 Kilo 记录复活（本阶段引入的回归） | ✅ **已修**：`calllog.go` 增 `removeLogFileRetry(m.KiloCallsLogPath())`（含 `.1`）+ 订正注释；新增单测 `TestKiloCallLogClearCoversKilo`；端到端实证：清空前 kilo=1 → `POST /call-log/clear` 200 → 清空后 kilo=0、文件删除。提交 `b0c509f` |
+| A | P1 | 落盘改为同步串行，偏离计划「异步有界队列 + Flush」 | ✅ **书面接受偏离**，理由/代价/后续另立阶段已写入 §风险与降级「实施偏离」小节，不记全绿 |
+| C | P2 | `probeKilo` 值返回 + defer 改副本 → `duration_ms` 恒 0 | ✅ 已修改为命名返回值 `(chk DiagCheck)` |
+| D | P2 | 统计累计表注释「不随筛选拆分」但筛选态取 `insOkFail[vendorFilter]` 自相矛盾 | ✅ 已改为始终全量 `reduce`，与注释一致 |
+| E | P2 | `call_log_max` 不约束 Kilo 日志、日志页文案对 Kilo 不成立 | ✅ 文案限定为「统一网关日志保留上限（Kilo 按文件大小轮转）」；设置页小字已诚实标注；后端条数约束登记为遗留 |
+| H | P2 | `main.go:630` / `diag_api.go:3` 仍写「三端口自检」 | ✅ 已改「四服务自检」 |
+| F | P2 | 泄密断言仅 5 子串、`nil record` 未真测 nil、无 handleChat 端到端落盘断言 | ✅ 补 `ClassifyVendor(nil)` 真用例；泄密/端到端落盘覆盖登记为遗留（L-3 已有真实请求 → 落盘 → 合并 → 重启读取的完整实证） |
+
+**审查复核跑数**：`go build ./...`=0、`go vet . ./core/manager/`=0、`npx tsc -b`=0、`go test -run 'Kilo|CallLog|Vendor|Classify' -race` 全 PASS（含新增清空用例与 nil 用例）。
+
+**结论：** ✅ **有条件通过（P0 阻断项 B 已修并复验）** —— 条件 = 部署窗口未到、A 的同步落盘偏离书面登记为已知限制、E/F 的后端条数约束与端到端落盘单测登记遗留、V-6b / 累计统计 vendor 维度 / 4 条时间炸弹按「阶段开头遗留」如实带入，不伪装全绿。
 
 ---
 
@@ -296,9 +308,9 @@
 | L-7 | 设置页 | ✅ | 服务端口表 4 行（dev 显示 44100/44180/44280/30082）+「配置值/生效值」双列 + 状态列；运行参数区含 `call_log_max`(5000) 与 `ui_poll_interval_sec`(5)；截图见 `C:\Users\ASUS\.zcode\cli\artifacts\...` |
 | L-8 | 红线 | ✅ | 生产 40000/40080/50080 全程在听；生产 `bin/dist/index.html` 仍 11-07 未替换；`bin/opencode2api.exe` 为本地重编（未部署）；新增文件密钥扫描 0 命中；落盘单测断言不含 `messages/content/Bearer/Authorization`；隔离端口 40998/30083 清场 |
 | L-9 | 文档 | ✅ | `docs/issue-log/2026-11-12.md` 追加阶段 L 完整记录（含两次误操作如实登记）；`OPEN.md` 更新 Kilo 行 + 新增「累计统计缺 vendor 维度」待办；本计划状态/验收表/审查表回填 |
-| L-10 | 独立审查 | ⏳ | 独立子代理已启动，结论到达后补入 §代码审查；主会话已按六面自查并修复 2 处（K8 守卫覆盖 `kilo_calls_log.go` + main 包 banned、LogsPage 局部 `vendorOf` 改名 `vendorIdOf`），见提交 `7c20d64` |
+| L-10 | 独立审查 | ✅ | 独立子代理判「有条件通过」：六面无 ❌、1 个 P0 阻断项 B（清空日志未覆盖 Kilo）**已修并端到端复验**（`b0c509f`）；A 同步落盘偏离书面接受并登记已知限制；C/D/E/H/F 已修或如实登记遗留。见 §代码审查 |
 
-**总评：** L-1~L-9 通过；L-10 独立审查待回传。**阶段 L 代码与验收完成，唯一未完 = 部署**（需停机窗口，非缺陷）。
+**总评：** L-1~L-10 全部通过（L-10 按「独立审查有条件通过 + P0 已修复验」记）。**阶段 L 代码与验收完成，唯一未完 = 部署**（需停机窗口，非缺陷）。
 **过程误操作（已完全还原、无语义影响）**：① 误 `gofmt -w core/manager/*.go` 格式化整目录 → `git checkout-index -f -a` 还原，`git diff --ignore-space-at-eol` 验证零语义差异；② 误把 `gofmt -w` 用于 `LogsPage.tsx` → 从 HEAD `git checkout --` 恢复并重做重命名。两次均违反 Global Constraints 8，如实登记。
 
 ---
@@ -311,6 +323,14 @@
 | 异步落盘队列满丢记录 | 容量 256 + 单写 goroutine；满时 `slog.Warn` 并丢弃**最新**一条（保留旧记录，避免日志断层被误读）；`Stop()` 时 `Flush` |
 | 供应商分类口径三处漂移 | 后端 `calllog_vendor.go` 为单一真源，前端 `vendor.ts` 同款规则并互相注释指向；单测锁死三类 |
 | 日志文件被两个进程同时写 | 仅 manager 进程写 Kilo 日志（provider-service 模式不启动 Kilo 网关，见阶段 K 约束）；用 `O_APPEND` 单行写 |
+
+### 实施偏离：落盘改为同步（独立审查 A 项，书面接受为已知限制）
+
+计划 Task 1 原定「异步有界队列（容量 256）+ 单写 goroutine + 满时丢弃最新 + `FlushKiloCalls()`」。**实际实现为 `sync.Mutex` 串行同步写**（`kilo_calls_log.go`）。独立审查判为中（P1）偏离，主会话**书面接受该偏离**，理由与代价如实登记：
+
+- 理由：① 本地单行 `O_APPEND` + `json.Marshal` 为微秒级，实测真请求 `duration_ms` 全链路 4683ms 中落盘占比可忽略；② `kiloCallWriter` 每次 open/close、不常驻 fd，`ClearCallLog` 可直接删文件；③ 异步队列在「toggle 停用 → `Stop()` → 再 `Start()`」和「进程退出」两个窗口存在丢日志/flush 生命周期复杂度，同步写反而更可靠、无「队列满静默丢最新」的观测盲区；④ 失败只 `slog.Warn`，不传播到响应路径。
+- 代价（已知限制）：高并发（数百 QPS）或磁盘抖动时，所有 30080 请求争同一把锁串行化，文件 IO 时延会叠加到响应路径；`call_log_max` 不约束 Kilo 日志条数（仅 8MB 字节轮转，见 E）。
+- 若将来 30080 需要高并发生产负载，另立阶段改为异步队列并补 `Flush`/重启语义。**本阶段验收表不把此项记为全绿**，按「已知限制」带入。
 | dev 前端改动不生效 | `npm run build` 后必须同步 `dist/` → `src-tauri/target/debug/bin/dist/`（阶段 K 已踩） |
 | 统计累计来源无 vendor 维度 | 如实标注口径，不伪装已拆分；登记 OPEN.md 待办，不在本阶段扩后端统计写入 |
 
