@@ -589,6 +589,14 @@ export type KiloModelsView = {
   data_policy_reference: string
 }
 
+/** 阶段 M：Kilo 命名虚拟模型 */
+export type KiloVirtualModel = {
+  name: string
+  models: string[]
+  strategy: 'fallback' | 'round_robin' | 'race'
+  enabled: boolean
+}
+
 /** 一次 Kilo chat 调用的真实模型观测（需求 #1） */
 export type KiloCallRecord = {
   time: string
@@ -1217,6 +1225,12 @@ export const api = {
   kiloCalls: () => req<{ calls: KiloCallRecord[] }>('GET', '/kilo/calls'),
   /** 手动强制实拉上游目录（绕过节流）；返回刷新后的状态 */
   kiloRefresh: () => req<{ total: number; status: KiloGatewayStatus }>('POST', '/kilo/refresh'),
+  /** 阶段 M：虚拟模型列表 / 新增或更新 / 删除 */
+  kiloVirtualList: () => req<{ models: KiloVirtualModel[] }>('GET', '/kilo/virtual'),
+  kiloVirtualUpsert: (vm: KiloVirtualModel) =>
+    req<{ status: string; models: KiloVirtualModel[] }>('POST', '/kilo/virtual', vm),
+  kiloVirtualDelete: (name: string) =>
+    req<{ status: string; models: KiloVirtualModel[] }>('DELETE', `/kilo/virtual?name=${encodeURIComponent(name)}`),
   freeTierProbe: (model?: string) =>
     req<ModelProbeResponse>('POST', '/free-tier/probe', { model: model ?? '' }),
   diag: () => req<DiagReport>('GET', '/diag'),

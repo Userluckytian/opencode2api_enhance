@@ -602,7 +602,7 @@ func (g *kiloGateway) handleModels(w http.ResponseWriter, r *http.Request) {
 		})
 		return
 	}
-	data := make([]map[string]any, 0, len(entries))
+	data := make([]map[string]any, 0, len(entries)+4)
 	for _, e := range entries {
 		data = append(data, map[string]any{
 			"id":       e.ID,
@@ -610,6 +610,20 @@ func (g *kiloGateway) handleModels(w http.ResponseWriter, r *http.Request) {
 			"created":  0,
 			"owned_by": "kilo",
 		})
+	}
+	// 阶段 M：已启用的命名虚拟模型也出现在 /v1/models，客户端可直接选用。
+	if g.virtual != nil {
+		for _, vm := range g.virtual.List() {
+			if !vm.Enabled {
+				continue
+			}
+			data = append(data, map[string]any{
+				"id":       vm.Name,
+				"object":   "model",
+				"created":  0,
+				"owned_by": "kilo-virtual",
+			})
+		}
 	}
 	_ = json.NewEncoder(w).Encode(map[string]any{"object": "list", "data": data})
 }

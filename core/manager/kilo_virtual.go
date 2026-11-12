@@ -115,6 +115,21 @@ func (s *kiloVirtualStore) List() []VirtualModel {
 // ListAll 含未启用的（管理端点用）。
 func (s *kiloVirtualStore) ListAll() []VirtualModel { return s.List() }
 
+// ---- main 包管理端点用的导出包装（不暴露私有 store 类型）----
+
+// KiloVirtualList 返回全部虚拟模型（含未启用）。
+func (m *Manager) KiloVirtualList() []VirtualModel { return m.KiloGateway().virtual.List() }
+
+// KiloVirtualUpsert 新增/更新一个虚拟模型。
+func (m *Manager) KiloVirtualUpsert(vm VirtualModel) error {
+	return m.KiloGateway().virtual.Upsert(vm)
+}
+
+// KiloVirtualDelete 按名称删除。
+func (m *Manager) KiloVirtualDelete(name string) error {
+	return m.KiloGateway().virtual.Delete(name)
+}
+
 func (s *kiloVirtualStore) Get(name string) (VirtualModel, bool) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()

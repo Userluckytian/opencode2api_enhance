@@ -392,6 +392,40 @@ func kiloGatewayRefreshHandler(m *manager.Manager) http.HandlerFunc {
 	}
 }
 
+// kiloGatewayVirtualHandler：阶段 M 虚拟模型管理（GET 列表 / POST upsert / DELETE）。
+func kiloGatewayVirtualHandler(m *manager.Manager) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodGet:
+			writeJSONResp(w, map[string]any{"models": m.KiloVirtualList()})
+		case http.MethodPost:
+			var vm manager.VirtualModel
+			if err := json.NewDecoder(r.Body).Decode(&vm); err != nil {
+				writeErrResp(w, http.StatusBadRequest, "请求体需为虚拟模型 JSON")
+				return
+			}
+			if err := m.KiloVirtualUpsert(vm); err != nil {
+				writeErrResp(w, http.StatusBadRequest, err.Error())
+				return
+			}
+			writeJSONResp(w, map[string]any{"status": "ok", "models": m.KiloVirtualList()})
+		case http.MethodDelete:
+			name := r.URL.Query().Get("name")
+			if name == "" {
+				writeErrResp(w, http.StatusBadRequest, "需提供 ?name=")
+				return
+			}
+			if err := m.KiloVirtualDelete(name); err != nil {
+				writeErrResp(w, http.StatusInternalServerError, err.Error())
+				return
+			}
+			writeJSONResp(w, map[string]any{"status": "ok", "models": m.KiloVirtualList()})
+		default:
+			writeErrResp(w, http.StatusMethodNotAllowed, "GET/POST/DELETE only")
+		}
+	}
+}
+
 // kiloGatewayToggleHandler POST body {enabled?:bool, free_only?:bool}：
 // 写配置（ConfigSet 持久化）+ 立即生效（Start/Stop），两段结果都回给前端，
 // 任何一段失败都不假装成功（引擎 reload 教训：成功=观测到期望值）。
@@ -625,6 +659,7 @@ func registerHTTPRoutes(mux *http.ServeMux, managerInst *manager.Manager, plugin
 	mux.HandleFunc("/api/admin/kilo/toggle", loggingMiddleware(requireAuth(kiloGatewayToggleHandler(managerInst))))
 	mux.HandleFunc("/api/admin/kilo/calls", loggingMiddleware(requireAuth(kiloGatewayCallsHandler(managerInst))))
 	mux.HandleFunc("/api/admin/kilo/refresh", loggingMiddleware(requireAuth(kiloGatewayRefreshHandler(managerInst))))
+	mux.HandleFunc("/api/admin/kilo/virtual", loggingMiddleware(requireAuth(kiloGatewayVirtualHandler(managerInst))))
 	// 手动探测：对引擎发一次最小请求，用真实状态码判定模型可用性
 	mux.HandleFunc("/api/admin/free-tier/probe", loggingMiddleware(requireAuth(modelProbeHandler(managerInst))))
 	// 诊断：四服务自检 + 配置/二进制检查
