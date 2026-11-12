@@ -53,7 +53,7 @@ export default function KiloPage({ toast }: { toast: (msg: string, ok?: boolean)
   const [status, setStatus] = useState<KiloGatewayStatus | null>(null)
   const [models, setModels] = useState<KiloModelEntry[]>([])
   const [loading, setLoading] = useState(true)
-  const [busy, setBusy] = useState<'stop' | 'toggle' | 'refresh' | null>(null)
+  const [busy, setBusy] = useState<'toggle' | 'refresh' | null>(null)
 
   const aliveRef = useRef(true)
 

@@ -36,11 +36,11 @@ func channelOf(r *CallLogRecord) (string, bool) {
 	if r.Channel == "warp" || r.Channel == "key" {
 		return r.Channel, false
 	}
-	// 旧日志无 Channel：按来源与 vendor 兜底。要求明确来自引擎，避免把
-	// 恰好命名为 opencode 的自定义源误算进 WARP 通道。
-	isEngine := r.Source == "OpenCode 引擎" ||
-		((r.Vendor == "opencode" || r.Vendor == "zen" || r.Vendor == "go") &&
-			(r.Source == "" || r.Source == "OpenCode 引擎"))
+	// 旧日志无 Channel：只认明确来自 OpenCode 引擎的记录。
+	// ReadCallLog 会覆写 Source（引擎="OpenCode 引擎"，JSONL="供应商服务"/
+	// "Kilo 独立网关"），故无需放宽到 Source==""——那样反而可能把恰好叫
+	// opencode 的自定义源误算进 WARP（独立审查 P2 #2）。
+	isEngine := r.Source == "OpenCode 引擎" && (r.Vendor == "opencode" || r.Vendor == "zen" || r.Vendor == "go")
 	if !isEngine {
 		return "other", false
 	}

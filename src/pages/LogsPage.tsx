@@ -250,8 +250,9 @@ const LogRow = memo(function LogRow({
           if (ch === 'key') {
             return <span className="shrink-0 text-[11px] text-emerald-700 bg-emerald-100 rounded-md px-2 py-0.5" title={`引擎 stdout: channel=key, tier=${rec.tier || 'zen|go'}`}>key 通道</span>
           }
-          // 旧引擎日志无 channel 字段：仅对明确的引擎记录做兜底，避免误导
-          if (rec.source === 'OpenCode 引擎' || rec.vendor === 'zen' || rec.vendor === 'go' || rec.vendor === 'opencode') {
+          // 旧引擎日志无 channel 字段：与后端 channelOf 同款（必须明确来自引擎
+          // 且 vendor 在白名单），避免「前端标推断 / 后端归 other」口径不一致。
+          if (rec.source === 'OpenCode 引擎' && ['opencode', 'zen', 'go'].includes(rec.vendor || '')) {
             const inferred = rec.vendor === 'zen' || rec.vendor === 'go' ? 'key 通道' : 'WARP 匿名'
             return <span className="shrink-0 text-[11px] text-zinc-500 bg-zinc-100 rounded-md px-2 py-0.5" title="旧日志无 channel 字段，按厂商推断">{inferred}·推断</span>
           }

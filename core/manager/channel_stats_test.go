@@ -74,6 +74,10 @@ func TestChannelOf(t *testing.T) {
 		{"custom stays other", CallLogRecord{Vendor: "xhx"}, "other", false},
 		{"legacy opencode inferred warp", CallLogRecord{Vendor: "opencode", Source: "OpenCode 引擎"}, "warp", true},
 		{"legacy zen inferred key", CallLogRecord{Vendor: "zen", Source: "OpenCode 引擎"}, "key", true},
+		// 独立审查 P2 #2：收紧后「非空非引擎来源 + vendor=opencode」必须归 other，不算推断
+		{"non-engine source with opencode vendor", CallLogRecord{Vendor: "opencode", Source: "供应商服务"}, "other", false},
+		{"non-engine source with zen vendor", CallLogRecord{Vendor: "zen", Source: "自定义源"}, "other", false},
+		{"empty source with opencode vendor", CallLogRecord{Vendor: "opencode", Source: ""}, "other", false},
 		{"legacy empty vendor", CallLogRecord{Source: "OpenCode 引擎"}, "other", false},
 	}
 	for _, c := range cases {
