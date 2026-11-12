@@ -1,9 +1,10 @@
 # 阶段 N：修复 CI 引擎源 + 发布 v2.0.5
 
-> **状态：** 计划已就绪，待批准后实施
+> **状态：** ✅ 已完成（2026-11-12，v2.0.5 Release 已发布）
 > **For agentic workers:** 按 Task 顺序执行；每 Task 测完再进下一 Task。验收认证据，禁止「应该能过」。
 > **元规范:** `docs/ai-framework/phased-plan-driven.md`；仓库约定 `AGENTS.md`
 > **基线分支：** `main`（tip `3df13f0`，已 push 到 origin，本地 2 分支与线上一致）
+> **交付提交：** `5ea9e74`(计划) / `f142f6e`(CI 引擎源) / `f8ec61f`(CHANGELOG) / `68d3ddf`(CI 空提交)；tag `v2.0.5`（object `2d504e6`）
 
 **Goal:** 把 CI 里已 404 的引擎源码源 `wbi35772/opencode2api-win@9964407` 换成真上游 `jasonxu114514/opencode2api@v1.4.7`（11-11 调研已实测兼容），修复三平台 build，然后写 v2.0.5 CHANGELOG、打 tag 推送，触发完整打包 + 发 GitHub Release。
 
@@ -182,17 +183,20 @@
 
 ---
 
-## 验收标准总表
+## 验收标准总表（2026-11-12 回填，逐条附真实输出）
 
-| # | 标准 | 通过条件 | 责任人 |
-|---|---|---|---|
-| N-1 | 本地验证 | YAML 可解析；引擎源码 clone+`go build ./cmd/opencode2api` exit 0；`git diff --check` 干净 | 自动化 |
-| N-2 | GPL 合规 | `SOURCE.txt` 上游 URL/commit = workflow 实际 clone 值；`LICENSE` 未改；CI 会生成 `COMMIT.txt` + 源码 tar.gz | 主会话 + 子代理 |
-| N-3 | CI build 修复 | 推 main 后新 run 三平台 `Build free-tier engine` 不再 `Repository not found`，build job 成功（或至少越过该步骤） | GitHub API 只读复核 |
-| N-4 | tag + Release | `v2.0.5` tag 在远程；GitHub Actions tag run 的 `release` job 成功；Release 非 draft、含安装包 assets、正文含 v2.0.5 CHANGELOG 段 | GitHub API |
-| N-5 | 红线 | 未 push 其它分支；未改生产 exe/配置；本地仍 2 分支；工作区干净 | 主会话 |
-| N-6 | 文档 | issue-log / OPEN.md / 计划回填 | 主会话 |
-| N-7 | 独立审查 | 5 面结论 + 阻断项清单 | 子代理 |
+| # | 标准 | 结果 | 命令 + 输出摘要 |
+|---|------|------|----------------|
+| N-1 | 本地验证 | ✅ | `yaml.safe_load(build-release.yml)` → `jobs=['build','release']`、`on.push.branches=['main','feat/desktop-app']`；`git diff --check` 干净；**本地复现 CI 引擎构建**：clone `jasonxu114514/opencode2api` → checkout `b296a61` → `CGO_ENABLED=0 go build -trimpath -ldflags "-s -w" -o <abs> ./cmd/opencode2api` → exit 0、产物 14,096,896 字节（Windows `%TEMP%` 根目录被 Go 拒绝，改项目内 `.scratch/` 绝对路径后通过） |
+| N-2 | GPL 合规 | ✅ | `SOURCE.txt` 上游 URL/commit = workflow `ENGINE_REPO`/`ENGINE_COMMIT`（`jasonxu114514/opencode2api` / `b296a61…`）；`README.md`/fetch 脚本/Go 注释同步；**LICENSE 未改**；CI 的 `Package GPL source` 三平台 success，`COMMIT.txt` 与源码 tar.gz 由 `git archive` 自动生成；Release assets 含 `opencode2api-win-gpl-v2.0.5.tar.gz` |
+| N-3 | CI build 修复 | ✅ | 推 main（CI 空提交 `68d3ddf`）→ run **`43152620288` = success**：三平台 `Build free-tier engine` + `Package GPL source` 全 success，不再 `Repository not found`；`release` 按预期 skipped（push 非 tag） |
+| N-4 | tag + Release | ✅ | `git tag -a v2.0.5`（object `2d504e6` → commit `68d3ddf`）→ push `[new tag] v2.0.5 -> v2.0.5` → tag run **`43155170426` = success**（windows/ubuntu/macos build + `release` 全 success）；Release `v2.0.5`：`draft=false`、`prerelease=false`、发布 2026-11-12T04:35:59Z、**5 assets**（gpl 源码包 + NSIS/deb/AppImage/dmg），正文取自 CHANGELOG `## v2.0.5` 段 |
+| N-5 | 红线 | ✅ | 只 push `main` 与 `v2.0.5` tag；本地仍 2 分支（main + feature/web-self-service）；`main` 与 `origin/main` 0/0；生产 exe/配置未动；工作区干净 |
+| N-6 | 文档 | ✅ | `docs/issue-log/2026-11-12.md` 阶段 N 记录；`OPEN.md` 新增「产物版本名 2.0.4 不一致」待办并更新 Kilo 行；本计划状态/验收表/审查表回填 |
+| N-7 | 独立审查 | ⏳ | 独立子代理已启动，结论到达后补入 §代码审查 |
+
+**总评：** N-1~N-6 通过；N-7 独立审查待回传。**阶段 N 完成，v2.0.5 已发布**。
+**遗留（如实）**：① 安装包文件名仍带 `2.0.4`（`package.json`/`tauri.conf.json` 版本未 bump，不影响功能，已登记 OPEN.md）；② 生产部署仍需停机窗口；③ 11-11 调研 R1（生产引擎换 v1.4.7）另立阶段。
 
 ---
 
