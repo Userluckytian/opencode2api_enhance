@@ -1,6 +1,6 @@
 # 阶段 P：Kilo 页 UI 对齐优化（设计 skill 分析）
 
-> **状态：** ✅ 已完成（2026-11-12，UI 优化 + 独立审查收口），**待部署**（纯前端，用户自行更新；不自动发版）
+> **状态：** ✅ 已完成（2026-11-12，UI 优化 + 独立审查收口），**已随 v2.0.7 发布**（tag run `43171735361` success；生产由用户自行更新）
 > **For agentic workers:** 按 Task 顺序执行；每 Task 测完再进下一 Task。验收认证据，禁止「应该能过」。
 > **元规范:** `docs/ai-framework/phased-plan-driven.md`；仓库约定 `AGENTS.md`
 > **基线分支：** `main`（tip `e3554cb`，与 origin 同步，本地 2 分支）
