@@ -179,7 +179,18 @@
 | 发版边界（只 push main + tag、未动生产配置） | | |
 | 验证证据（build 真通过、Release 真发布） | | |
 
-**结论：** ⬜
+**独立子代理结论（11-12 回传）：✅ 有条件通过** —— 五面无 ❌ 阻断项：GPL 合规 ⚠️（实质一致，1 处逐字差异）、CI 可复现 ✅、CHANGELOG ⚠️（格式对、透明度缺 1 项）、发版边界 ✅、验证证据 ✅。4 项待收口：
+
+| 编号 | 级别 | 问题 | 处置 |
+|---|---|---|---|
+| B1 | 高（透明度） | `SOURCE.txt`「本项目当前 WARP 关闭，运行不到该路径」与代码默认 `engineWarpEnabled()=true`（`config.go:518-524`）、`warp_first` 冲突；公开 Release 正文未披露「引擎改 stock、失 sessionGuard」 | ✅ 已修：`SOURCE.txt` 改为「全新安装默认 WARP 开启，启用前评估」，CHANGELOG v2.0.5「已知限制」补引擎血统变更与 sessionGuard/24h 冷却说明（提交 `336f12f`）。**注**：已发布 Release 正文是快照，见下方残留 |
+| B2 | 中 | 产物文件名 2.0.4 / `latest.json` 2.0.5 不一致，疑似 updater 误报更新 | ✅ 已登记 OPEN.md + 计划残留清单 + CHANGELOG 已知限制；未实机验证 updater，如实标注 |
+| B3 | 中（GPL 字面） | `SOURCE.txt` URL 缺 `.git` 与 workflow 不逐字一致 | ✅ 已修：`SOURCE.txt` 第 2 节改带 `.git` 并附浏览 URL，复核 `SOURCE URL == ENGINE_REPO` 且 `commit == ENGINE_COMMIT` 逐字相同 |
+| B4 | 低 | `freetier_engine.go:183-196` 仍以旧分叉 24h 冷却为前提论证 `max_hours=24`，stock v1.4.7 实为 30min | ✅ 注释加「前提基于旧分叉，待 R1 重估」，常量未改（调研明确本轮不改） |
+
+**复核跑数**：`grep -c '^## v2.0.5' CHANGELOG.md` = 1、首 token `v2.0.5`；SOURCE URL/SHA 与 workflow 逐字相同；`git diff --check` 干净；`go build ./...`=0。
+
+**结论：** ✅ **有条件通过** —— 条件 = B1 的已发布 Release 正文披露只能靠编辑 Release（外发）或下版本补记、B2/B4 按遗留另立阶段、生产部署仍需停机窗口，均如实登记，不伪装全绿。
 
 ---
 
@@ -193,7 +204,7 @@
 | N-4 | tag + Release | ✅ | `git tag -a v2.0.5`（object `2d504e6` → commit `68d3ddf`）→ push `[new tag] v2.0.5 -> v2.0.5` → tag run **`43155170426` = success**（windows/ubuntu/macos build + `release` 全 success）；Release `v2.0.5`：`draft=false`、`prerelease=false`、发布 2026-11-12T04:35:59Z、**5 assets**（gpl 源码包 + NSIS/deb/AppImage/dmg），正文取自 CHANGELOG `## v2.0.5` 段 |
 | N-5 | 红线 | ✅ | 只 push `main` 与 `v2.0.5` tag；本地仍 2 分支（main + feature/web-self-service）；`main` 与 `origin/main` 0/0；生产 exe/配置未动；工作区干净 |
 | N-6 | 文档 | ✅ | `docs/issue-log/2026-11-12.md` 阶段 N 记录；`OPEN.md` 新增「产物版本名 2.0.4 不一致」待办并更新 Kilo 行；本计划状态/验收表/审查表回填 |
-| N-7 | 独立审查 | ⏳ | 独立子代理已启动，结论到达后补入 §代码审查 |
+| N-7 | 独立审查 | ✅ | 独立子代理判「有条件通过」，无 ❌ 阻断项；B1/B3 已修（`336f12f`），B2/B4 登记遗留。见 §代码审查 |
 
 **总评：** N-1~N-6 通过；N-7 独立审查待回传。**阶段 N 完成，v2.0.5 已发布**。
 **遗留（如实）**：① 安装包文件名仍带 `2.0.4`（`package.json`/`tauri.conf.json` 版本未 bump，不影响功能，已登记 OPEN.md）；② 生产部署仍需停机窗口；③ 11-11 调研 R1（生产引擎换 v1.4.7）另立阶段。
