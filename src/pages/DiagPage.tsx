@@ -25,6 +25,7 @@ import {
   type MetricKeyStats,
   type MetricSuggestions,
 } from '../lib/api'
+import ChannelStatsCard from './ChannelStatsCard'
 
 /** 状态码 → 颜色：2xx 绿、4xx 橙、5xx 红。 */
 function statusCls(code: number): string {
@@ -325,6 +326,9 @@ export default function DiagPage({
           </div>
         </div>
       )}
+
+      {/* 阶段 O：OpenCode 引擎通道分析（自包含组件，不改本页 state） */}
+      <ChannelStatsCard />
 
       {/* 引擎实时 */}
       <div className="bg-white rounded-2xl border border-zinc-200 shadow-sm p-5">
