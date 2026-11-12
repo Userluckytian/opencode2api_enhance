@@ -10,6 +10,7 @@ import {
   Square,
 } from 'lucide-react'
 import { api, type KiloGatewayStatus, type KiloModelEntry } from '../lib/api'
+import VirtualModelsCard from './VirtualModelsCard'
 
 /**
  * Kilo 独立网关页面（阶段 K）。
@@ -368,6 +369,9 @@ export default function KiloPage({ toast }: { toast: (msg: string, ok?: boolean)
           目录来自上游实时拉取（不硬编码）；上游免费档会漂移，可点「刷新目录」强制重拉。
         </div>
       </div>
+
+      {/* 阶段 M：命名虚拟模型（自包含组件，不改本页现有 state） */}
+      <VirtualModelsCard models={models} toast={toast} />
 
       {/* 阶段 L：调用记录已持久化并并入统一日志，见【日志】页（可按供应商筛选） */}
       <div className="rounded-2xl border border-zinc-200 bg-zinc-50/60 px-4 py-3 text-[12.5px] text-zinc-500">
