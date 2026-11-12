@@ -1,6 +1,6 @@
 # 阶段 P：Kilo 页 UI 对齐优化（设计 skill 分析）
 
-> **状态：** 计划已就绪，待批准后实施
+> **状态：** ✅ 已完成（2026-11-12，UI 优化 + 独立审查收口），**待部署**（纯前端，用户自行更新；不自动发版）
 > **For agentic workers:** 按 Task 顺序执行；每 Task 测完再进下一 Task。验收认证据，禁止「应该能过」。
 > **元规范:** `docs/ai-framework/phased-plan-driven.md`；仓库约定 `AGENTS.md`
 > **基线分支：** `main`（tip `e3554cb`，与 origin 同步，本地 2 分支）
@@ -193,25 +193,42 @@
 | 响应式（窄屏不重叠/不溢出） | | |
 | 风格与规范（无新依赖/无全局样式改动） | | |
 
-**结论：** ⬜
+**结论：** ✅ **通过**（无 P0 阻断项；P1 已修、2-1 副句已删、P3 顺手收口 3 项）
+
+**独立子代理结论（11-12 回传）：有条件通过 → 收口后通过** —— 六面：功能零回归 ✅（决定性证据：diff 第一实质 hunk `@@ -142,76 +166,77 @@`，改动起点在旧文件 142 行，此前 state/reload/5s 轮询/cleanup/4 handler/toast 全部字节未动）、警示本体 ✅、信息完整 ⚠️→✅、设计一致性 ✅、响应式 ✅、风格规范 ✅。**无 P0 阻断项**。条件两项处置：
+
+| 编号 | 级别 | 问题 | 处置 |
+|---|---|---|---|
+| P1 | 中 | 「目录更新」截 `slice(11,19)` 丢日期+时区，且 `Stat` 的 `title={value}` 绑的是裁剪值、hover 补不回完整 RFC3339（违反 Global Constraint #3「不改变信息」） | ✅ **已修**（`07af7f2`）：`value={status?.last_refresh || '—'}`，复用 `Stat` 自带 `truncate + title`；浏览器实测 hover `title=2026-11-12T14:50:19+08:00` |
+| P2 | 低 | 警示新增副句字面偏离用户 2-1「只保留一句」（根因：计划 Constraint #2 与 12 条清单 #8 自相矛盾） | ✅ **裁定：按用户原始 2-1 意见删副句**（`07af7f2`），横幅严格一句「数据可能被上游训练」；常驻/不可关闭/唯一 rose 元素均保持。验收表 P-3 如实登记此裁定，不伪装全绿 |
+| P3 | 观察 | 虚拟模型卡缺 teal 图标 / failed 态圆点灰 / 复制按钮 24px 点击区 | ✅ 顺手收口（`612d2fa`）：补 `Workflow` 图标、failed 圆点 `bg-red-500`、复制按钮 `p-1.5` |
+| P3 | 观察 | h1→h3 跳级 / checkbox 留在卡内 / 4 小步 commit 合并为 1 个 | ⚠️ 如实登记：h1→h3 与 DiagPage 同款（对齐既有体系）；checkbox 按 Task 3 留卡内；提交过程偏离不影响交付 |
+
+**Q1 误删功能**：审查逐项核对 `status?.free_only ?? true`、`busy` 联合、空态条件（等价迁移到表外 `!loading && visible.length===0`）、loading 分支 —— **没有误改**。
+**Q4 生产异常**：纯前端、零新依赖、零全局 CSS、零 API/后端改动；即使 dist 与 exe 版本错配也只影响 UI 显示，不会接口异常。
+
+**复核跑数**：`npx tsc -b`=0、`npm run build`=0（469 kB）、`git diff --check` 干净；内置浏览器 dev 44100 断言 `hasH1=true / bannerOneSentence=true / hasProbe=false / hasFullTimestampTitle=true / hasStatGrid=true`；改前/改后/900px 窄屏三张截图已出。
 
 ---
 
-## 验收标准总表
+## 验收标准总表（2026-11-12 回填，逐条附真实输出）
 
-| # | 标准 | 通过条件 | 责任人 |
-|---|---|---|---|
-| P-1 | 构建 | `npx tsc -b`=0；`npm run build`=0；`git diff --check` 干净 | 自动化 |
-| P-2 | 功能零回归 | `grep` 核对 `api.kiloStatus/kiloModels/kiloRefresh/kiloToggle` 调用与 5s 轮询全部保留；无新增/删除 API | 主会话 |
-| P-3 | 警示本体 | 横幅常驻、无 close handler、文案「数据可能被上游训练」一句保留 | 代码 + 浏览器 |
-| P-4 | 信息完整 | 端点/密钥/端口/目录数/代理/更新时间/错误条全部仍渲染 | 浏览器 |
-| P-5 | 设计对齐 | 有标题区；卡片 `p-5 shadow-sm`；区块标题 `text-lg`；按钮组独立工具条 | 浏览器 + 截图 |
-| P-6 | 表格 | sticky + 420px 限高保留；长 ID 不挤压后三列 | 浏览器 |
-| P-7 | 引导可见 | 「日志」引导位于状态卡后、模型卡前（首屏可见） | 浏览器 |
-| P-8 | 响应式 | 900px 视口下按钮组不重叠、表格不横向溢出 | 浏览器 |
-| P-9 | 红线 | 生产 exe/dist 未替换；无密钥入库；工作区干净 | 主会话 |
-| P-10 | 文档 | issue-log / OPEN.md / 计划回填 + 截图路径 | 主会话 |
-| P-11 | 独立审查 + 视觉验收 | 6 面结论 + 改前/改后截图对比 | 子代理 + 主会话 |
+| # | 标准 | 结果 | 命令 + 输出摘要 |
+|---|------|------|----------------|
+| P-1 | 构建 | ✅ | `npx tsc -b`=0；`npm run build`=0（469.67 kB）；`git diff --check` 干净 |
+| P-2 | 功能零回归 | ✅ | 独立审查决定性证据 `@@ -142,76 +166,77 @@`：4 个 `api.kilo*` 调用、5s 轮询 + aliveRef cleanup、4 handler、toast 透传全部字节未动；`VirtualModelsCard` 业务逻辑零改 |
+| P-3 | 警示本体 | ✅（含裁定） | 常驻、无 close/dismiss、主句「数据可能被上游训练」在、唯一 rose 元素；**裁定按用户 2-1 删副句，严格一句**（P2 偏离已消除并如实登记） |
+| P-4 | 信息完整 | ✅ | `address/api_key/port/model_total/model_shown/proxy/last_refresh/last_error` 全渲染；表格四列 + provider_name/free/tools/context 全在；「目录更新」交回完整 RFC3339，hover `title=2026-11-12T14:50:19+08:00` |
+| P-5 | 设计对齐 | ✅ | 12 条清单逐条落地：`p-6` 页头 + Cloud icon + h1 + 圆点徽章 + 右侧按钮组；主卡 `p-5 shadow-sm` + h3 + teal 图标；按钮 `text-[13px] px-3 bg-white`；Stat 卡网格；端点副行。**状态徽章三分支配色未改、未补 starting**（后端仅三态） |
+| P-6 | 表格 | ✅ | 钉 `w-16/w-20/w-20`、ID `truncate max-w-[420px] + title`、`max-h-[420px]` + sticky 保留、空态移出 tbody |
+| P-7 | 引导可见 | ✅ | 「日志」引导位于接入信息卡之后、模型卡之前（`hasLogHintFirst=true`），首屏可见 |
+| P-8 | 响应式 | ✅ | 900px 视口：按钮组刷新目录 x689 / 停用 x794 同行不重叠；表格 `scrollWidth==clientWidth=622` 无横向溢出 |
+| P-9 | 红线 | ✅ | 生产 exe/dist 未替换；无密钥入库；无新依赖/无全局 CSS 改动；工作区干净 |
+| P-10 | 文档 | ✅ | `docs/issue-log/2026-11-12.md` 阶段 P（含「试跑还在」版本差澄清）；`OPEN.md` 更新；本计划状态/验收表/审查表回填；改前/改后/窄屏三张截图存 artifacts |
+| P-11 | 独立审查 + 视觉验收 | ✅ | 独立子代理判「有条件通过 → 收口后通过」，无 P0 阻断；P1/P2 已修、P3 顺手收口 3 项；改前/改后/900px 三张截图对比 |
+
+**总评：** P-1~P-11 全部通过。**阶段 P 完成，唯一未完 = 部署**（纯前端 dist 需与 exe 同批替换，用户自行更新；不自动发版）。
+**遗留（如实）**：h1→h3 跳级（与 DiagPage 同款）、checkbox 留卡内（按 Task 3）、4 小步 commit 合并为 1 个（过程偏离）；「试跑还在」为 v2.0.6 早于阶段 O 的版本差，非 bug，是否发 v2.0.7 交用户决定。
 
 ---
 
