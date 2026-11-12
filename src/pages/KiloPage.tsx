@@ -47,15 +47,12 @@ function stateBadge(state: string, running: boolean): [string, string] {
   return ['bg-zinc-100 text-zinc-500', '已停止']
 }
 
-/** 数据政策警示：常驻、不可关闭（唯一玫瑰元素，阶段 P 降权为细条）。 */
+/** 数据政策警示：常驻、不可关闭（2-1：按用户意见只保留一句）。 */
 function DataPolicyBanner() {
   return (
-    <div className="flex items-center gap-2 rounded-xl border border-rose-200 bg-rose-50 px-4 py-2.5">
-      <ShieldAlert className="h-4 w-4 shrink-0 text-rose-600" />
-      <div className="min-w-0">
-        <div className="text-[12.5px] font-medium text-rose-800">数据可能被上游训练</div>
-        <div className="text-[11px] text-rose-700/70">Kilo 免费档提示词可能被上游记录并用于模型训练，请勿提交隐私或机密数据</div>
-      </div>
+    <div className="flex items-center gap-2 rounded-xl border border-rose-200 bg-rose-50 px-4 py-2">
+      <ShieldAlert className="h-3.5 w-3.5 shrink-0 text-rose-600" />
+      <span className="text-[12.5px] font-medium text-rose-800">数据可能被上游训练</span>
     </div>
   )
 }
@@ -64,11 +61,11 @@ function DataPolicyBanner() {
 const BTN_BASE = 'flex items-center gap-1.5 rounded-lg border px-3 py-1.5 text-[13px] disabled:opacity-40'
 
 /** 运行概览的单个 Stat 卡（对齐 DiagPage 的 Stat）。 */
-function Stat({ label, value }: { label: string; value: string }) {
+function Stat({ label, value, title }: { label: string; value: string; title?: string }) {
   return (
     <div className="rounded-xl border border-zinc-100 bg-zinc-50/60 p-3">
       <div className="text-[11px] text-zinc-500">{label}</div>
-      <div className="mt-1 truncate font-mono text-[13px] font-semibold text-zinc-900" title={value}>{value}</div>
+      <div className="mt-1 truncate font-mono text-[13px] font-semibold text-zinc-900" title={title ?? value}>{value}</div>
     </div>
   )
 }
@@ -266,7 +263,7 @@ export default function KiloPage({ toast }: { toast: (msg: string, ok?: boolean)
           <Stat label="监听端口" value={String(status?.port ?? '—')} />
           <Stat label="上游目录 / 展示" value={`${status?.model_total ?? 0} / ${status?.model_shown ?? 0}`} />
           <Stat label="出站代理" value={status?.proxy || '直连'} />
-          <Stat label="目录更新" value={status?.last_refresh ? status.last_refresh.slice(11, 19) : '—'} />
+          <Stat label="目录更新" value={status?.last_refresh ? status.last_refresh.slice(11, 19) : '—'} title={status?.last_refresh} />
         </div>
       </section>
 
