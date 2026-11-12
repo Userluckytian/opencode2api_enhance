@@ -17,8 +17,10 @@
 ### 已知限制
 
 - 本版本为代码发布；**生产部署**（替换 `bin/opencode2api.exe` + `bin/dist/`）仍需停机窗口单独执行。
+- **免费层引擎血统变更（重要）**：CI 构建源自 v2.0.5 起由 `wbi35772/opencode2api-win` 分叉切换为真上游 `jasonxu114514/opencode2api` stock v1.4.7。stock 版不含分叉自加的 `sessionGuard`（仅在 WARP lane 生效）与 24h 出口冷却（stock 恒 30min）。**全新安装默认 WARP 开启**，`sessionGuard` 缺失在 WARP 通道下可达；启用/保持 WARP 前请评估影响。当前生产运行态因 11-11 看门狗自动降级而关闭 WARP，且生产 40080 引擎已先行换为 v1.4.7，故生产与本次 CI 产物在引擎侧是对齐的。
 - 虚拟模型暂不支持 SSE 流式（竞速需收完整响应仲裁）。
 - 累计统计来源表暂无供应商维度（统计文件口径），筛选只作用于调用日志派生数据。
+- Release 安装包文件名仍沿用 `2.0.4`（`package.json` / `tauri.conf.json` 版本未 bump），内容即 v2.0.5；已登记待后续统一。
 
 ## v2.0.4（2026-11-07）
 

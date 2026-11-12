@@ -11,8 +11,10 @@ opencode2api-win —— 免费层引擎（40080）来源与许可证声明
                    见本目录 LICENSE
 
 2) 上游仓库
-   https://github.com/jasonxu114514/opencode2api
-   （原分叉 wbi35772/opencode2api-win 已于 2026-11-11 起 404/删除，
+   https://github.com/jasonxu114514/opencode2api.git
+   （浏览页面：https://github.com/jasonxu114514/opencode2api ；
+     CI clone 用带 .git 的上述地址，见 build-release.yml 的 ENGINE_REPO）
+   （原分叉 wbi35772/opencode2api-win 于 2026-11-11 起 404/删除，
      自 v2.0.5 起改用真上游 stock 版本交叉构建）
 
 3) 对应上游提交（我们内嵌/分发的二进制即由该提交构建）
@@ -21,8 +23,11 @@ opencode2api-win —— 免费层引擎（40080）来源与许可证声明
    提交说明: jasonxu114514/opencode2api v1.4.7（2026-11-05，stock）
    说明    : 11-11 调研已实测 stock v1.4.7 兼容本项目现有配置
              （SHA256 校验、/healthz 12/44、真实推理 3/3 200）；
-             相对旧分叉失去的 sessionGuard 只在 WARP lane 生效，
-             本项目当前 WARP 关闭，运行不到该路径。
+             相对旧分叉失去的 sessionGuard 只在 WARP lane 生效。
+             注意：本项目**全新安装默认 WARP 开启**（engineWarpEnabled 缺省
+             true、通道默认 warp_first），该路径可达；11-11 事故后当前生产
+             运行态因看门狗自动降级而关闭了 WARP。启用 WARP 前请评估
+             sessionGuard 缺失的影响。
 
 4) 构建命令（CI 与本仓库脚本 scripts/fetch-free-tier-engine.ps1 一致）
    CGO_ENABLED=0 GOOS=<os> GOARCH=<arch> \

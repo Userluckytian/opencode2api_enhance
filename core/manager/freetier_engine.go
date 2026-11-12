@@ -182,6 +182,9 @@ type engineAnonymousBackoff struct {
 //
 //   - 引擎的出口黑名单是固定 24h（internal/warp/pool.go:29
 //     `egressCooldown = 24 * time.Hour`，封禁不升级）。
+//     ⚠️ 该前提基于 11-11 之前的 wbi35772 分叉引擎；自 v2.0.5 起 CI 构建源
+//     换为 stock v1.4.7（其 egressCooldown 恒为 30min），常量与注释待 R1
+//     升级评估后重估（见 OPEN.md / 11-11 调研），本阶段未改。
 //   - 熔断窗口若比出口冷却期短（比如 6h < 24h），熔断一过出口还没解冻，
 //     引擎会再次陪跑匿名尝试、再把整池出口烧掉 —— 恰好是本熔断想避免的
 //     那个循环。
