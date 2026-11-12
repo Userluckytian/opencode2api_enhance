@@ -3,7 +3,6 @@ import clsx from 'clsx'
 import {
   Copy,
   Loader2,
-  Play,
   Power,
   RefreshCw,
   ShieldAlert,
@@ -19,8 +18,10 @@ import VirtualModelsCard from './VirtualModelsCard'
  *  1. 训练警示横幅常驻、不可关闭（需求本体），按用户意见精简为一句话；
  *  2. 只保留「只显示免费模型」一个开关：勾选=只免费，不勾=全部；
  *  3. 目录来自上游实时拉取且会漂移，提供手动强制刷新；
- *  4. 「最近调用」展示每次请求上游**真实返回**的模型（上游会静默换模型），
- *     网关只旁路观测、不改响应体。
+ *  4. 每次请求的上游**真实返回**模型由网关旁路观测并持久化，见【日志】页
+ *     （可按供应商筛选）；本页不重复展示。
+ *  5. 「试跑」按钮已移除：浏览器从 40000 页跨端口直连 30080 会被同源策略拦下
+ *     （30080 不带 CORS 头），实际不可用；验证请用 curl 或真实客户端直连 30080。
  */
 
 /** 上下文窗口展示：1048576 → 1M，128000 → 128K。 */
@@ -52,7 +53,7 @@ export default function KiloPage({ toast }: { toast: (msg: string, ok?: boolean)
   const [status, setStatus] = useState<KiloGatewayStatus | null>(null)
   const [models, setModels] = useState<KiloModelEntry[]>([])
   const [loading, setLoading] = useState(true)
-  const [busy, setBusy] = useState<'start' | 'stop' | 'toggle' | 'refresh' | null>(null)
+  const [busy, setBusy] = useState<'stop' | 'toggle' | 'refresh' | null>(null)
 
   const aliveRef = useRef(true)
 
@@ -140,44 +141,6 @@ export default function KiloPage({ toast }: { toast: (msg: string, ok?: boolean)
     }
   }
 
-  // 试跑一次：直连 30080，真实模型由后端观测账本统一记录。
-  const probe = async () => {
-    if (!status) return
-    setBusy('start')
-    try {
-      const res = await fetch(`${status.address}/chat/completions`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${status.api_key}`,
-        },
-        body: JSON.stringify({
-          model: models[0]?.id ?? 'kilo-auto/free',
-          max_tokens: 500,
-          messages: [{ role: 'user', content: 'Reply with exactly: KILO-OK' }],
-        }),
-      })
-      const text = await res.text()
-      if (!res.ok) {
-        toast(`试跑失败 HTTP ${res.status}：${text.slice(0, 160)}`, false)
-        return
-      }
-      const j = JSON.parse(text)
-      const content = j?.choices?.[0]?.message?.content ?? ''
-      toast(
-        content
-          ? `试跑成功：${content.slice(0, 60)}`
-          : '试跑返回了空内容（推理型模型可能需要更大 max_tokens）',
-        Boolean(content),
-      )
-      void reload()
-    } catch (e) {
-      toast((e as Error).message, false)
-    } finally {
-      setBusy(null)
-    }
-  }
-
   const [badgeCls, badgeText] = stateBadge(status?.state ?? 'stopped', status?.running ?? false)
   // 2-2：后端已按 free_only 过滤，这里不再二次过滤（两个勾选合并为一个）。
   const visible = models
@@ -212,18 +175,6 @@ export default function KiloPage({ toast }: { toast: (msg: string, ok?: boolean)
                 <RefreshCw className="mr-1 inline h-3.5 w-3.5" />
               )}
               刷新目录
-            </button>
-            <button
-              onClick={() => void probe()}
-              disabled={busy !== null || !status?.running}
-              className="rounded-lg border border-zinc-200 px-2.5 py-1.5 text-[12.5px] text-zinc-600 hover:bg-zinc-50 disabled:opacity-40"
-            >
-              {busy === 'start' ? (
-                <Loader2 className="mr-1 inline h-3.5 w-3.5 animate-spin" />
-              ) : (
-                <Play className="mr-1 inline h-3.5 w-3.5" />
-              )}
-              试跑
             </button>
             <button
               onClick={() => void toggleEnabled()}
