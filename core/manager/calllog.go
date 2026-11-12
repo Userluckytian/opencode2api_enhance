@@ -54,6 +54,9 @@ type CallLogRecord struct {
 	Tier string `json:"tier,omitempty"`
 	// Vendor 实际服务厂商 ID（写入侧 CallRecord.Vendor 镜像；旧记录为空）。
 	Vendor string `json:"vendor,omitempty"`
+	// Channel 阶段 O：OpenCode 引擎通道 —— "warp"（匿名出口）/ "key"（zen|go 密钥）。
+	// 由 calllog_engine.go 从 stdout 的 channel/anonymous/tier 推导；旧记录为空。
+	Channel string `json:"channel,omitempty"`
 	// ServingPort actual ingress port.
 	ServingPort string `json:"serving_port,omitempty"`
 	// RouteVerdict 路由结论：proxied / direct_by_design / direct_config_missing / direct_unexpected；空 = 旧记录或无法判定。

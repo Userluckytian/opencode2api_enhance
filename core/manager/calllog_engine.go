@@ -214,13 +214,21 @@ func engineRecordFromLine(raw engineLogLine) CallLogRecord {
 	}
 	// 厂商归属：引擎不带 vendor 字段，用 tier + channel 组合标识来源通道。
 	// anonymous 通道记为 "opencode"，key 通道记为 "zen"/"go"（与 tiers 名称一致）。
+	// 阶段 O：另存归一化的 Channel（warp/key），供日志页徽标与诊断页统计。
 	switch {
-	case raw.Anonymous:
+	case raw.Anonymous || strings.EqualFold(raw.Channel, "anonymous"):
 		rec.Vendor = "opencode"
-	case raw.Tier != "":
-		rec.Vendor = raw.Tier
+		rec.Channel = "warp"
+	case raw.Channel != "" || raw.Tier != "":
+		if raw.Tier != "" {
+			rec.Vendor = raw.Tier
+		} else {
+			rec.Vendor = "opencode"
+		}
+		rec.Channel = "key"
 	default:
 		rec.Vendor = "opencode"
+		// 旧日志无 channel/tier/anonymous：留空，由前端按 vendor 兜底推断。
 	}
 
 	// 逐跳明细 → Events，让日志页时间线能看到每一跳发生了什么。

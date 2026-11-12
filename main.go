@@ -623,6 +623,8 @@ func registerHTTPRoutes(mux *http.ServeMux, managerInst *manager.Manager, plugin
 	mux.HandleFunc("/api/admin/call-log/clear", loggingMiddleware(requireAuth(managerInst.ClearCallLogHandler())))
 	mux.HandleFunc("/api/admin/call-log/filtered", loggingMiddleware(requireAuth(managerInst.CallLogFilteredHandler())))
 	mux.HandleFunc("/api/admin/call-log/aggregate", loggingMiddleware(requireAuth(managerInst.CallLogAggregateHandler())))
+	// 阶段 O：OpenCode 引擎通道分布（WARP 匿名 / key），只读现算
+	mux.HandleFunc("/api/admin/channel-stats", loggingMiddleware(requireAuth(managerInst.ChannelStatsHandler())))
 	// 失败原因分布（厂商 × 错误类别 · 进程内存态，重启清零）
 	mux.HandleFunc("/api/admin/fail-stats", loggingMiddleware(requireAuth(failStatsHandler)))
 	mux.HandleFunc("/api/logs", loggingMiddleware(requireAuth(managerInst.LogsHandler())))
