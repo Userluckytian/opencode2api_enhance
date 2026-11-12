@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from 'react'
 import clsx from 'clsx'
-import { Copy, Loader2, Pencil, Plus, Trash2 } from 'lucide-react'
+import { AlertTriangle, Copy, Loader2, Pencil, Plus, Trash2 } from 'lucide-react'
 import { api, type KiloModelEntry, type KiloVirtualModel } from '../lib/api'
 
 /**
@@ -139,19 +139,19 @@ export default function VirtualModelsCard({
   )
 
   return (
-    <div className="rounded-2xl border border-zinc-200 bg-white p-4">
-      <div className="flex flex-wrap items-center justify-between gap-2">
-        <div>
-          <div className="text-[15px] font-semibold text-zinc-800">虚拟模型</div>
-          <div className="mt-0.5 text-[11.5px] text-zinc-400">
+    <div className="rounded-2xl border border-zinc-200 bg-white p-5 shadow-sm">
+      <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
+        <div className="flex items-center gap-2">
+          <h3 className="text-[15px] font-semibold text-zinc-900">虚拟模型</h3>
+          <span className="text-[11.5px] text-zinc-400">
             把一个名字绑到一组候选模型，客户端用 <code className="font-mono">kilo/名字</code> 调用；上游真实响应模型原样透传
-          </div>
+          </span>
         </div>
         <button
           onClick={openNew}
-          className="rounded-lg border border-zinc-200 px-2.5 py-1.5 text-[12.5px] text-zinc-600 hover:bg-zinc-50"
+          className="flex items-center gap-1.5 rounded-lg border border-zinc-200 bg-white px-3 py-1.5 text-[13px] text-zinc-700 hover:bg-zinc-50"
         >
-          <Plus className="mr-1 inline h-3.5 w-3.5" />
+          <Plus size={14} />
           新建
         </button>
       </div>
@@ -217,7 +217,7 @@ export default function VirtualModelsCard({
               <select
                 value={draft.strategy}
                 onChange={(e) => setDraft({ ...draft, strategy: e.target.value as Draft['strategy'] })}
-                className="mt-1 w-full rounded-lg border border-zinc-200 px-2.5 py-1.5 text-[12.5px] focus:outline-none"
+                className="mt-1 w-full rounded-lg border border-zinc-200 bg-white px-2.5 py-1.5 text-[13px] text-zinc-700 outline-none"
               >
                 {(Object.keys(STRATEGY_LABEL) as Draft['strategy'][]).map((s) => (
                   <option key={s} value={s}>{STRATEGY_LABEL[s]}</option>
@@ -228,12 +228,13 @@ export default function VirtualModelsCard({
           <div className="mt-1.5 text-[11.5px] text-zinc-500">{STRATEGY_HINT[draft.strategy]}</div>
           {draft.strategy === 'race' && (
             <div className="mt-1.5 rounded-lg border border-rose-200 bg-rose-50 px-2.5 py-1.5 text-[11.5px] text-rose-700">
-              ⚠️ 竞速会把同一份提示词<b>同时发给全部 {draft.models.length || 'N'} 个候选</b>：Kilo 免费档声明内容可能被用于训练，
+              <AlertTriangle size={13} className="mr-1 inline text-rose-600" />
+              竞速会把同一份提示词<b>同时发给全部 {draft.models.length || 'N'} 个候选</b>：Kilo 免费档声明内容可能被用于训练，
               若勾了付费档还会产生 N 倍计费。请确认可接受。
             </div>
           )}
           <label className="mt-2 flex items-center gap-1.5 text-[12px] text-zinc-600">
-            <input type="checkbox" checked={draft.enabled} onChange={(e) => setDraft({ ...draft, enabled: e.target.checked })} />
+            <input type="checkbox" className="accent-teal-600" checked={draft.enabled} onChange={(e) => setDraft({ ...draft, enabled: e.target.checked })} />
             启用
           </label>
 
@@ -256,6 +257,7 @@ export default function VirtualModelsCard({
                 <label key={m.id} className="flex cursor-pointer items-center gap-2 border-b border-zinc-100 px-2.5 py-1.5 last:border-0 hover:bg-zinc-50">
                   <input
                     type="checkbox"
+                    className="accent-teal-600"
                     checked={draft.models.includes(m.id)}
                     onChange={() => toggleCandidate(m.id)}
                   />
@@ -275,12 +277,12 @@ export default function VirtualModelsCard({
             <button
               onClick={() => void save()}
               disabled={busy}
-              className="rounded-lg bg-zinc-900 px-3 py-1.5 text-[12.5px] text-white hover:bg-zinc-800 disabled:opacity-40"
+              className="flex items-center gap-1.5 rounded-lg bg-zinc-900 px-3 py-1.5 text-[13px] text-white hover:bg-zinc-800 disabled:opacity-40"
             >
-              {busy ? <Loader2 className="mr-1 inline h-3.5 w-3.5 animate-spin" /> : null}
+              {busy ? <Loader2 size={14} className="animate-spin" /> : null}
               保存
             </button>
-            <button onClick={() => setDraft(null)} className="rounded-lg border border-zinc-200 px-3 py-1.5 text-[12.5px] text-zinc-600 hover:bg-zinc-100">
+            <button onClick={() => setDraft(null)} className="flex items-center rounded-lg border border-zinc-200 bg-white px-3 py-1.5 text-[13px] text-zinc-700 hover:bg-zinc-100">
               取消
             </button>
           </div>
