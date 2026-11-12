@@ -305,6 +305,12 @@ export type ConfigView = {
   /** 生效值（含环境槽位/默认值） */
   gateway_port_effective: number
   provider_port_effective: number
+  /** 阶段 L：Kilo 独立网关端口（后端已下发，前端此前未声明） */
+  kilo_enabled: boolean
+  kilo_free_only: boolean
+  kilo_proxy: string
+  kilo_port: number
+  kilo_port_effective: number
 
   // ── 免费层引擎（40080，opencode2api-win） ──
   engine_enabled: boolean

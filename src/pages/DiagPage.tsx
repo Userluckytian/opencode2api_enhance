@@ -292,6 +292,40 @@ export default function DiagPage({
         )}
       </div>
 
+      {/* 阶段 L：四服务端口总览（数据来自自检项 target，不额外请求） */}
+      {diag && diag.checks.length > 0 && (
+        <div className="bg-white rounded-2xl border border-zinc-200 shadow-sm p-5">
+          <div className="flex items-center gap-2 mb-3">
+            <Activity size={16} className="text-teal-600" />
+            <h3 className="text-[15px] font-semibold text-zinc-900">服务端口总览</h3>
+            <span className="text-[11.5px] text-zinc-400">四个独立入口 · 端口来自自检目标</span>
+          </div>
+          <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-4">
+            {([
+              ['manager', '管理面板'],
+              ['engine', 'OpenCode 引擎'],
+              ['provider', '供应商服务'],
+              ['kilo', 'Kilo 独立网关'],
+            ] as const).map(([name, label]) => {
+              const c = diag.checks.find((x) => x.name === name)
+              const port = (c?.target || '').split(':').pop() || '—'
+              return (
+                <div key={name} className="rounded-xl border border-zinc-200 bg-zinc-50/60 px-3 py-2.5">
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="text-[12.5px] font-medium text-zinc-700">{label}</span>
+                    <span className={clsx('text-[11px] rounded px-1.5 py-0.5', c?.ok ? 'bg-green-50 text-green-700' : 'bg-rose-50 text-rose-700')}>
+                      {c ? (c.ok ? '正常' : '异常') : '未检查'}
+                    </span>
+                  </div>
+                  <div className="mt-1 font-mono text-[13px] text-zinc-800">{port}</div>
+                  {c?.detail && <div className="mt-0.5 truncate text-[11px] text-zinc-400" title={c.detail}>{c.detail}</div>}
+                </div>
+              )
+            })}
+          </div>
+        </div>
+      )}
+
       {/* 引擎实时 */}
       <div className="bg-white rounded-2xl border border-zinc-200 shadow-sm p-5">
         <div className="flex items-center gap-2 mb-3">

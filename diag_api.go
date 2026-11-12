@@ -84,6 +84,10 @@ func runDiag(ctx context.Context, m *manager.Manager) DiagReport {
 	view := m.ConfigViewOf()
 	rep.Checks = append(rep.Checks, probeHealth(ctx, view.ProviderPortEffective))
 
+	// 3b) Kilo 独立网关（30080）：阶段 L。无鉴权 /healthz 只回 4 字段，
+	// 按配置停用时算「通过（按配置）」而非失败，避免误报。
+	rep.Checks = append(rep.Checks, probeKilo(ctx, view.KiloEnabled, view.KiloPortEffective))
+
 	// 4) 配置文件
 	rep.Checks = append(rep.Checks, checkConfigFile(configPath))
 
@@ -166,6 +170,50 @@ func probeHealth(ctx context.Context, port uint16) DiagCheck {
 	defer func() { _, _ = io.Copy(io.Discard, resp.Body); _ = resp.Body.Close() }()
 	chk.OK = resp.StatusCode == http.StatusOK
 	chk.Detail = fmt.Sprintf("HTTP %d", resp.StatusCode)
+	return chk
+}
+
+// probeKilo 检查 Kilo 独立网关（30080）的 /healthz。
+// 停用时不算失败：按配置停用是合法状态；启用才要求 200 且 status=ready。
+func probeKilo(ctx context.Context, enabled bool, port uint16) DiagCheck {
+	target := fmt.Sprintf("127.0.0.1:%d", port)
+	chk := DiagCheck{Name: "kilo", Target: target}
+	start := time.Now()
+	defer func() { chk.DurationMS = time.Since(start).Milliseconds() }()
+	if !enabled {
+		chk.OK = true
+		chk.Detail = "已停用（按配置）"
+		return chk
+	}
+
+	cctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(cctx, http.MethodGet, "http://"+target+"/healthz", nil)
+	if err != nil {
+		chk.Detail = err.Error()
+		return chk
+	}
+	resp, err := diagHTTPClient.Do(req)
+	if err != nil {
+		chk.Detail = "Kilo 网关未响应（未启动或端口被占）"
+		return chk
+	}
+	defer func() { _, _ = io.Copy(io.Discard, resp.Body); _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		chk.Detail = fmt.Sprintf("HTTP %d", resp.StatusCode)
+		return chk
+	}
+	var hz struct {
+		Status      string `json:"status"`
+		ModelsShown int    `json:"models_shown"`
+		MayTrain    bool   `json:"may_train"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&hz); err != nil {
+		chk.Detail = "响应不是合法 JSON"
+		return chk
+	}
+	chk.OK = hz.Status == "ready"
+	chk.Detail = fmt.Sprintf("status=%s models_shown=%d may_train=%v", hz.Status, hz.ModelsShown, hz.MayTrain)
 	return chk
 }
 

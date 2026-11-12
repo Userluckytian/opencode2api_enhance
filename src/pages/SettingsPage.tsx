@@ -35,6 +35,11 @@ export default function SettingsPage({
   const [proxyDirty, setProxyDirty] = useState(false)
   const [savingProxy, setSavingProxy] = useState(false)
 
+  // 阶段 L E4：日志保留上限 / 界面轮询间隔（消除日志页文案矛盾）
+  const [logMaxDraft, setLogMaxDraft] = useState('')
+  const [pollDraft, setPollDraft] = useState('')
+  const [savingRuntime, setSavingRuntime] = useState(false)
+
   // 残留进程清理
   const [orphans, setOrphans] = useState<OrphanProcess[]>([])
   const [orphanBusy, setOrphanBusy] = useState(false)
@@ -59,6 +64,8 @@ export default function SettingsPage({
         ])
         setConfig(cfg)
         setProxyDraft((cfg.engine_proxies ?? []).join('\n'))
+        setLogMaxDraft(String(cfg.call_log_max ?? 0))
+        setPollDraft(String(cfg.ui_poll_interval_sec ?? 5))
         setAutostart(as)
         setBinariesInfo(bin)
       } catch (e) {
@@ -94,6 +101,23 @@ export default function SettingsPage({
       toast('保存失败：' + (e as Error).message, false)
     } finally {
       setSavingProxy(false)
+    }
+  }
+
+  const saveRuntime = async () => {
+    setSavingRuntime(true)
+    try {
+      await api.configSet('call_log_max', logMaxDraft.trim())
+      await api.configSet('ui_poll_interval_sec', pollDraft.trim())
+      const cfg = await api.configGet()
+      setConfig(cfg)
+      setLogMaxDraft(String(cfg.call_log_max ?? 0))
+      setPollDraft(String(cfg.ui_poll_interval_sec ?? 5))
+      toast('运行参数已保存（轮询间隔刷新页面后生效）')
+    } catch (e) {
+      toast('保存失败：' + (e as Error).message, false)
+    } finally {
+      setSavingRuntime(false)
     }
   }
 
@@ -151,39 +175,100 @@ export default function SettingsPage({
         <h1 className="text-[16px] font-semibold text-zinc-900">设置</h1>
       </div>
 
-      {/* 服务端口 */}
+      {/* 服务端口（阶段 L：四个入口齐全 + 配置值/生效值） */}
       <section className="bg-white rounded-2xl border border-zinc-200 shadow-sm p-5">
         <h2 className="text-lg font-semibold text-zinc-900">服务端口</h2>
         <p className="mt-1 text-[12px] text-zinc-500">
-          管理面板不代理推理请求；推理请分别连 OpenCode（免费层）或供应商服务（自定义源）。
+          管理面板不代理推理请求；推理可分别连 OpenCode（免费层）、供应商服务（自定义源）、Kilo 独立网关。
+          「配置值」为 0 表示未设置，实际监听以「生效值」（含环境槽位/默认值）为准。
         </p>
         <div className="mt-4 overflow-hidden rounded-xl border border-zinc-100">
           <table className="w-full text-[13px]">
             <thead className="bg-zinc-50 text-zinc-500">
               <tr>
                 <th className="text-left font-medium px-3 py-2">服务</th>
-                <th className="text-left font-medium px-3 py-2">端口</th>
+                <th className="text-left font-medium px-3 py-2">配置值</th>
+                <th className="text-left font-medium px-3 py-2">生效值</th>
+                <th className="text-left font-medium px-3 py-2">状态</th>
                 <th className="text-left font-medium px-3 py-2">说明</th>
               </tr>
             </thead>
             <tbody className="text-zinc-700">
               <tr className="border-t border-zinc-100">
                 <td className="px-3 py-2">管理面板</td>
+                <td className="px-3 py-2 font-mono text-zinc-400">—</td>
                 <td className="px-3 py-2 font-mono">{window.location.port || '40000'}</td>
+                <td className="px-3 py-2"><span className="rounded bg-green-50 px-1.5 py-0.5 text-[11px] text-green-700">运行中</span></td>
                 <td className="px-3 py-2 text-zinc-500">当前页面入口（控制面）</td>
               </tr>
               <tr className="border-t border-zinc-100">
                 <td className="px-3 py-2">OpenCode 免费层引擎</td>
+                <td className="px-3 py-2 font-mono">{config?.gateway_port || '—'}</td>
                 <td className="px-3 py-2 font-mono">{config?.gateway_port_effective ?? 40080}</td>
+                <td className="px-3 py-2 text-zinc-400 text-[11px]">见诊断页</td>
                 <td className="px-3 py-2 text-zinc-500">OpenCode 免费模型推理入口</td>
               </tr>
               <tr className="border-t border-zinc-100">
                 <td className="px-3 py-2">供应商服务</td>
+                <td className="px-3 py-2 font-mono">{config?.provider_port || '—'}</td>
                 <td className="px-3 py-2 font-mono">{config?.provider_port_effective ?? 50080}</td>
+                <td className="px-3 py-2 text-zinc-400 text-[11px]">见诊断页</td>
                 <td className="px-3 py-2 text-zinc-500">自定义源 + 插件供应商入口</td>
+              </tr>
+              <tr className="border-t border-zinc-100">
+                <td className="px-3 py-2">Kilo 独立网关</td>
+                <td className="px-3 py-2 font-mono">{config?.kilo_port || '—'}</td>
+                <td className="px-3 py-2 font-mono">{config?.kilo_port_effective ?? 30080}</td>
+                <td className="px-3 py-2">
+                  <span className={clsx('rounded px-1.5 py-0.5 text-[11px]', config?.kilo_enabled ? 'bg-green-50 text-green-700' : 'bg-zinc-100 text-zinc-500')}>
+                    {config?.kilo_enabled ? '已启用' : '已停用'}
+                  </span>
+                </td>
+                <td className="px-3 py-2 text-zinc-500">直通 api.kilo.ai，与其它链路零交集</td>
               </tr>
             </tbody>
           </table>
+        </div>
+      </section>
+
+      {/* 阶段 L E4：运行参数（日志页文案指向这里） */}
+      <section className="bg-white rounded-2xl border border-zinc-200 shadow-sm p-5">
+        <div className="flex items-center gap-2">
+          <Settings size={16} className="text-teal-700" />
+          <h2 className="text-lg font-semibold text-zinc-900">运行参数</h2>
+        </div>
+        <div className="mt-3 grid gap-3 sm:grid-cols-2">
+          <label className="text-[12.5px] text-zinc-600">
+            调用日志保留上限（条，0 = 默认 5000）
+            <input
+              type="number"
+              min={0}
+              value={logMaxDraft}
+              onChange={(e) => setLogMaxDraft(e.target.value)}
+              className="mt-1 w-full px-3 py-2 rounded-lg border border-zinc-200 text-[13px] focus:outline-none focus:ring-2 focus:ring-teal-500/30"
+            />
+          </label>
+          <label className="text-[12.5px] text-zinc-600">
+            界面轮询间隔（秒，0 = 关闭）
+            <input
+              type="number"
+              min={0}
+              value={pollDraft}
+              onChange={(e) => setPollDraft(e.target.value)}
+              className="mt-1 w-full px-3 py-2 rounded-lg border border-zinc-200 text-[13px] focus:outline-none focus:ring-2 focus:ring-teal-500/30"
+            />
+          </label>
+        </div>
+        <div className="mt-2 flex items-center gap-2">
+          <button
+            onClick={() => void saveRuntime()}
+            disabled={savingRuntime}
+            className="px-3 py-1.5 rounded-lg text-[13px] text-white bg-zinc-900 hover:bg-zinc-800 disabled:opacity-40"
+          >
+            {savingRuntime ? <Loader2 size={14} className="inline animate-spin" /> : null}
+            保存
+          </button>
+          <span className="text-[11.5px] text-zinc-400">日志保留上限约束内存环形缓冲；Kilo 日志按文件大小轮转。</span>
         </div>
       </section>
 
