@@ -517,7 +517,13 @@ func catalogFilterFree(cat []KiloModelEntry) []KiloModelEntry {
 // isModelBlockedByFreeOnly 判断请求模型是否应被 free_only 边界拦下。
 // 返回 (false, "") 的三类情形：目录尚未拉到（放行，避免上游抖动误伤）、
 // 命中免费档、空 model（交给上游裁决，别在这里编错误）。
+// 阶段 M 独立审查 B1：边界函数**自己读配置**作为单一真源 —— 此前虚拟模型
+// 路径裸调它（无 kiloFreeOnly 门控），导致 kilo_free_only=false 时付费候选
+// 仍恒被拦，与用户「候选含付费」选择冲突。现在所有调用点自动一致。
 func (g *kiloGateway) isModelBlockedByFreeOnly(model string) (bool, string) {
+	if !kiloFreeOnly(g.mgr.loadConfig()) {
+		return false, "" // 用户显式允许全部模型（含付费档）
+	}
 	if strings.TrimSpace(model) == "" {
 		return false, ""
 	}

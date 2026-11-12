@@ -97,7 +97,7 @@ func (s *kiloVirtualStore) save() error {
 	return writeFileAtomic(path, b)
 }
 
-// List 返回已启用的虚拟模型（顺序稳定：按名称排序）。
+// List 返回全部虚拟模型（顺序稳定：按名称排序；调用方按需自滤 enabled）。
 func (s *kiloVirtualStore) List() []VirtualModel {
 	s.mu.RLock()
 	defer s.mu.RUnlock()

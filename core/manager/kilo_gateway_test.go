@@ -411,6 +411,9 @@ func TestKiloK8IndependenceRedLine(t *testing.T) {
 		"providerservice",
 		"40080",
 		"50080",
+		// 阶段 M：虚拟模型仍在 30080 内部实现，不得接入 50080 的 auto_model。
+		"auto_model",
+		"autoCandidateModels",
 		// 阶段 L：持久化模块不得反向依赖 main 包（EventLog 在 main 包，
 		// 反向 import 会循环依赖，也破坏独立性红线）。
 		`"github.com/6Kmfi6HP/opencode2api"`,
@@ -426,8 +429,8 @@ func TestKiloK8IndependenceRedLine(t *testing.T) {
 		}
 		return strings.Join(codeLines, "\n")
 	}
-	// (1) 网关本体 + 持久化模块：整文件零引用被禁符号
-	for _, name := range []string{"kilo_gateway.go", "kilo_calls_log.go"} {
+	// (1) 网关本体 + 持久化 + 虚拟模型：整文件零引用被禁符号
+	for _, name := range []string{"kilo_gateway.go", "kilo_calls_log.go", "kilo_virtual.go", "kilo_virtual_race.go"} {
 		b, err := os.ReadFile(name)
 		if err != nil {
 			t.Fatalf("读 %s 失败: %v", name, err)

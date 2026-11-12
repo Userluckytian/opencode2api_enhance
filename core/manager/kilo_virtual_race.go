@@ -40,7 +40,10 @@ func (g *kiloGateway) forwardOne(ctx context.Context, body []byte, modelID strin
 		res.err = err
 		return res
 	}
-	upBody := rewriteModel(body, modelID)
+	// 虚拟模型统一非流式：竞速需收完整响应仲裁，若把 stream:true 透给上游，
+	// SSE 会被 io.ReadAll 整段缓冲后一次写出，客户端收不到流式语义。
+	// 显式剥离，使文件头声明与实现一致（独立审查 B2）。
+	upBody := rewriteVirtualBody(body, modelID)
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, kiloBaseURL()+"/chat/completions", bytes.NewReader(upBody))
 	if err != nil {
 		res.err = err
@@ -77,8 +80,23 @@ func (g *kiloGateway) forwardOne(ctx context.Context, body []byte, modelID strin
 			}
 		}
 	}
-	_ = stream // 虚拟路径统一非流式，见文件头
+	_ = stream // 形参保留给未来流式支持；当前虚拟路径统一非流式（见文件头 + rewriteVirtualBody）
 	return res
+}
+
+// rewriteVirtualBody 把顶层 model 换成候选真实 ID，并剥离 stream（虚拟路径统一非流式）。
+func rewriteVirtualBody(body []byte, model string) []byte {
+	var m map[string]any
+	if json.Unmarshal(body, &m) != nil {
+		return rewriteModel(body, model) // 退化为原样转发，由上游裁决
+	}
+	m["model"] = model
+	delete(m, "stream")
+	b, err := json.Marshal(m)
+	if err != nil {
+		return rewriteModel(body, model)
+	}
+	return b
 }
 
 // isModelBlockedByFreeOnlyFor 复用 free_only 边界（虚拟模型的每个候选都要过）。
@@ -228,7 +246,7 @@ func writeForwardResult(w http.ResponseWriter, r forwardResult) {
 	w.Header().Set(kiloDataPolicyHeader, kiloDataPolicyHeaderValue)
 	status := r.status
 	if status == 0 {
-		status = http.StatusBadGateway
+		status = http.StatusGatewayTimeout // 与单模型传输失败口径一致（原 502 已统一为 504）
 	}
 	w.WriteHeader(status)
 	if len(r.body) > 0 {

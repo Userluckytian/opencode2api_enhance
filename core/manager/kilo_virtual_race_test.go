@@ -181,6 +181,59 @@ func TestKiloVirtualRaceReturnsImmediately(t *testing.T) {
 	time.Sleep(50 * time.Millisecond) // 给后台排空时间，慢候选应能正常退出不阻塞
 }
 
+func TestKiloVirtualPaidCandidateWhenFreeOnlyOff(t *testing.T) {
+	// 独立审查 P0 阻断项 B1：kilo_free_only=false 时付费候选必须能真转发，
+	// 否则用户「候选含付费」的选择落空。目录里 "paid/x" isFree=false。
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "/models") {
+			_, _ = io.WriteString(w, `{"data":[{"id":"free/a","isFree":true},{"id":"paid/x","isFree":false}]}`)
+			return
+		}
+		body, _ := io.ReadAll(r.Body)
+		var in struct {
+			Model  string `json:"model"`
+			Stream bool   `json:"stream"`
+		}
+		_ = json.Unmarshal(body, &in)
+		// B2：虚拟路径必须剥离 stream
+		if in.Stream {
+			w.WriteHeader(http.StatusBadRequest)
+			_, _ = io.WriteString(w, `{"error":{"message":"stream should be stripped"}}`)
+			return
+		}
+		okResponse(w, in.Model)
+	}))
+	t.Cleanup(srv.Close)
+	m := New(t.TempDir())
+	old := kiloUpstreamBaseOverride
+	kiloUpstreamBaseOverride = strings.TrimRight(srv.URL, "/") + "/v1"
+	t.Cleanup(func() { kiloUpstreamBaseOverride = old })
+	g := m.KiloGateway()
+	// 拉目录（让 isModelBlockedByFreeOnly 有 catalog 可用）
+	if _, err := g.refreshCatalog(); err != nil {
+		t.Fatalf("refreshCatalog: %v", err)
+	}
+	// 默认 free_only=true：付费候选应被拦
+	if blocked, _ := g.isModelBlockedByFreeOnly("paid/x"); !blocked {
+		t.Fatal("free_only=true 时付费候选应被拦")
+	}
+	// 关掉 free_only：付费候选必须放行（B1 修复点）
+	if err := m.ConfigSet("kilo_free_only", "false"); err != nil {
+		t.Fatalf("ConfigSet: %v", err)
+	}
+	if blocked, _ := g.isModelBlockedByFreeOnly("paid/x"); blocked {
+		t.Fatal("B1 未修：free_only=false 时付费候选仍被拦")
+	}
+	r, tag := g.selectByFallback(context.Background(), []byte(`{"model":"v","messages":[],"stream":true}`), []string{"paid/x"})
+	if r.err != nil || r.status != 200 {
+		t.Fatalf("付费候选应真转发 200，status=%d err=%v body=%s", r.status, r.err, r.body)
+	}
+	if r.model != "paid/x" || !strings.Contains(string(r.body), "OK-paid/x") {
+		t.Fatalf("应回付费候选的真实响应，model=%q body=%s", r.model, r.body)
+	}
+	_ = tag
+}
+
 func TestKiloVirtualRaceAllFailed(t *testing.T) {
 	g := newVirtualTestGW(t, VirtualModel{Name: "rc", Strategy: KiloVirtualStrategyRace, Enabled: true,
 		Models: []string{"a", "b"}}, func(w http.ResponseWriter, r *http.Request, model string) {
