@@ -21,7 +21,8 @@ type ChannelBucket struct {
 
 // ChannelStats 通道统计响应。
 type ChannelStats struct {
-	Total       int           `json:"total"`
+	Total       int           `json:"total"`        // 全部调用日志条数
+	EngineTotal int           `json:"engine_total"` // 引擎记录条数 = warp+key（占比分母）
 	Warp        ChannelBucket `json:"warp"`
 	Key         ChannelBucket `json:"key"`
 	Other       ChannelBucket `json:"other"`
@@ -35,9 +36,11 @@ func channelOf(r *CallLogRecord) (string, bool) {
 	if r.Channel == "warp" || r.Channel == "key" {
 		return r.Channel, false
 	}
-	// 旧日志无 Channel：按来源与 vendor 兜底。
-	isEngine := r.Source == "OpenCode 引擎" || r.Vendor == "opencode" ||
-		r.Vendor == "zen" || r.Vendor == "go"
+	// 旧日志无 Channel：按来源与 vendor 兜底。要求明确来自引擎，避免把
+	// 恰好命名为 opencode 的自定义源误算进 WARP 通道。
+	isEngine := r.Source == "OpenCode 引擎" ||
+		((r.Vendor == "opencode" || r.Vendor == "zen" || r.Vendor == "go") &&
+			(r.Source == "" || r.Source == "OpenCode 引擎"))
 	if !isEngine {
 		return "other", false
 	}
@@ -76,6 +79,7 @@ func (m *Manager) ComputeChannelStats() ChannelStats {
 			b.Fail++
 		}
 	}
+	st.EngineTotal = st.Warp.Requests + st.Key.Requests
 	return st
 }
 

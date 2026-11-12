@@ -116,6 +116,9 @@ func TestComputeChannelStats(t *testing.T) {
 	if st.Total != 5 {
 		t.Fatalf("Total = %d, want 5", st.Total)
 	}
+	if st.EngineTotal != 5 {
+		t.Fatalf("EngineTotal = %d, want 5 (warp+key, 不含 other)", st.EngineTotal)
+	}
 	if st.Warp.Requests != 2 || st.Warp.OK != 1 || st.Warp.Fail != 1 {
 		t.Fatalf("Warp = %+v, want requests=2 ok=1 fail=1", st.Warp)
 	}

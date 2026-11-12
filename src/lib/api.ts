@@ -705,6 +705,8 @@ export type RouteVerdict =
 /** 阶段 O：OpenCode 引擎通道统计 */
 export type ChannelStats = {
   total: number
+  /** 引擎记录条数 = warp+key（通道占比的分母，不含 Kilo/自定义源） */
+  engine_total: number
   warp: { requests: number; ok: number; fail: number }
   key: { requests: number; ok: number; fail: number }
   other: { requests: number; ok: number; fail: number }

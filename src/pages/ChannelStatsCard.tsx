@@ -68,18 +68,20 @@ export default function ChannelStatsCard() {
   }, [load])
 
   const total = stats?.total ?? 0
+  // 通道占比只以引擎记录（warp+key）为分母，不含 Kilo/自定义源，避免低估。
+  const engineTotal = stats?.engine_total ?? 0
   const warp = stats?.warp ?? { requests: 0, ok: 0, fail: 0 }
   const key = stats?.key ?? { requests: 0, ok: 0, fail: 0 }
   const other = stats?.other ?? { requests: 0, ok: 0, fail: 0 }
 
-  let conclusion = '暂无调用记录'
-  if (total > 0) {
+  let conclusion = '暂无引擎调用记录'
+  if (engineTotal > 0) {
     if (warp.requests === 0) {
       conclusion = '当前未走 WARP 匿名通道，全部引擎请求都落在 key 通道'
     } else if (key.requests === 0) {
       conclusion = '当前全部走 WARP 匿名通道，未消耗 key 额度'
     } else {
-      conclusion = `key 通道占 ${pct(key.requests, total)}、WARP 匿名通道占 ${pct(warp.requests, total)}`
+      conclusion = `引擎请求中 key 通道占 ${pct(key.requests, engineTotal)}、WARP 匿名通道占 ${pct(warp.requests, engineTotal)}`
     }
   }
 
@@ -90,7 +92,7 @@ export default function ChannelStatsCard() {
         <h3 className="text-[15px] font-semibold text-zinc-900">通道分析</h3>
         <span className="flex-1" />
         <span className="text-[11.5px] text-zinc-400">
-          {stats ? `共 ${total} 条 · ${stats.generated_at.slice(11, 19)}` : 'OpenCode 引擎 WARP 匿名 / key'}
+          {stats ? `共 ${total} 条（引擎 ${engineTotal}）· ${stats.generated_at.slice(11, 19)}` : 'OpenCode 引擎 WARP 匿名 / key'}
         </span>
         <button
           onClick={() => void load()}
@@ -110,8 +112,8 @@ export default function ChannelStatsCard() {
       ) : (
         <>
           <div className="grid gap-2 sm:grid-cols-3">
-            <Bar label="WARP 匿名通道" bucket={warp} total={total} tone="warp" />
-            <Bar label="key 通道" bucket={key} total={total} tone="key" />
+            <Bar label="WARP 匿名通道" bucket={warp} total={engineTotal} tone="warp" />
+            <Bar label="key 通道" bucket={key} total={engineTotal} tone="key" />
             <Bar label="其它 / 非引擎" bucket={other} total={total} tone="other" />
           </div>
           <div className="mt-3 rounded-xl border border-zinc-100 bg-zinc-50/60 px-3 py-2.5 text-[12.5px] text-zinc-700">
@@ -123,7 +125,7 @@ export default function ChannelStatsCard() {
             )}
           </div>
           <div className="mt-1.5 text-[11px] text-zinc-400">
-            数据来自调用日志现算（只读）；匿名通道 = 引擎 stdout 的 channel=anonymous，key 通道 = channel=key（zen/go）。
+            占比以引擎记录（warp+key 共 {engineTotal} 条）为分母，另有 {other.requests} 条非引擎调用（Kilo / 自定义源）单独列出、不计入通道占比。数据来自调用日志现算（只读）；匿名通道 = 引擎 stdout 的 channel=anonymous，key 通道 = channel=key（zen/go）。
           </div>
         </>
       )}
