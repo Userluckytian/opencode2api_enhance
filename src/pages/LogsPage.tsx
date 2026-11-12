@@ -241,6 +241,22 @@ const LogRow = memo(function LogRow({
         <span className="shrink-0 text-[11px] text-indigo-700 bg-indigo-100 rounded-md px-2 py-0.5">
           {VENDOR_LABEL[vendorOf(rec)]}
         </span>
+        {/* 阶段 O：OpenCode 引擎通道（WARP 匿名 / key）。旧日志无 channel 时按 vendor 推断并标注。 */}
+        {(() => {
+          const ch = rec.channel
+          if (ch === 'warp') {
+            return <span className="shrink-0 text-[11px] text-violet-700 bg-violet-100 rounded-md px-2 py-0.5" title="引擎 stdout: channel=anonymous">WARP 匿名</span>
+          }
+          if (ch === 'key') {
+            return <span className="shrink-0 text-[11px] text-emerald-700 bg-emerald-100 rounded-md px-2 py-0.5" title={`引擎 stdout: channel=key, tier=${rec.tier || 'zen|go'}`}>key 通道</span>
+          }
+          // 旧引擎日志无 channel 字段：仅对明确的引擎记录做兜底，避免误导
+          if (rec.source === 'OpenCode 引擎' || rec.vendor === 'zen' || rec.vendor === 'go' || rec.vendor === 'opencode') {
+            const inferred = rec.vendor === 'zen' || rec.vendor === 'go' ? 'key 通道' : 'WARP 匿名'
+            return <span className="shrink-0 text-[11px] text-zinc-500 bg-zinc-100 rounded-md px-2 py-0.5" title="旧日志无 channel 字段，按厂商推断">{inferred}·推断</span>
+          }
+          return null
+        })()}
         {/* Kilo 会静默换模型：直接展示上游实际返回的 model */}
         {rec.actual_model && rec.actual_model !== rec.model && (
           <span className="shrink-0 text-[11px] text-amber-700 bg-amber-50 rounded-md px-2 py-0.5" title="上游实际返回的模型">
@@ -279,6 +295,7 @@ const LogRow = memo(function LogRow({
               '-'
             )}
             {rec.serving_port ? ` · 端口: ${rec.serving_port}` : ''}
+            {rec.channel && <span className="text-violet-600"> · 通道: {rec.channel === 'warp' ? 'WARP 匿名' : 'key'} ({rec.tier || 'zen|go'})</span>}
             {rec.source && <span className="text-indigo-600"> · 来源: {rec.source}</span>}
             {rec.err_msg && <span className="text-red-600" title={rec.err_msg}> · 错误: {rec.err_msg}</span>}
           </div>

@@ -702,6 +702,16 @@ export type RouteVerdict =
   | "direct_unexpected"
   | "no_healthy_node"
 
+/** 阶段 O：OpenCode 引擎通道统计 */
+export type ChannelStats = {
+  total: number
+  warp: { requests: number; ok: number; fail: number }
+  key: { requests: number; ok: number; fail: number }
+  other: { requests: number; ok: number; fail: number }
+  inferred: number
+  generated_at: string
+}
+
 export type CallLogRecord = {
   req_id: string
   ts: string
@@ -721,6 +731,8 @@ export type CallLogRecord = {
   tier?: "free" | "paid"
   /** 本次请求命中的厂商 ID（opencode / kilo / 自定义插件）；旧记录为空 */
   vendor?: string
+  /** 阶段 O：OpenCode 引擎通道 warp / key；旧记录为空 */
+  channel?: 'warp' | 'key'
   /** 阶段 L：上游实际返回的模型（Kilo 会静默换模型）；旧记录为空 */
   actual_model?: string
   route_verdict?: RouteVerdict
@@ -1367,6 +1379,8 @@ export const api = {
   callLogFiltered: (filter: CallLogFilter) => req<CallLogRecord[]>('POST', '/call-log/filtered', filter),
   /** 按节点组合聚合日志（main 功能 M4） */
   callLogAggregate: () => req<CallLogAggregate[]>('GET', '/call-log/aggregate'),
+  /** 阶段 O：OpenCode 引擎通道分布（WARP 匿名 / key），只读现算 */
+  channelStats: () => req<ChannelStats>('GET', '/channel-stats'),
 
   // 健康巡检（main 功能 M2）
   healthCheck: () => req<HealthSummary>('POST', '/health/check'),
