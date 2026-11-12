@@ -313,13 +313,15 @@ func callLogTime(ts string) time.Time {
 	return t
 }
 
-// ClearCallLog 清空全部调用日志（统一网关 + 各实例，与 ReadCallLog 聚合范围一致）。
+// ClearCallLog 清空全部调用日志（供应商服务 + Kilo 独立网关 + 引擎 stdout，
+// 与 ReadCallLog 聚合范围一致 —— 阶段 L 把 Kilo 并入后必须一并清，否则
+// 「清空日志」后 Kilo 记录会在下次轮询时复活）。
 // 运行中进程（网关/实例）走 HTTP 清空——其进程持有日志文件 fd，管理器跨进程直删
 // 会被 Windows「文件被占用」拦截；未运行进程直删文件（带占用重试兜底）。
 // 失败按来源收集合并为单个 error（前端 toast 展示）。
 func (m *Manager) ClearCallLog() error {
 	var errs []string
-	// 供应商服务（自定义源 + 插件）——v2.0.0 起唯一日志来源
+	// 供应商服务（自定义源 + 插件）
 	psPort := m.managerProviderPort()
 	if probePort(psPort, statsResetProbeTimeout) {
 		if err := clearLogHTTP(psPort, effectiveGatewayKey(m.loadConfig()), "供应商服务"); err != nil {
@@ -327,6 +329,10 @@ func (m *Manager) ClearCallLog() error {
 		}
 	} else if err := removeLogFileRetry(m.ProviderServiceCallLogPath()); err != nil {
 		errs = append(errs, "供应商服务: "+err.Error())
+	}
+	// 阶段 L：Kilo 独立网关（由本进程内 kiloCallWriter 写，每次 open/close 不常驻 fd，直删可行）
+	if err := removeLogFileRetry(m.KiloCallsLogPath()); err != nil {
+		errs = append(errs, "Kilo 独立网关: "+err.Error())
 	}
 	if len(errs) > 0 {
 		return fmt.Errorf("清空日志失败: %s", strings.Join(errs, "；"))

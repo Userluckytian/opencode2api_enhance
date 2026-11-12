@@ -605,13 +605,11 @@ export default function StatsPage({
                 const open = expanded.has(ins.name)
                 const hasDetail = (ins.models?.length ?? 0) > 0
                 // 阶段 L E6：日志成功/失败按供应商分类聚合；累计来源表按统计文件口径，
-                // 不随供应商筛选拆分（筛选只作用于调用日志派生数据）。
-                const of = vendorFilter
-                  ? insOkFail[vendorFilter]
-                  : Object.values(insOkFail).reduce(
-                      (acc, v) => ({ ok: acc.ok + v.ok, fail: acc.fail + v.fail }),
-                      { ok: 0, fail: 0 },
-                    )
+                // 「不随供应商筛选拆分」—— 始终展示全量汇总，与上方口径说明一致。
+                const of = Object.values(insOkFail).reduce(
+                  (acc, v) => ({ ok: acc.ok + v.ok, fail: acc.fail + v.fail }),
+                  { ok: 0, fail: 0 },
+                )
                 const ok = of?.ok ?? 0
                 const fail = of?.fail ?? 0
                 return (

@@ -110,6 +110,28 @@ func TestKiloCallLogNoRequestBody(t *testing.T) {
 	}
 }
 
+func TestKiloCallLogClearCoversKilo(t *testing.T) {
+	// 独立审查 P0 阻断项 B：ReadCallLog 已把 Kilo 作为第三来源，
+	// ClearCallLog 必须一并清掉，否则「清空日志」后 Kilo 记录会复活。
+	m := New(t.TempDir())
+	g := m.KiloGateway()
+	g.recordCall(KiloCallRecord{ReqID: "kilo-clear-1", Requested: "a:free", Status: 200, TS: "2026-11-12T09:05:00+08:00"})
+	if got := len(m.ReadCallLog(0)); got == 0 {
+		t.Fatal("前置条件失败：清空前应能读到 Kilo 记录")
+	}
+	if err := m.ClearCallLog(); err != nil {
+		t.Fatalf("ClearCallLog 失败: %v", err)
+	}
+	for _, r := range m.ReadCallLog(0) {
+		if r.Vendor == "kilo" {
+			t.Fatalf("清空后仍残留 Kilo 记录: %+v", r)
+		}
+	}
+	if _, err := os.Stat(m.KiloCallsLogPath()); !os.IsNotExist(err) {
+		t.Fatalf("Kilo 日志文件应被删除，实际 err=%v", err)
+	}
+}
+
 func TestKiloCallsLogPath(t *testing.T) {
 	m := New(t.TempDir())
 	p := m.KiloCallsLogPath()

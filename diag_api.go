@@ -1,6 +1,6 @@
 package main
 
-// 诊断面（v2.1）：三端口自检 + 引擎实时 + 失败聚合 + 手动模型探测。
+// 诊断面（v2.1）：四服务自检 + 引擎实时 + 失败聚合 + 手动模型探测。
 //
 // 为什么单独做一组端点：这些问题此前只能靠翻日志或手工 curl 定位
 //（例如「429 是不是我们的 bug」「40080 到底起没起」「某个模型现在能不能用」）。
@@ -175,9 +175,8 @@ func probeHealth(ctx context.Context, port uint16) DiagCheck {
 
 // probeKilo 检查 Kilo 独立网关（30080）的 /healthz。
 // 停用时不算失败：按配置停用是合法状态；启用才要求 200 且 status=ready。
-func probeKilo(ctx context.Context, enabled bool, port uint16) DiagCheck {
-	target := fmt.Sprintf("127.0.0.1:%d", port)
-	chk := DiagCheck{Name: "kilo", Target: target}
+func probeKilo(ctx context.Context, enabled bool, port uint16) (chk DiagCheck) {
+	chk = DiagCheck{Name: "kilo", Target: fmt.Sprintf("127.0.0.1:%d", port)}
 	start := time.Now()
 	defer func() { chk.DurationMS = time.Since(start).Milliseconds() }()
 	if !enabled {
@@ -188,7 +187,7 @@ func probeKilo(ctx context.Context, enabled bool, port uint16) DiagCheck {
 
 	cctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
-	req, err := http.NewRequestWithContext(cctx, http.MethodGet, "http://"+target+"/healthz", nil)
+	req, err := http.NewRequestWithContext(cctx, http.MethodGet, "http://"+chk.Target+"/healthz", nil)
 	if err != nil {
 		chk.Detail = err.Error()
 		return chk

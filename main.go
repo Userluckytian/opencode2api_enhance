@@ -627,7 +627,7 @@ func registerHTTPRoutes(mux *http.ServeMux, managerInst *manager.Manager, plugin
 	mux.HandleFunc("/api/admin/kilo/refresh", loggingMiddleware(requireAuth(kiloGatewayRefreshHandler(managerInst))))
 	// 手动探测：对引擎发一次最小请求，用真实状态码判定模型可用性
 	mux.HandleFunc("/api/admin/free-tier/probe", loggingMiddleware(requireAuth(modelProbeHandler(managerInst))))
-	// 诊断：三端口自检 + 配置/二进制检查
+	// 诊断：四服务自检 + 配置/二进制检查
 	mux.HandleFunc("/api/admin/diag", loggingMiddleware(requireAuth(diagHandler(managerInst))))
 	// 失败聚合：从调用日志现算「厂商 × 错误码」
 	mux.HandleFunc("/api/admin/fail-aggregate", loggingMiddleware(requireAuth(failAggregateHandler(managerInst))))

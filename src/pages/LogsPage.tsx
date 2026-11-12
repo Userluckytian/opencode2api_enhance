@@ -619,7 +619,7 @@ export default function LogsPage({
       {logs.length > 0 && visible.length === 0 && null}
       <div className="flex items-center gap-2 text-zinc-400 text-xs mt-4">
         <Activity size={12} />
-        每 5 秒自动刷新 · 日志保留上限可在设置页调整 · 供应商筛选与日期/关键词联动
+        每 5 秒自动刷新 · 统一网关日志保留上限可在设置页调整（Kilo 日志按文件大小轮转） · 供应商筛选与日期/关键词联动
       </div>
       </>
       )}

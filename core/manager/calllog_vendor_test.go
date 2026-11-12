@@ -19,7 +19,10 @@ func TestClassifyVendor(t *testing.T) {
 		{"custom by model prefix", CallLogRecord{Model: "nv/deepseek-v3"}, VendorCustom},
 		{"custom by direct verdict", CallLogRecord{RouteVerdict: "direct_by_design", Model: "foo/bar"}, VendorCustom},
 		{"legacy no fields", CallLogRecord{Model: "big-pickle"}, VendorOpencode},
-		{"nil record", CallLogRecord{}, VendorOpencode},
+	}
+	// 真 nil 指针（审查面 6 指出旧「nil record」用例实传空结构体，名不副实）
+	if got := ClassifyVendor(nil); got != VendorCustom {
+		t.Fatalf("ClassifyVendor(nil) = %q, want %q", got, VendorCustom)
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
