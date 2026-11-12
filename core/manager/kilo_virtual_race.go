@@ -165,21 +165,28 @@ func (g *kiloGateway) selectByRace(parent context.Context, body []byte, candidat
 			}
 		}(i, id)
 	}
-	// 收集：等所有候选返回（或全部失败），取第一个 2xx 且耗时最短者。
+	// 收集者：等所有候选 goroutine 退出后关闭 ch（防止泄漏）。
 	go func() { wg.Wait(); close(ch) }()
 
+	// 第一个 2xx 到就立即胜出并返回 —— 不 range 到 close，否则要等最慢
+	// 候选响应 cancel 才返回，竞速就退化成「等全体」。返回后后台继续排空
+	// ch（drain goroutine），慢候选的 send 不会阻塞在满缓冲上。
 	var best *entry
 	var last forwardResult
 	for e := range ch {
 		last = e.res
 		if e.res.err == nil && e.res.status >= 200 && e.res.status < 300 {
-			if best == nil {
-				cp := e
-				best = &cp
-				cancel() // 取消其余在途请求
-			}
+			cp := e
+			best = &cp
+			cancel() // 取消其余在途请求
+			break
 		}
 	}
+	// 异步排空剩余结果：慢候选 goroutine 不会被 ch 阻塞，wg 能正常结束。
+	go func() {
+		for range ch {
+		}
+	}()
 	if best != nil {
 		return best.res, fmt.Sprintf("race#winner-%d/%d %dms", best.idx+1, len(candidates), time.Since(started).Milliseconds())
 	}

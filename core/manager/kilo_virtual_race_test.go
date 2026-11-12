@@ -152,6 +152,35 @@ func TestKiloVirtualRace(t *testing.T) {
 	}
 }
 
+func TestKiloVirtualRaceReturnsImmediately(t *testing.T) {
+	// 防止退化：第一个 2xx 到就返回，不能等最慢候选响应取消。
+	var slowDone atomic.Int32
+	g := newVirtualTestGW(t, VirtualModel{Name: "rc", Strategy: KiloVirtualStrategyRace, Enabled: true,
+		Models: []string{"slow", "fast"}}, func(w http.ResponseWriter, r *http.Request, model string) {
+		if model == "fast" {
+			okResponse(w, model)
+			return
+		}
+		select {
+		case <-r.Context().Done():
+			slowDone.Add(1)
+		case <-time.After(800 * time.Millisecond):
+			slowDone.Add(1)
+			okResponse(w, model)
+		}
+	})
+	start := time.Now()
+	r, _ := g.selectByRace(context.Background(), []byte(`{"messages":[]}`), []string{"slow", "fast"})
+	elapsed := time.Since(start)
+	if r.model != "fast" || r.status != 200 {
+		t.Fatalf("fast 应胜出，实际 %q status=%d", r.model, r.status)
+	}
+	if elapsed > 400*time.Millisecond {
+		t.Fatalf("竞速应在 fast 返回后立即结束，实际耗时 %v（疑似等了慢候选）", elapsed)
+	}
+	time.Sleep(50 * time.Millisecond) // 给后台排空时间，慢候选应能正常退出不阻塞
+}
+
 func TestKiloVirtualRaceAllFailed(t *testing.T) {
 	g := newVirtualTestGW(t, VirtualModel{Name: "rc", Strategy: KiloVirtualStrategyRace, Enabled: true,
 		Models: []string{"a", "b"}}, func(w http.ResponseWriter, r *http.Request, model string) {
