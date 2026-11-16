@@ -265,7 +265,14 @@ func (v *Vendor) ListModels(ctx context.Context) ([]contract.Model, error) {
 	var ids []string
 	var lastErr error
 	someOK := false
-	for {
+	// 目录拉取按 key 逐个串行并集：key 数上百时（例如 500 个 openrouter key）
+	// 会把整轮预算耗光，拖死上层 /v1/models。目录只需少量 key 的代表性结果，
+	// 故限制单轮拉取的 key 数，并在每轮开始前检查预算。
+	const maxKeysPerListModels = 8
+	for n := 0; ; n++ {
+		if ctx.Err() != nil || n >= maxKeysPerListModels {
+			break
+		}
 		key, idx, ok := v.pool.tryAcquire(tried)
 		if !ok {
 			break

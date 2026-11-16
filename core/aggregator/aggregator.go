@@ -67,39 +67,79 @@ func (a *Aggregator) Vendors() []contract.Vendor {
 	return append([]contract.Vendor(nil), a.vendors...)
 }
 
+// VendorRefreshBudget 单家厂商一轮目录拉取的预算上限。
+//
+// 必须远小于请求方的超时（管理器拉 /v1/models 用 10s）：一家上游挂起时，
+// 它只占自己这一格预算，不会把整轮刷新拖到分钟级。
+const vendorRefreshBudget = 8 * time.Second
+
+type vendorCatalogResult struct {
+	idx    int
+	models []contract.Model
+}
+
 // Refresh 并行拉取所有已注册厂商目录并合并缓存。
-// 每家厂商独立预算：在总 60s 预算内派生各自 ctx，一家慢/挂起只影响自己；
+// 每家厂商独立预算（vendorRefreshBudget）：一家慢/挂起只影响自己；
 // 单个厂商失败不影响其它厂商（记录到 catalog 之外由调用方决定是否告警）。
 // 某厂商本次拉取失败或返回空目录时，回退沿用其 lastGood（上一代成功目录）——
 // 单次刷新失败不让该厂商的模型从合并目录中消失（2026-08-26 网关 502 修复；
 // 注意 opencode 上游不可达时 ListModels 返回「空列表 + nil 错误」，故空结果同样回退）。
 // 合并仍单次写锁重建倒排索引；目录按注册顺序拼接。
+//
+// 关键不变式（2026-11-16 事故后加）：**本函数必须在 ctx 到期时返回**。
+// 旧实现用 wg.Wait() 收尾：某厂商若无视 ctx 挂住（自建 Transport 里没有超时），
+// 整轮刷新永不返回 → 上层目录刷新锁被永久占用 → /v1/models 对全部调用方无响应。
+// 现在改为「收集已完成结果 + ctx 到期用 lastGood 补齐后立即返回」。
 func (a *Aggregator) Refresh(ctx context.Context) error {
-	ctx, cancel := context.WithTimeout(ctx, 60*time.Second)
-	defer cancel()
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	vendors := a.Vendors()
-	// 并行拉取各厂商目录（结果按下标收集，顺序与注册序一致）。
-	parts := make([][]contract.Model, len(vendors))
-	var wg sync.WaitGroup
+	// 缓冲满 = 即使没人读，worker 也不会卡在发送上。
+	results := make(chan vendorCatalogResult, len(vendors))
 	for i, v := range vendors {
-		wg.Add(1)
 		go func(i int, v contract.Vendor) {
-			defer wg.Done()
-			vctx, vcancel := context.WithTimeout(ctx, 60*time.Second)
+			vctx, vcancel := context.WithTimeout(ctx, vendorRefreshBudget)
 			defer vcancel()
 			ms, err := v.ListModels(vctx)
 			a.mu.Lock()
-			defer a.mu.Unlock()
 			if err != nil || len(ms) == 0 {
-				parts[i] = append([]contract.Model(nil), a.lastGood[v.ID()]...)
-				return
+				ms = append([]contract.Model(nil), a.lastGood[v.ID()]...)
+			} else {
+				cp := append([]contract.Model(nil), ms...)
+				a.lastGood[v.ID()] = cp
+				ms = cp
 			}
-			cp := append([]contract.Model(nil), ms...)
-			a.lastGood[v.ID()] = cp
-			parts[i] = cp
+			a.mu.Unlock()
+			select {
+			case results <- vendorCatalogResult{idx: i, models: ms}:
+			case <-ctx.Done():
+			}
 		}(i, v)
 	}
-	wg.Wait()
+
+	parts := make([][]contract.Model, len(vendors))
+	done := 0
+collect:
+	for done < len(vendors) {
+		select {
+		case r := <-results:
+			parts[r.idx] = r.models
+			done++
+		case <-ctx.Done():
+			break collect
+		}
+	}
+	if done < len(vendors) {
+		a.mu.Lock()
+		for i := range parts {
+			if parts[i] == nil {
+				parts[i] = append([]contract.Model(nil), a.lastGood[vendors[i].ID()]...)
+			}
+		}
+		a.mu.Unlock()
+	}
+
 	var all []contract.Model
 	for _, ms := range parts {
 		all = append(all, ms...)

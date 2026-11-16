@@ -277,7 +277,9 @@ func listModelsHandler(w http.ResponseWriter, r *http.Request) {
 	// 聚合器是唯一数据源：不保留直连上游的兜底（双轨已消灭）。
 	// 节流版：上游故障导致目录持续为空时，至多每 10s 重拉一轮（防每请求惊群）。
 	if !loaded || len(models) == 0 {
-		refreshModelCatalogIfDue()
+		// 冷启动：最多等 3s 抢一次刷新机会；抢不到（已有刷新在跑）就按
+		// 「目录预热中」返回 503，让客户端稍后重试，而不是把它钉在锁上。
+		refreshModelCatalogIfDueWithin(3 * time.Second)
 		modelMu.RLock()
 		loaded, models = modelsLoaded, modelsCache
 		modelMu.RUnlock()

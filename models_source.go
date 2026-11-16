@@ -281,11 +281,18 @@ const catalogStaleAfter = 30 * time.Second
 
 // refreshModelCatalogIfStale 目录非空但已陈旧时，后台触发一轮刷新（不阻塞调用方）。
 // 供 /v1/models 在「目录已就绪」的分支调用：此时不再同步等待，只顺手推一把。
+//
+// 探测陈旧度必须用 TryLock：这里只是「读一个时间戳」，而普通 Lock 会和正在跑的
+// 整轮刷新（最长 vendorRefreshBudget）串行——2026-11-16 事故就是请求路径被这行
+// 锁钉死 60s，表现为供应商服务 /v1/models 永久无响应。抢不到锁说明刷新正在跑，
+// 此时本来就无需再推一轮。
 func refreshModelCatalogIfStale() {
 	if globalAgg == nil {
 		return
 	}
-	catalogRefreshMu.Lock()
+	if !catalogRefreshMu.TryLock() {
+		return
+	}
 	stale := time.Since(catalogLastRefresh) >= catalogStaleAfter
 	catalogRefreshMu.Unlock()
 	if !stale {
@@ -301,9 +308,43 @@ func refreshModelCatalogIfStale() {
 	}()
 }
 
+// refreshModelCatalogIfDueWithin 冷启动路径：在 d 内尝试拿到刷新锁并刷一轮。
+// 抢不到锁（已有刷新在跑）就立即返回 false，调用方按「目录仍在预热」处理，
+// 绝不在请求路径上无限等锁。
+func refreshModelCatalogIfDueWithin(d time.Duration) bool {
+	if globalAgg == nil {
+		return false
+	}
+	deadline := time.Now().Add(d)
+	for {
+		if catalogRefreshMu.TryLock() {
+			break
+		}
+		if time.Now().After(deadline) {
+			return false
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	defer catalogRefreshMu.Unlock()
+	if time.Since(catalogLastRefresh) < catalogRefreshMinGap {
+		return true
+	}
+	refreshModelCatalogLocked()
+	return true
+}
+
+// catalogRefreshBudget 一轮目录刷新的总预算。
+//
+// aggregator.Refresh 保证「ctx 到期即返回」（每家厂商另有短预算），所以这里
+// 只要能覆盖单轮厂商预算 + 合并写锁即可。绝不能用 60s：请求路径（冷启动）
+// 也在等这把锁，预算越大，供应商服务在坏上游存在时越接近不可用。
+const catalogRefreshBudget = 20 * time.Second
+
 // refreshModelCatalogLocked 执行刷新（调用方已持 catalogRefreshMu）。
 func refreshModelCatalogLocked() {
-	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	// 预算只需覆盖「单家厂商预算 + 合并写锁」：aggregator 保证了 ctx 到期即返回，
+	// 这里再留一倍余量。绝不能是分钟级——请求路径（冷启动）也在等这把锁。
+	ctx, cancel := context.WithTimeout(context.Background(), catalogRefreshBudget)
 	defer cancel()
 	vendors := globalAgg.Vendors()
 	vendorIDs := make([]string, 0, len(vendors))
