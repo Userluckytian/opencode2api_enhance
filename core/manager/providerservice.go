@@ -249,8 +249,21 @@ func (p *ProviderService) Start(runner Runner) error {
 	dir := p.dir()
 	p.mu.Unlock()
 
-	// 端口预检：端口已被其他进程占用时直接报错，避免「启动→bind 失败→看门狗重启」的无限循环。
+	// 端口预检：端口已被其他进程占用时，先判断是不是「我们自己的供应商服务」
+	// （管理器重启/被外部拉起后 pid 丢失的常见情形）——是则接管，不报错。
+	// 只有确认是别人的进程才拒绝启动，避免「启动→bind 失败→看门狗重启」的循环。
 	if !isPortFree(port) {
+		if pid, ok := p.claimByPort(port, key); ok {
+			p.mu.Lock()
+			p.pid = pid
+			p.lastErr = ""
+			p.spawnPort = port
+			p.spawnKey = key
+			p.modelsLastFetch = 0
+			p.mu.Unlock()
+			slog.Info("provider service adopted running process", "port", port, "pid", pid)
+			return nil
+		}
 		msg := fmt.Sprintf("端口 %d 已被其他进程占用，供应商服务无法启动", port)
 		p.setErr(msg)
 		return fmt.Errorf("%s", msg)
@@ -307,6 +320,22 @@ func (p *ProviderService) Stop(runner Runner) error {
 	p.modelsUpdatedAt = 0
 	p.modelsLastFetch = 0
 	p.mu.Unlock()
+	if pid <= 0 {
+		// pid 未跟踪不代表没在跑：按端口认领后继续走正常停止流程。
+		// 认领失败（端口空/不是我们的进程）就什么都不做。
+		claimKey := spawnKey
+		if claimKey == "" {
+			claimKey = p.APIKey()
+		}
+		claimPort := spawnPort
+		if claimPort == 0 {
+			claimPort = p.Port()
+		}
+		if claimed, ok := p.claimByPort(claimPort, claimKey); ok {
+			pid = claimed
+			slog.Info("provider service stop: adopted by port", "port", claimPort, "pid", pid)
+		}
+	}
 	if pid <= 0 {
 		return nil
 	}
