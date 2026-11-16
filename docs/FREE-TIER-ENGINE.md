@@ -1,4 +1,4 @@
-# 免费层引擎（opencode2api-win）接入说明
+# 免费层引擎（opencode2api）接入说明
 
 v2.0.0 起，OpenCode 免费层不再由本仓库自研网关实现，改由**外部独立进程**承担。
 本文说明三进程拓扑、引擎的来源与许可证边界、安装/更新方式、运行目录与端口。
@@ -14,7 +14,7 @@ v2.0.0 起，OpenCode 免费层不再由本仓库自研网关实现，改由**�
             │ 生成 config.json / 启停 / 健康检查（仅进程管理）
             ▼
 ┌──────────────────────────┐
-│ 免费层引擎 40080           │  opencode2api-win（外部 GPL-3.0 程序）
+│ 免费层引擎 40080           │  opencode2api（外部 GPL-3.0 程序）
 │ OpenCode 免费池 + WARP 出口 │  对外提供 OpenAI 兼容 /v1
 └──────────────────────────┘
 ```
@@ -25,13 +25,25 @@ v2.0.0 起，OpenCode 免费层不再由本仓库自研网关实现，改由**�
 
 ## 二、为什么引擎是独立进程（GPL 隔离）
 
-上游 `opencode2api-win`（<https://github.com/wbi35772/opencode2api-win>）许可证为
-**GPL-3.0**。本项目**不链接、不内联、不修改**其源码：管理器只做三件事——
-按配置写出 `config.json`、以子进程方式 `exec`（参数 `-config <路径>`）、通过
-127.0.0.1 的 HTTP 做健康检查与统计。这属于 GPL-3.0 下的**聚合分发
-（mere aggregation）/ 使用独立程序**，管理面板自身许可证不受传染；作为对价，
-发行包必须随附 `third_party/opencode2api-win/`（`LICENSE` + `SOURCE.txt` +
-`README.md` + 源码包）。详见该目录内声明。
+**现役上游**：`jasonxu114514/opencode2api`（<https://github.com/jasonxu114514/opencode2api>），
+固定提交 `b296a61`（v1.4.7），许可证 **GPL-3.0**。CI 与
+`scripts/fetch-free-tier-engine.ps1` 都按该提交源码构建，产物名沿用历史名
+`opencode2api-win`（`bin/opencode2api-win[.exe]`），仅为兼容旧脚本与目录约定。
+
+历史分叉 `wbi35772/opencode2api-win`（v1.4.6 + 分叉补丁）已于 2026-11-11 起 404，
+自 v2.0.5 起**不再使用**；目录名 `third_party/opencode2api-win/` 保留未改，避免
+破坏打包脚本与已发布产物的路径。
+
+血脉祖先 `6Kmfi6HP/opencode2api`（v0.11 前后）**不是**本项目的运行时上游：
+其许可证为 All rights reserved（明确未授予复制/修改/分发/使用），且配置与
+`/healthz` 契约与本项目托管层不兼容。详见仓库根 README「引擎血统与上游」。
+
+本项目**不链接、不内联、不修改**引擎源码：管理器只做三件事——按配置写出
+`config.json`、以子进程方式 `exec`（参数 `-config <路径>`）、通过 127.0.0.1 的
+HTTP 做健康检查与统计。这属于 GPL-3.0 下的**聚合分发（mere aggregation）/
+使用独立程序**，管理面板自身许可证不受传染；作为对价，发行包必须随附
+`third_party/opencode2api-win/`（`LICENSE` + `SOURCE.txt` + `README.md` + 源码包）。
+详见该目录内声明。
 
 ## 三、运行目录
 
@@ -86,7 +98,7 @@ CI（`.github/workflows/build-release.yml`）按矩阵交叉构建三平台：
 | **WARP 优先**（默认） | 恒为 `true` | 请求先走**匿名通道**（WARP 出口）→ 不通才按 `KeyTiers` 顺序打 key |
 | 密钥优先 | 仅当无 key 时为 `true` | 只用 key（v2.1 之前的行为），保留作回退档 |
 
-引擎侧的依据（上游 `opencode2api-win` 9964407）：
+引擎侧的依据（上游 `jasonxu114514/opencode2api` v1.4.7 / `b296a61`）：
 
 - 路由只有 `anonymous=true` 才建匿名路由，否则直接建密钥路由
   （`internal/models/catalog.go:282-291`）—— 所以「配了 key 又关掉 anonymous」

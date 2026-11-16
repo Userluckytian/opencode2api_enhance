@@ -299,14 +299,13 @@ export default function DiagPage({
           <div className="flex items-center gap-2 mb-3">
             <Activity size={16} className="text-teal-600" />
             <h3 className="text-[15px] font-semibold text-zinc-900">服务端口总览</h3>
-            <span className="text-[11.5px] text-zinc-400">四个独立入口 · 端口来自自检目标</span>
+            <span className="text-[11.5px] text-zinc-400">三个独立入口 · 端口来自自检目标</span>
           </div>
           <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-4">
             {([
               ['manager', '管理面板'],
               ['engine', 'OpenCode 引擎'],
               ['provider', '供应商服务'],
-              ['kilo', 'Kilo 独立网关'],
             ] as const).map(([name, label]) => {
               const c = diag.checks.find((x) => x.name === name)
               const port = (c?.target || '').split(':').pop() || '—'

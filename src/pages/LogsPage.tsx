@@ -258,7 +258,6 @@ const LogRow = memo(function LogRow({
           }
           return null
         })()}
-        {/* Kilo 会静默换模型：直接展示上游实际返回的 model */}
         {rec.actual_model && rec.actual_model !== rec.model && (
           <span className="shrink-0 text-[11px] text-amber-700 bg-amber-50 rounded-md px-2 py-0.5" title="上游实际返回的模型">
             实际: {rec.actual_model}
@@ -637,7 +636,7 @@ export default function LogsPage({
       {logs.length > 0 && visible.length === 0 && null}
       <div className="flex items-center gap-2 text-zinc-400 text-xs mt-4">
         <Activity size={12} />
-        每 5 秒自动刷新 · 统一网关日志保留上限可在设置页调整（Kilo 日志按文件大小轮转） · 供应商筛选与日期/关键词联动
+        每 5 秒自动刷新 · 统一网关日志保留上限可在设置页调整 · 供应商筛选与日期/关键词联动
       </div>
       </>
       )}

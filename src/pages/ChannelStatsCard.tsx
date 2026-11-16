@@ -68,7 +68,7 @@ export default function ChannelStatsCard() {
   }, [load])
 
   const total = stats?.total ?? 0
-  // 通道占比只以引擎记录（warp+key）为分母，不含 Kilo/自定义源，避免低估。
+  // 通道占比只以引擎记录（warp+key）为分母，不含自定义源，避免低估。
   const engineTotal = stats?.engine_total ?? 0
   const warp = stats?.warp ?? { requests: 0, ok: 0, fail: 0 }
   const key = stats?.key ?? { requests: 0, ok: 0, fail: 0 }
@@ -125,7 +125,7 @@ export default function ChannelStatsCard() {
             )}
           </div>
           <div className="mt-1.5 text-[11px] text-zinc-400">
-            占比以引擎记录（warp+key 共 {engineTotal} 条）为分母，另有 {other.requests} 条非引擎调用（Kilo / 自定义源）单独列出、不计入通道占比。数据来自调用日志现算（只读）；匿名通道 = 引擎 stdout 的 channel=anonymous，key 通道 = channel=key（zen/go）。
+            占比以引擎记录（warp+key 共 {engineTotal} 条）为分母，另有 {other.requests} 条非引擎调用（自定义源 / 插件供应商）单独列出、不计入通道占比。数据来自调用日志现算（只读）；匿名通道 = 引擎 stdout 的 channel=anonymous，key 通道 = channel=key（zen/go）。
           </div>
         </>
       )}

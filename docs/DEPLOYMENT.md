@@ -107,6 +107,13 @@ docker compose up -d --build   # 或 docker build -t opencode2api-manager:latest
 
 ## Docker Compose
 
+> **已知限制（2026-11-16）**：镜像只包含管理面板（40000）与历史遗留的 sing-box 子程序，
+> **不包含 40080 免费层引擎**——容器内 OpenCode 页会显示「引擎未安装」。两种补法：
+> ① 把按 `SOURCE.txt` 提交构建好的 `opencode2api-win`（Linux）`docker cp` 或挂载到
+> `/app/bin/opencode2api-win`；② 在 Dockerfile 增加一个构建阶段 `git clone` 固定提交后
+> `go build`（需同时满足 GPL-3.0 的源码随镜像分发义务）。补齐前请勿把 Docker 部署当作
+> 「开箱即用」。
+
 仓库根目录提供本项目的 `docker-compose.yml`（见上文 Docker 快速开始）。
 
 > 历史说明：早期上游版本曾提供 `deploy/compose/`（compose.yml / tor / warp 三套模版，

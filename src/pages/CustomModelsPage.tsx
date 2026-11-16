@@ -992,8 +992,7 @@ export default function CustomModelsPage({ toast }: { toast: (msg: string, ok?: 
                     {!p.enabled && <span className="text-[11px] px-1.5 py-0.5 rounded bg-zinc-200 text-zinc-500">已停用</span>}
                     {p.use_proxy && <span className="text-[11px] px-1.5 py-0.5 rounded bg-amber-50 text-amber-700">走代理</span>}
                     {/* 数据去向提示：上游明确会把请求内容用于训练/记录的源，必须一眼可见
-                        （Kilo Free 档 11/11 模型 mayTrainOnYourPrompts=true，见
-                        docs/opencode-channel-research-2026-11-11/top5-99-consolidation-and-upgrade.md §8） */}
+                        （通用能力，与具体供应商无关；来源见 docs/CUSTOM-MODELS.md） */}
                     {p.data_policy_note && (
                       <span
                         className="text-[11px] px-1.5 py-0.5 rounded bg-rose-50 text-rose-700 border border-rose-200"

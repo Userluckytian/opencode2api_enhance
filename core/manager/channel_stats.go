@@ -31,14 +31,14 @@ type ChannelStats struct {
 }
 
 // channelOf 把一条调用日志归到 "warp" / "key" / "other"，并标注是否推断。
-// 只把 OpenCode 引擎记录纳入 warp/key：Kilo / 自定义源一律 other。
+// 只把 OpenCode 引擎记录纳入 warp/key：自定义源 / 插件供应商一律 other。
 func channelOf(r *CallLogRecord) (string, bool) {
 	if r.Channel == "warp" || r.Channel == "key" {
 		return r.Channel, false
 	}
 	// 旧日志无 Channel：只认明确来自 OpenCode 引擎的记录。
-	// ReadCallLog 会覆写 Source（引擎="OpenCode 引擎"，JSONL="供应商服务"/
-	// "Kilo 独立网关"），故无需放宽到 Source==""——那样反而可能把恰好叫
+	// ReadCallLog 会覆写 Source（引擎="OpenCode 引擎"，JSONL="供应商服务"），
+	// 故无需放宽到 Source==""——那样反而可能把恰好叫
 	// opencode 的自定义源误算进 WARP（独立审查 P2 #2）。
 	isEngine := r.Source == "OpenCode 引擎" && (r.Vendor == "opencode" || r.Vendor == "zen" || r.Vendor == "go")
 	if !isEngine {

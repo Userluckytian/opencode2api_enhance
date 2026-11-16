@@ -3,11 +3,10 @@
 // v2.0.0 架构（管理进程 + 三个对外/托管服务）：
 //
 //	40000  本进程 —— 管理面板 + /api/admin/*（控制面，不代理推理）
-//	40080  opencode2api-win 引擎 —— OpenCode 免费层（独立进程，本进程托管）
+//	40080  opencode2api 引擎 —— OpenCode 免费层（独立进程，本进程托管）
 //	50080  供应商服务 —— 自定义源 + 插件供应商（本进程托管）
-//	30080  Kilo 独立网关 —— 阶段 K 起，直通 api.kilo.ai，与上述链路零交集
 //
-// 推理请求走 40080 / 50080 / 30080；40000 只负责配置、启停、健康、日志与统计。
+// 推理请求走 40080 / 50080；40000 只负责配置、启停、健康、日志与统计。
 package main
 
 import (
@@ -23,7 +22,6 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -167,16 +165,6 @@ func main() {
 	}()
 	go managerInst.WatchdogFreeTierEngine(engineRunner)
 
-	// Kilo 独立网关（30080）：管理进程内监听器，直通上游，与引擎/vendors 零交集。
-	// 后台启动同款教训：失败只 warn，绝不拖垮管理面板。
-	kiloGW := managerInst.KiloGateway()
-	go func() {
-		if err := kiloGW.Start(); err != nil {
-			slog.Warn("kilo gateway unavailable", "error", err)
-		}
-	}()
-	defer kiloGW.Stop()
-	go kiloGW.Watchdog(30 * time.Second)
 
 	// 调用指标采集：增量消费引擎 stdout，把 request_routed 落成分析用的指标行。
 	// 与看门狗一样常驻；指标是旁路，采不到只记 warn，不影响推理。
@@ -341,135 +329,6 @@ func providerServiceStopHandler(p *manager.ProviderService) http.HandlerFunc {
 func freeTierEngineStatusHandler(m *manager.Manager) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		writeJSONResp(w, m.FreeTierEngineStatus())
-	}
-}
-
-// ---- Kilo 独立网关（30080，阶段 K）管理端点 ----
-
-func kiloGatewayStatusHandler(m *manager.Manager) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		writeJSONResp(w, m.KiloGateway().Status())
-	}
-}
-
-func kiloGatewayModelsHandler(m *manager.Manager) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		entries, err := m.KiloGateway().Models()
-		if err != nil {
-			writeErrResp(w, http.StatusBadGateway, err.Error())
-			return
-		}
-		writeJSONResp(w, map[string]any{
-			"models":                entries,
-			"status":                m.KiloGateway().Status(), // 含 free_only / may_train
-			"data_policy":           "prompts-may-be-used-for-training",
-			"data_policy_reference": "https://api.kilo.ai — NVIDIA API Trial ToS: do not submit personal or confidential data",
-		})
-	}
-}
-
-// kiloGatewayCallsHandler：最近调用观测（需求 #1，展示上游真实返回的 model）。
-func kiloGatewayCallsHandler(m *manager.Manager) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		writeJSONResp(w, map[string]any{"calls": m.KiloGateway().RecentCalls()})
-	}
-}
-
-// kiloGatewayRefreshHandler：手动强制实拉上游目录（需求 #2-3），
-// 绕过 10s 节流，返回刷新后的状态。
-func kiloGatewayRefreshHandler(m *manager.Manager) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPost {
-			writeErrResp(w, http.StatusMethodNotAllowed, "POST only")
-			return
-		}
-		n, err := m.KiloGateway().RefreshCatalogNow()
-		if err != nil {
-			writeErrResp(w, http.StatusBadGateway, "目录刷新失败: "+err.Error())
-			return
-		}
-		writeJSONResp(w, map[string]any{"total": n, "status": m.KiloGateway().Status()})
-	}
-}
-
-// kiloGatewayVirtualHandler：阶段 M 虚拟模型管理（GET 列表 / POST upsert / DELETE）。
-func kiloGatewayVirtualHandler(m *manager.Manager) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		switch r.Method {
-		case http.MethodGet:
-			writeJSONResp(w, map[string]any{"models": m.KiloVirtualList()})
-		case http.MethodPost:
-			var vm manager.VirtualModel
-			if err := json.NewDecoder(r.Body).Decode(&vm); err != nil {
-				writeErrResp(w, http.StatusBadRequest, "请求体需为虚拟模型 JSON")
-				return
-			}
-			if err := m.KiloVirtualUpsert(vm); err != nil {
-				writeErrResp(w, http.StatusBadRequest, err.Error())
-				return
-			}
-			writeJSONResp(w, map[string]any{"status": "ok", "models": m.KiloVirtualList()})
-		case http.MethodDelete:
-			name := r.URL.Query().Get("name")
-			if name == "" {
-				writeErrResp(w, http.StatusBadRequest, "需提供 ?name=")
-				return
-			}
-			if err := m.KiloVirtualDelete(name); err != nil {
-				writeErrResp(w, http.StatusInternalServerError, err.Error())
-				return
-			}
-			writeJSONResp(w, map[string]any{"status": "ok", "models": m.KiloVirtualList()})
-		default:
-			writeErrResp(w, http.StatusMethodNotAllowed, "GET/POST/DELETE only")
-		}
-	}
-}
-
-// kiloGatewayToggleHandler POST body {enabled?:bool, free_only?:bool}：
-// 写配置（ConfigSet 持久化）+ 立即生效（Start/Stop），两段结果都回给前端，
-// 任何一段失败都不假装成功（引擎 reload 教训：成功=观测到期望值）。
-func kiloGatewayToggleHandler(m *manager.Manager) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPost {
-			writeErrResp(w, http.StatusMethodNotAllowed, "POST only")
-			return
-		}
-		var in struct {
-			Enabled  *bool `json:"enabled"`
-			FreeOnly *bool `json:"free_only"`
-		}
-		if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
-			writeErrResp(w, http.StatusBadRequest, "请求体需为 {enabled?,free_only?}")
-			return
-		}
-		if in.Enabled == nil && in.FreeOnly == nil {
-			writeErrResp(w, http.StatusBadRequest, "至少提供 enabled 或 free_only 之一")
-			return
-		}
-		if in.Enabled != nil {
-			if err := m.ConfigSet("kilo_enabled", strconv.FormatBool(*in.Enabled)); err != nil {
-				writeErrResp(w, http.StatusInternalServerError, err.Error())
-				return
-			}
-			if *in.Enabled {
-				if err := m.KiloGateway().Start(); err != nil {
-					writeErrResp(w, http.StatusInternalServerError, "配置已保存但网关未能监听: "+err.Error())
-					return
-				}
-			} else {
-				if err := m.KiloGateway().Stop(); err != nil {
-					slog.Warn("kilo gateway stop error", "error", err)
-				}
-			}
-		}
-		if in.FreeOnly != nil {
-			if err := m.ConfigSet("kilo_free_only", strconv.FormatBool(*in.FreeOnly)); err != nil {
-				writeErrResp(w, http.StatusInternalServerError, err.Error())
-				return
-			}
-		}
-		writeJSONResp(w, m.KiloGateway().Status())
 	}
 }
 
@@ -655,13 +514,6 @@ func registerHTTPRoutes(mux *http.ServeMux, managerInst *manager.Manager, plugin
 	// 免费层可用模型清单：合并引擎 /v1/models 与它自写的 availability 探测结果
 	mux.HandleFunc("/api/admin/free-tier/models", loggingMiddleware(requireAuth(freeTierModelsHandler(managerInst))))
 
-	// Kilo 独立网关（30080，阶段 K）：与引擎/供应商服务零交集的独立入口。
-	mux.HandleFunc("/api/admin/kilo/status", loggingMiddleware(requireAuth(kiloGatewayStatusHandler(managerInst))))
-	mux.HandleFunc("/api/admin/kilo/models", loggingMiddleware(requireAuth(kiloGatewayModelsHandler(managerInst))))
-	mux.HandleFunc("/api/admin/kilo/toggle", loggingMiddleware(requireAuth(kiloGatewayToggleHandler(managerInst))))
-	mux.HandleFunc("/api/admin/kilo/calls", loggingMiddleware(requireAuth(kiloGatewayCallsHandler(managerInst))))
-	mux.HandleFunc("/api/admin/kilo/refresh", loggingMiddleware(requireAuth(kiloGatewayRefreshHandler(managerInst))))
-	mux.HandleFunc("/api/admin/kilo/virtual", loggingMiddleware(requireAuth(kiloGatewayVirtualHandler(managerInst))))
 	// 手动探测：对引擎发一次最小请求，用真实状态码判定模型可用性
 	mux.HandleFunc("/api/admin/free-tier/probe", loggingMiddleware(requireAuth(modelProbeHandler(managerInst))))
 	// 诊断：四服务自检 + 配置/二进制检查

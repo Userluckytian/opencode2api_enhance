@@ -15,11 +15,11 @@
 
 
 
-本地**多实例代理管理器**，支持 Windows / Linux / macOS 桌面（Tauri 2 壳）与 **Docker / Headless Web**（同一 Go core）多端部署。每个"实例" = 一个 opencode2api 代理进程 + 一个 sing-box 出口，绑定不同代理节点，把 OpenAI / Anthropic / Responses 风格的请求转发到 OpenCode 上游，并可通过多实例 × 多节点分散请求、绕过按 IP 的频率限制。
+本地**三端口 LLM 代理管理器**，支持 Windows / Linux / macOS 桌面（Tauri 2 壳）与 **Docker / Headless Web**（同一 Go core）多端部署。40000 是管理面（不代理推理），40080 托管 OpenCode 免费层引擎，50080 托管自定义源与插件供应商；管理器负责启停、健康、配置热更新、调用日志与统计。
 
 除内建免费源外，还支持**自定义模型源**：用你自己的 API Key 接入任意第三方供应商（GLM / DeepSeek / Kimi / OpenRouter / OpenAI / Anthropic / Gemini 等，四种上游协议），多 Key 轮询/错误转移，与免费源并列聚合在同一网关下——详见 [自定义模型源指南](docs/CUSTOM-MODELS.md)。
 
-UI 参照 Windsurf Account Manager 的浅色官网风格：无边框窗口 + 自定义标题栏 + 侧边栏七页（独享 / 实例池 / 节点池 / **自定义模型** / 统计 / 日志 / 设置），关闭窗口最小化到托盘、实例继续运行；headless 端同一七页 UI 经浏览器访问。
+UI 参照 Windsurf Account Manager 的浅色官网风格：无边框窗口 + 自定义标题栏 + 侧边栏六页（**OpenCode** / 自定义模型 / 统计 / 日志 / 诊断 / 设置），关闭窗口最小化到托盘、服务继续运行；headless 端同一六页 UI 经浏览器访问。
 
 > 本项目不是 OpenAI、Anthropic 或 OpenCode 的官方项目。请遵守上游服务条款，并只在你有权限的环境中使用。
 
@@ -27,28 +27,40 @@ UI 参照 Windsurf Account Manager 的浅色官网风格：无边框窗口 + 自
 
 ![opencode2api 管理器界面](docs/images/screenshot.png)
 
+## 引擎血统与上游（重要）
+
+三个名字经常被混用，这里一次说清（以本仓库实际构建与分发为准）：
+
+| 名字 | 与本项目的关系 | 许可证 | 是否随发行包分发 |
+|------|----------------|--------|------------------|
+| `jasonxu114514/opencode2api` | **现役运行时引擎**：CI 按固定提交 `b296a61`（v1.4.7）构建 40080 引擎 | GPL-3.0 | 是（独立进程 + 源码要约，见 `third_party/opencode2api-win/SOURCE.txt`） |
+| `wbi35772/opencode2api-win` | 历史分叉（v1.4.6 + 分叉补丁），2026-11-11 起仓库 404，已**不再使用** | GPL-3.0 | 否 |
+| `6Kmfi6HP/opencode2api` | 本代码血脉的**共同祖先**（v0.11 前后）；现版本 v0.15.x 仅作机制调研参考 | **All rights reserved**（明确未授予复制/修改/分发/使用许可） | 否 |
+
+结论：**不要把 40080 引擎换成 6Kmfi6HP**。原因有两条硬约束，任一条都足以否决：
+
+1. **许可证**：它明确「未授予任何权利」，而本项目以安装包形式分发引擎二进制；GPL-3.0 至少允许随源码分发，换成它反而从「合规」变成「未授权分发」。只读它的代码/结论做调研可以，复制代码或内嵌产物不行。
+2. **契约不兼容**：本项目的免费层面板与托管层依赖 v1.4.x 契约——配置字段（`zen_keys` / `go_keys` / `warp` / `proxies` / `webui`）、`/healthz` 字段（`warp.active` / `keys.zen` / `models_shown`）、通道语义（anonymous / key）。6Kmfi6HP v0.15.x 的配置是另一套（`key_pool` / `model_alias` / `admin_password` / `stream_first_byte_timeout_ms`），且**没有 WARP 池**、没有上述 `/healthz` 字段。换过去不是「换上游」，而是重写 2,400 行免费层托管代码 + 1,380 行 OpenCode 页，并放弃 WARP 出口能力。
+
+长期方向（若要摆脱 GPL 依赖）：自研一个薄免费层网关（只做协议转换 + 出口选择 + 额度账本），把外部引擎降级为可选后端；而不是换一个许可更严的第三方二进制。
+
 ## 功能
 
-- **独享实例**：增/删/启/停/测试，批量操作（启动/停止/释放，按勾选执行）；API 地址一键复制；链路质量列 + 探测开关
-- **实例池**：入池实例聚合到统一网关（路由模式 smart·failover·round_robin），网关地址与密钥一键复制（密钥立即生效）；批量启动/停止/测试/释放（勾选驱动）；一键重启仅作用于运行中实例
-- **节点池**：一键扫描全部节点（经 Clash 外部控制 + 本地 Verge profiles），按分组展示，结果分类（ok / config / socks / tls / upstream / timeout / other）与延迟；勾选节点可直接【入池】或【设为独享】批量添加（节点行点击选中、分组行点击展开收起）
-- **多代理节点**：每实例自动生成 sing-box 配置走所选节点（trojan / vless / vmess / shadowsocks / ws），opencode2api 的 SOCKS5 指向 sing-box
-- **Clash 集成**：配置 Clash 外部控制地址与密钥即可拉取节点；也可读取 Clash Verge 本地 profiles 目录（仅桌面端展示，headless 端隐藏）
-- **订阅管理**：支持添加多条订阅源，每条独立配置自动拉取间隔与导入目标（独享/进池/仅节点池）；自动识别 Clash YAML / V2Ray base64 / 明文链接三种格式，容错解码（URL-safe 变体/缺 padding/含换行均可）、节点名 percent-decode（中文/emoji）、公告伪节点过滤、重名去重、IPv6 主机，解析能力对齐 mihomo/v2rayN 等主流客户端
-- **性能模式**：链路级主动探活（质量分 0~100 / healthy·degraded·flaky·down）+ 质量加权路由 + 熔断自动恢复 + 请求级竞速（并行发最优 2 节点取快）——坏节点自动剔除、恢复自动回归，全程无感；单节点时自动退化直连。因对话卡顿而生，一篇想说清楚的[性能模式说明](docs/PERFORMANCE-MODE.md)
-- **自定义模型源**：自带 API Key 接入第三方供应商（**OpenAI 兼容 / Anthropic / OpenAI Responses / Gemini** 四协议，多源并存），多 Key 池支持**轮询 / 错误转移**调度——429 自动冷却、401/403 自动禁用换 Key；保存即热生效（含已运行实例，无需重启）、模型清单磁盘缓存（重启即得）；模型带 `源ID/` 前缀进入统一 `/v1/models`，统计/日志/失败切换全链路复用，详见 [指南](docs/CUSTOM-MODELS.md)
-- **Token 统计**：按实例聚合用量，支持按节点下钻明细与**按天查看**；重置统计（可清除已删除节点历史）
-- **调用日志**：全流程日志（成功/失败/切换/超时），按天筛选、时段/节点分析、一键清空；直连请求显示「直连」
-- **残留进程清理**：一键探测/勾选/清除占进程的孤儿节点与探针残留（运行中的实例/网关自动跳过）
-- **触摸保活**：系统托盘常驻，关闭窗口实例继续代理
-- **设置**：Clash 外部控制（桌面端）、开机自启、残留进程清理、关于/退出；实例池/节点池各自页面内带「设置」齿轮（性能模式参数、并发、网关超时切换、订阅刷新）
+- **OpenCode 免费层（40080）**：托管 opencode2api 引擎（独立子进程 + 看门狗），面板含通道顺序（`warp_first` / `key_first`）、WARP 出口池（活跃/冷却计数、一键重试）、密钥通道（zen / go key 列表，保存即热生效）、免费模型清单与游标、接入信息（地址 + API Key 一键复制）、启停 / 重启（异步模式避免前端转圈 95 秒）
+- **自定义模型源（50080）**：自带 API Key 接入第三方供应商（**OpenAI 兼容 / Anthropic / OpenAI Responses / Gemini** 四协议，多源并存），多 Key 池支持**轮询 / 错误转移**——429 自动冷却、401/403 自动禁用换 Key；保存即热生效、模型清单磁盘缓存；模型带 `源ID/` 前缀进入统一 `/v1/models`，详见 [指南](docs/CUSTOM-MODELS.md)
+- **插件供应商**：`provider.json` 契约 + 子进程托管，统一启停、配置、日志与模型刷新，详见 [插件能力](docs/PLUGIN-CAPABILITIES.md)
+- **调用日志**：供应商 JSONL 与引擎 stdout 事件合并，按天 / 供应商 / 关键词筛选；逐条显示 WARP / key 通道徽标、上游真实 model、错误大类
+- **Token 统计**：按天 / 模型聚合用量，重置统计；诊断页另有「通道分析」（WARP vs key 的请求数、成功率与占比，以引擎记录为分母）
+- **诊断**：三端口自检（管理面板 / 引擎 / 供应商服务）、引擎二进制与配置校验、通道分析、残留进程清理
+- **设置**：端口与生效值、开机自启、日志保留上限、关于/退出
+
 
 ## 用法
 
-1. 启动 `opencode2api-manager.exe`（首次运行自动在 exe 旁生成 `bin/` 目录，内含 opencode2api 与 sing-box 子程序）
-2. **节点池**页 →「订阅导入」添加订阅源（或设置 Clash 外部控制后扫描）→ 拉取节点 → 勾选可用 →【入池】聚合到统一网关 或【设为独享】
-3. **自定义模型**页（可选）→「添加模型源」→ 填 API 地址 / 协议 / Key（可多 Key）→「测试并获取模型」→ 保存即热生效
-4. **独享 / 实例池**页 →「启动」→ 用 `http://127.0.0.1:{实例端口}/v1`（独享）或统一网关地址（入池）作为 API 地址
+1. 启动 `opencode2api-manager.exe`（首次运行自动在 exe 旁生成 `bin/` 目录，内含 opencode2api 引擎）
+2. **OpenCode** 页 → 填 zen / go key（留空则走匿名通道）→ 选通道顺序 → 「启动」→ 用 `http://127.0.0.1:40080/v1` 作为 API 地址
+3. **自定义模型** 页（可选）→「添加模型源」→ 填 API 地址 / 协议 / Key（可多 Key）→「测试并获取模型」→ 保存即热生效 → 用 `http://127.0.0.1:50080/v1`
+4. **统计 / 日志 / 诊断** 页观察用量、逐条调用与三端口自检
 
 ## Linux / Headless 部署
 
@@ -57,7 +69,7 @@ UI 参照 Windsurf Account Manager 的浅色官网风格：无边框窗口 + 自
   - **桌面壳**：安装桌面版后 `opencode2api --headless [-port 40000] [-listen 127.0.0.1]`——壳释放内嵌组件并拉起 core，无窗口运行，适合 SSH / 无图形会话；退出自动清理网关与实例，见 [Linux 开发与构建指南](docx/LINUX-DEVELOPMENT.md)。
 - **桌面（Linux）**：安装 .deb / AppImage 即可；桌面模式内置本地 HTTP 服务，前端经它取数，行为与 Windows 版一致。
 - **deb 自动注册 systemd 服务**：`.deb` 安装后自动注册并启用 `opencode2api` 服务（`systemctl status opencode2api` 查看）。配置文件为 `/etc/opencode2api/manager.env`（WebUI 端口默认 `60000`、监听 `127.0.0.1`、数据目录 `/var/lib/opencode2api`、统一网关密钥默认 `sk-unified-local`）。**修改该文件后必须执行 `sudo systemctl daemon-reload && sudo systemctl restart opencode2api` 才生效**（安装 deb 时终端会输出此提示）；端口/网关密钥也可以在 WebUI「统一网关」卡片修改（写入 `config.json`，保存即生效，无需重启）。
-- **Docker（服务器）**：仓库根目录 `docker compose up -d --build` 即起完整管理器（含七页前端与 sing-box 出口），管理面板 `http://127.0.0.1:40000`，见 [部署文档](docs/DEPLOYMENT.md)。
+- **Docker（服务器）**：仓库根目录 `docker compose up -d --build` 即起完整管理器（含六页前端与免费层引擎），管理面板 `http://127.0.0.1:40000`，见 [部署文档](docs/DEPLOYMENT.md)。
 - 数据目录与配置：`OPCODE2API_DATA_DIR` 隔离数据；`OPCODE2API_MANAGER_PORT` 覆盖管理端口；`config.json` 支持网关端口/密钥（统一网关密钥默认 `sk-unified-local`，也可用 `OPCODE2API_GATEWAY_KEY` 环境变量覆盖）、订阅、日志过滤等配置项。
 
 ## macOS 部署
@@ -93,18 +105,18 @@ powershell -ExecutionPolicy Bypass -File scripts/prepare-portable.ps1
 
 - `go` 在 PATH（编译 Go core）
 - `cargo` + MSVC 工具链（编译 Rust 壳）。脚本会**自动初始化 MSVC 环境**：优先用 `VsDevCmd.bat`，若该 VS 安装缺 `vcvars` 脚本（此时 `VsDevCmd` 静默不设环境）则回退到**从磁盘探测** `VC\Tools\MSVC\<ver>` 与 Windows SDK 并自行拼 `PATH/INCLUDE/LIB`；两者都失败时报「install Desktop development with C++」
-- `bin\sing-box.exe`：Windows 用 `powershell -ExecutionPolicy Bypass -File scripts\fetch-singbox.ps1`（版本自动对齐 CI 矩阵）
+- `bin\opencode2api-win.exe`：免费层引擎，缺失时脚本自动调用 `scripts\fetch-free-tier-engine.ps1`（需 git + go ≥ 1.24，按固定 commit 源码构建）
 - `bin\dist\`：先跑 `npm run build`
 
-自动完成：编译最新 Go core（版本号取自 `package.json`，commit/branch 取自 git）→ Rust 壳（内嵌 core + sing-box）→ 组装 `portable-out/`（exe + WebView2Loader.dll + portable.txt + 前端 dist）→ 校验。生成的 portable 包走**独立端口槽位与数据目录**，与正式版零冲突，适合日常测试（详见 [测试指南](docs/TESTING.md)）。
+自动完成：编译最新 Go core（版本号取自 `package.json`，commit/branch 取自 git）→ Rust 壳（内嵌 core + 免费层引擎）→ 组装 `portable-out/`（exe + WebView2Loader.dll + portable.txt + 前端 dist）→ 校验。生成的 portable 包走**独立端口槽位与数据目录**，与正式版零冲突，适合日常测试（详见 [测试指南](docs/TESTING.md)）。
 
-> 注意：运行过打包产物后，壳会在 `portable-out\bin\` 释放 `opencode2api.exe` / `sing-box.exe`（各约数十 MB）。脚本重新打包前会清理整个输出目录，若提示文件被占用，先退出正在运行的 `opencode2api.exe`。
+> 注意：运行过打包产物后，壳会在 `portable-out\bin\` 释放 `opencode2api.exe` / `opencode2api-win.exe`（各约数十 MB）。脚本重新打包前会清理整个输出目录，若提示文件被占用，先退出正在运行的 `opencode2api.exe`。
 
 ### Linux 构建（本地 / WSL）
 
 Linux 桌面产物（.deb）需在 Linux 环境构建（Windows 可用 WSL），核心两步：
 
-1. 交叉编译 Go core 与下载 sing-box（无扩展名，见下文「内嵌二进制」）：`GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -trimpath -ldflags "-s -w -X main.version=v1.5.4" -o bin/opencode2api .`，`./scripts/fetch-singbox.sh linux-amd64`
+1. 交叉编译 Go core 并构建免费层引擎（无扩展名，见下文「内嵌二进制」）：`GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -trimpath -ldflags "-s -w -X main.version=v1.5.4" -o bin/opencode2api .`，`powershell -File scripts/fetch-free-tier-engine.ps1`（或在 Linux 上用同一 Go 源码按 SOURCE.txt 的 commit 构建）
 2. WSL 内 `npx tauri build --bundles deb` 产出 `linux-out/opencode2api_<version>_amd64.deb`；Debian/Ubuntu 用 `sudo apt install ./opencode2api_<version>_amd64.deb` 安装（deb 自动注册 systemd 服务 `opencode2api` 并启用），`opencode2api --headless` 可无桌面运行
 
 细节（平台二进制解析 / 可写目录回退 / 前端资源复制 / 组件内嵌选择 / 构建与验证 / 常见问题）见 [docx/LINUX-DEVELOPMENT.md](docx/LINUX-DEVELOPMENT.md)。
@@ -118,14 +130,12 @@ Linux 桌面产物（.deb）需在 Linux 环境构建（Windows 可用 WSL），
 
 ### 内嵌二进制（bin/）
 
-`bin/` 被 `.gitignore` 忽略，`opencode2api.exe` 与 `sing-box.exe` 均不入库，本地构建前需自行准备：
+`bin/` 被 `.gitignore` 忽略，`opencode2api.exe` 与 `opencode2api-win.exe` 均不入库，本地构建前需自行准备：
 
 - `opencode2api`（Windows 为 `.exe`）：由本仓库 Go 源码构建（`go build -trimpath -ldflags "-s -w" -o bin/opencode2api .`）
-- `sing-box`（Windows 为 `.exe`）：一键脚本从 [sing-box 官方 Release](https://github.com/SagerNet/sing-box/releases) 下载并放到 `bin/`；CI 由 workflow 自动准备
-  - Windows：`powershell -ExecutionPolicy Bypass -File scripts\fetch-singbox.ps1`（默认版本自动读取 CI 矩阵，`-Version` 可覆盖）
-  - Linux/macOS：`./scripts/fetch-singbox.sh [target]`（默认 v1.13.16，`SINGBOX_VERSION` 可覆盖；Windows 资产只有 `.zip`，脚本已按 target 自动选择压缩格式）
+- `opencode2api-win`（Windows 为 `.exe`）：免费层引擎（GPL-3.0 外部程序），由 `scripts/fetch-free-tier-engine.ps1` 按 `third_party/opencode2api-win/SOURCE.txt` 登记的 commit 源码构建；CI 由 workflow 自动准备
 
-远程构建无需手动准备：GitHub Actions 会自动构建 Go 核心、下载 sing-box 并完成打包（见 `.github/workflows/build-release.yml`）。
+远程构建无需手动准备：GitHub Actions 会自动构建 Go 核心与免费层引擎并完成打包（见 `.github/workflows/build-release.yml`）。
 
 开发热更：
 
@@ -151,10 +161,9 @@ npm run tauri:dev
 
 | 路径               | 说明                                  |
 | ---------------- | ----------------------------------- |
-| `config.json`    | 应用配置（Clash 外部控制、统一网关端口/密钥）           |
-| `instances.json` | 实例清单                                |
-| `runtime\`       | 各实例的运行目录与日志                         |
-| （exe 旁）`bin\`    | 释放的 opencode2api.exe / sing-box.exe |
+| `config.json`    | 应用配置（端口、引擎开关/通道顺序、日志保留等）          |
+| `runtime\`       | 引擎与供应商服务的运行目录、配置与日志                |
+| （exe 旁）`bin\`    | 释放的 opencode2api.exe / opencode2api-win.exe |
 
 **多环境隔离**：正式版 / dev（tauri dev）/ 便携测试（exe 旁 `portable.txt`）/ Docker 各自独立数据目录与**端口槽位**（正式 40000 起、dev 44100 起、portable 48200 起、Docker 可映射）；可用 `OPCODE2API_DATA_DIR`、`OPCODE2API_MANAGER_PORT`、`OPCODE2API_INSTANCE_BASE_PORT` 环境变量进一步隔离。
 
@@ -162,35 +171,32 @@ npm run tauri:dev
 ## 架构
 
 ```
-┌──────────────────────────────────────────────────┐
-│  Tauri 2 前端（React + Tailwind）                 │
-│  独享/实例池/节点池/自定义模型/统计/日志/设置       │
-└──────────────────┬───────────────────────────────┘
+┌──────────────────────────────────────────────────────┐
+│  Tauri 2 前端（React 19 + Tailwind 4）                │
+│  OpenCode / 自定义模型 / 统计 / 日志 / 诊断 / 设置     │
+└──────────────────┬───────────────────────────────────┘
                    │ http://127.0.0.1:<port>/api/admin/*
-┌──────────────────▼───────────────────────────────┐
-│  Go core 管理器（core/manager + main 包）          │
-│  实例/网关/节点/扫描/统计/日志/配置 + 协议转换       │
-│  vendors/opencode · custom · remote（多厂商）      │
-└──────────────────┬───────────────────────────────┘
-                   │ 子进程管理
-┌──────────────────▼──────────────────────────┐
-│  实例 = opencode2api.exe (Go) + sing-box.exe │
-│  用户 → :端口/v1 → opencode2api → sing-box → 节点│
-└─────────────────────────────────────────────┘
+┌──────────────────▼───────────────────────────────────┐
+│  Go core 管理器（main 包 + core/manager）              │
+│  引擎托管 / 供应商服务 / 日志 / 统计 / 配置 / 诊断      │
+└───────┬───────────────────────────────┬──────────────┘
+        │ 子进程：40080                 │ 子进程：50080
+┌───────▼──────────────┐      ┌─────────▼─────────────┐
+│ opencode2api 引擎     │      │ 供应商服务             │
+│ 免费层 → OpenCode 上游 │      │ 自定义源 + 插件供应商  │
+└──────────────────────┘      └───────────────────────┘
 ```
 
 - **Tauri 壳**：只做窗口/托盘/内嵌二进制释放/拉起 core 管理器（`src-tauri/src/lib.rs`），管理职责全部在 Go core；headless 端（Docker/Web）不依赖壳，同一 core 直接监听 HTTP 提供完整管理 UI
-- **Go core**：一份实现服务所有端（桌面 exe / Web 浏览器 / Docker），经 `/api/admin/*` HTTP 暴露；协议转换（OpenAI/Anthropic/Responses）与厂商契约在 main 包 + `core/contract`
-- **多厂商**：`vendors/opencode`（第一厂商，免费源）、`vendors/custom`（自定义模型源：自带 Key 接入第三方供应商，四协议 + 多 Key 池）、`vendors/remote`（插件商子进程厂商）
-- **供应商服务（50080）**：自定义源 + 插件供应商的独立入口，由管理器以子进程拉起；不加载 opencode、不参与实例池/sing-box。OpenCode 免费模型仍走统一网关 40080，两者互不影响
-- **环境隔离**：正式版 / dev（tauri dev）/ 便携测试（portable.txt）/ Docker 各自独立数据目录与**端口槽位**
-  （40000 起每环境一段；sing-box = 实例端口 +2000 紧挨），互不干扰，新开环境无需手动配端口
+- **Go core**：一份实现服务所有端（桌面 exe / Web 浏览器 / Docker），经 `/api/admin/*` HTTP 暴露；协议转换（OpenAI/Anthropic/Responses）在 `core/protocol` 与 `core/contract`
+- **三端口**：40000 控制面（不代理推理）、40080 免费层引擎（外部独立进程，GPL 隔离）、50080 供应商服务（自定义源 + 插件）
+- **环境隔离**：正式版 / dev（tauri dev）/ 便携测试（portable.txt）/ Docker 各自独立数据目录与**端口槽位**（40000 起每环境一段），互不干扰
 - **端口配置化**：来源优先级 环境变量 > config.json（gateway_port/provider_port/instance_base_port/probe_*_port）> 编译默认
 
 ## 目录结构
 
 ```
-src/                      # React 前端（TitleBar + 侧边栏 + 七页）
+src/                      # React 前端（TitleBar + 侧边栏 + 六页）
 src/lib/api.ts            # 统一 HTTP 对接层（/api/admin/*）
 src-tauri/src/            # Tauri 薄壳（窗口/托盘/自启/内嵌释放）
   embed.rs                # 内嵌二进制释放（按内容哈希校验）
@@ -204,7 +210,7 @@ core/                     # Go 核心层
 vendors/                  # 厂商层（一厂商 = 一文件夹，新增供应商零 core 改动）
   opencode/               # 第一厂商（免费源）
   custom/                 # 自定义模型源（四协议 + 多 Key 池 + 目录缓存）
-bin/                      # 内嵌子程序源（opencode2api.exe / sing-box.exe）
+bin/                      # 内嵌子程序源（opencode2api.exe / opencode2api-win.exe）
 docs/                     # 部署/自定义模型/性能模式/TESTING/FAQ 等文档
 docx/                     # 平台开发专题文档（Linux 开发与构建指南等）
 ```

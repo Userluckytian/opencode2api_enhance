@@ -305,12 +305,6 @@ export type ConfigView = {
   /** 生效值（含环境槽位/默认值） */
   gateway_port_effective: number
   provider_port_effective: number
-  /** 阶段 L：Kilo 独立网关端口（后端已下发，前端此前未声明） */
-  kilo_enabled: boolean
-  kilo_free_only: boolean
-  kilo_proxy: string
-  kilo_port: number
-  kilo_port_effective: number
 
   // ── 免费层引擎（40080，opencode2api-win） ──
   engine_enabled: boolean
@@ -532,81 +526,6 @@ export type MetricSuggestions = {
   suggestions: MetricSuggestion[]
 }
 
-/**
- * Kilo 独立网关（30080）状态。
- *
- * 阶段 K：Kilo 是与 OpenCode(40080)/自定义源(50080) **完全解耦**的独立入口，
- * 直通 https://api.kilo.ai。它与 opencode2api 的其它入口不共享任何运行路径。
- */
-export type KiloGatewayStatus = {
-  /** stopped | ready | failed */
-  state: string
-  /** 是否启用（配置值） */
-  enabled: boolean
-  /** 监听端口（默认 30080） */
-  port: number
-  /** 客户端 base URL（OpenAI 兼容） */
-  address: string
-  /** 统一网关密钥（本地默认 sk-unified-local） */
-  api_key: string
-  /** 是否只暴露免费档模型 */
-  free_only: boolean
-  /** 上游出站代理（空 = 直连） */
-  proxy: string
-  running: boolean
-  /** 上游目录总数 */
-  model_total: number
-  /** 当前视图内模型数（受 free_only 影响） */
-  model_shown: number
-  /** 当前视图内是否存在「提示词可能被用于训练」的模型 */
-  may_train: boolean
-  /** 目录最近刷新时刻（RFC3339） */
-  last_refresh?: string
-  /** 启动/运行错误 */
-  last_error?: string
-  error?: string
-}
-
-/** Kilo 单模型条目 */
-export type KiloModelEntry = {
-  id: string
-  /** 上游标注的免费档 */
-  free: boolean
-  /** 上游标注：提示词可能被用于训练 */
-  may_train: boolean
-  supports_tools: boolean
-  context_window?: number
-  provider_name?: string
-}
-
-/** Kilo 模型列表响应 */
-export type KiloModelsView = {
-  models: KiloModelEntry[]
-  status: KiloGatewayStatus
-  /** 机器可读的数据政策标识 */
-  data_policy: string
-  /** 政策依据出处 */
-  data_policy_reference: string
-}
-
-/** 阶段 M：Kilo 命名虚拟模型 */
-export type KiloVirtualModel = {
-  name: string
-  models: string[]
-  strategy: 'fallback' | 'round_robin' | 'race'
-  enabled: boolean
-}
-
-/** 一次 Kilo chat 调用的真实模型观测（需求 #1） */
-export type KiloCallRecord = {
-  time: string
-  requested: string
-  actual: string
-  status: number
-  duration_ms: number
-  stream: boolean
-  actual_known: boolean
-}
 
 /** 免费层引擎（40080）状态 */
 export type FreeTierEngineStatus = {
@@ -705,7 +624,7 @@ export type RouteVerdict =
 /** 阶段 O：OpenCode 引擎通道统计 */
 export type ChannelStats = {
   total: number
-  /** 引擎记录条数 = warp+key（通道占比的分母，不含 Kilo/自定义源） */
+  /** 引擎记录条数 = warp+key（通道占比的分母，不含自定义源） */
   engine_total: number
   warp: { requests: number; ok: number; fail: number }
   key: { requests: number; ok: number; fail: number }
@@ -731,11 +650,11 @@ export type CallLogRecord = {
   /** 来源标注：空 = 统一网关；否则为独享实例名（S4 聚合读取） */
   source?: string
   tier?: "free" | "paid"
-  /** 本次请求命中的厂商 ID（opencode / kilo / 自定义插件）；旧记录为空 */
+  /** 本次请求命中的厂商 ID（opencode / 自定义插件）；历史记录可能为 kilo */
   vendor?: string
   /** 阶段 O：OpenCode 引擎通道 warp / key；旧记录为空 */
   channel?: 'warp' | 'key'
-  /** 阶段 L：上游实际返回的模型（Kilo 会静默换模型）；旧记录为空 */
+  /** 上游实际返回的模型（上游可能静默换模型）；旧记录为空 */
   actual_model?: string
   route_verdict?: RouteVerdict
   serving_port?: string
@@ -1081,7 +1000,7 @@ export type CallLogFilter = {
   node?: string
   keyword?: string
   status?: 'ok' | 'error'
-  /** 阶段 L：供应商维度 kilo / opencode / custom；空 = 不过滤 */
+  /** 供应商维度 kilo / opencode / custom；空 = 不过滤（kilo 仅历史记录） */
   vendor?: string
   limit?: number
   offset?: number
@@ -1229,22 +1148,6 @@ export const api = {
     req<{ status: string; hint: string }>('POST', '/free-tier/retry-warp'),
   freeTierModels: () => req<FreeTierModelsView>('GET', '/free-tier/models'),
 
-  // Kilo 独立网关（30080，阶段 K）：与 40080/50080 解耦的独立入口
-  kiloStatus: () => req<KiloGatewayStatus>('GET', '/kilo/status'),
-  kiloModels: () => req<KiloModelsView>('GET', '/kilo/models'),
-  /** 开关（enabled / free_only 至少给一个）；返回切换后的生效状态 */
-  kiloToggle: (patch: { enabled?: boolean; free_only?: boolean }) =>
-    req<KiloGatewayStatus>('POST', '/kilo/toggle', patch),
-  /** 最近调用的真实模型观测（新→旧） */
-  kiloCalls: () => req<{ calls: KiloCallRecord[] }>('GET', '/kilo/calls'),
-  /** 手动强制实拉上游目录（绕过节流）；返回刷新后的状态 */
-  kiloRefresh: () => req<{ total: number; status: KiloGatewayStatus }>('POST', '/kilo/refresh'),
-  /** 阶段 M：虚拟模型列表 / 新增或更新 / 删除 */
-  kiloVirtualList: () => req<{ models: KiloVirtualModel[] }>('GET', '/kilo/virtual'),
-  kiloVirtualUpsert: (vm: KiloVirtualModel) =>
-    req<{ status: string; models: KiloVirtualModel[] }>('POST', '/kilo/virtual', vm),
-  kiloVirtualDelete: (name: string) =>
-    req<{ status: string; models: KiloVirtualModel[] }>('DELETE', `/kilo/virtual?name=${encodeURIComponent(name)}`),
   freeTierProbe: (model?: string) =>
     req<ModelProbeResponse>('POST', '/free-tier/probe', { model: model ?? '' }),
   diag: () => req<DiagReport>('GET', '/diag'),

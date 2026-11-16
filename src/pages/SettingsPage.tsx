@@ -179,7 +179,7 @@ export default function SettingsPage({
       <section className="bg-white rounded-2xl border border-zinc-200 shadow-sm p-5">
         <h2 className="text-lg font-semibold text-zinc-900">服务端口</h2>
         <p className="mt-1 text-[12px] text-zinc-500">
-          管理面板不代理推理请求；推理可分别连 OpenCode（免费层）、供应商服务（自定义源）、Kilo 独立网关。
+          管理面板不代理推理请求；推理可分别连 OpenCode（免费层）与供应商服务（自定义源）。
           「配置值」为 0 表示未设置，实际监听以「生效值」（含环境槽位/默认值）为准。
         </p>
         <div className="mt-4 overflow-hidden rounded-xl border border-zinc-100">
@@ -214,17 +214,6 @@ export default function SettingsPage({
                 <td className="px-3 py-2 font-mono">{config?.provider_port_effective ?? 50080}</td>
                 <td className="px-3 py-2 text-zinc-400 text-[11px]">见诊断页</td>
                 <td className="px-3 py-2 text-zinc-500">自定义源 + 插件供应商入口</td>
-              </tr>
-              <tr className="border-t border-zinc-100">
-                <td className="px-3 py-2">Kilo 独立网关</td>
-                <td className="px-3 py-2 font-mono">{config?.kilo_port || '—'}</td>
-                <td className="px-3 py-2 font-mono">{config?.kilo_port_effective ?? 30080}</td>
-                <td className="px-3 py-2">
-                  <span className={clsx('rounded px-1.5 py-0.5 text-[11px]', config?.kilo_enabled ? 'bg-green-50 text-green-700' : 'bg-zinc-100 text-zinc-500')}>
-                    {config?.kilo_enabled ? '已启用' : '已停用'}
-                  </span>
-                </td>
-                <td className="px-3 py-2 text-zinc-500">直通 api.kilo.ai，与其它链路零交集</td>
               </tr>
             </tbody>
           </table>
@@ -268,7 +257,7 @@ export default function SettingsPage({
             {savingRuntime ? <Loader2 size={14} className="inline animate-spin" /> : null}
             保存
           </button>
-          <span className="text-[11.5px] text-zinc-400">日志保留上限约束内存环形缓冲；Kilo 日志按文件大小轮转。</span>
+          <span className="text-[11.5px] text-zinc-400">日志保留上限约束内存环形缓冲。</span>
         </div>
       </section>
 

@@ -12,7 +12,6 @@ export type VendorKind = 'kilo' | 'opencode' | 'custom' | ''
 
 export const VENDOR_OPTIONS: { value: VendorKind; label: string }[] = [
   { value: '', label: '全部供应商' },
-  { value: 'kilo', label: 'Kilo' },
   { value: 'opencode', label: 'OpenCode' },
   { value: 'custom', label: '自定义' },
 ]

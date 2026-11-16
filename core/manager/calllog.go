@@ -122,26 +122,21 @@ func (m *Manager) ProviderServiceCallLogPath() string {
 	return filepath.Join(m.paths.RuntimeDir, providerServiceDirBase, "call_log.jsonl")
 }
 
-// ReadCallLog 读取并合并调用日志（供应商服务 JSONL + Kilo 独立网关 JSONL +
-// OpenCode 引擎 stdout 事件）。max<=0 = 全部历史；max>0 = 只取最近 max 条。
-// 缺失/损坏 → 空数组。三个来源按时间升序合并，前端按 vendor 维度筛选。
-//
-// 阶段 L 起 Kilo 也写入统一日志（kilo_calls.jsonl），日志页/统计页因此能
-// 覆盖 Kilo；引擎仍只通过 stdout 事件解析（不写 JSONL）。
+// ReadCallLog 读取并合并调用日志（供应商服务 JSONL + OpenCode 引擎 stdout 事件）。
+// max<=0 = 全部历史；max>0 = 只取最近 max 条。
+// 缺失/损坏 → 空数组。两个来源按时间升序合并，前端按 vendor 维度筛选。
 func (m *Manager) ReadCallLog(max int) []CallLogRecord {
 	allRequested := max <= 0
 	tail := max
 	if allRequested {
 		tail = 0
 	}
-	// 阶段 L：三个来源（Kilo 独立网关 30080 走自己的 JSONL，见 kilo_calls_log.go）。
+	// 两个来源：
 	//   - 供应商服务：写 JSONL（call_log.jsonl），直接按行解析；
-	//   - Kilo 独立网关：写 JSONL（kilo_calls.jsonl），格式与 CallLogRecord 兼容；
 	//   - OpenCode 引擎：不写 JSONL，只把 request_routed 事件打进 stdout，
 	//     由 readEngineCallLog 解析（见 calllog_engine.go）。
 	files := []struct{ path, source string }{
 		{m.ProviderServiceCallLogPath(), "供应商服务"},
-		{m.KiloCallsLogPath(), "Kilo 独立网关"},
 	}
 	// 并发读各文件尾部：每 goroutine 只写下标 i 自己的槽位（无共享写竞态）。
 	parts := make([][]CallLogRecord, len(files)+1)
@@ -316,9 +311,8 @@ func callLogTime(ts string) time.Time {
 	return t
 }
 
-// ClearCallLog 清空全部调用日志（供应商服务 + Kilo 独立网关 + 引擎 stdout，
-// 与 ReadCallLog 聚合范围一致 —— 阶段 L 把 Kilo 并入后必须一并清，否则
-// 「清空日志」后 Kilo 记录会在下次轮询时复活）。
+// ClearCallLog 清空全部调用日志（供应商服务 JSONL + 引擎 stdout）。
+// 与 ReadCallLog 聚合范围一致。
 // 运行中进程（网关/实例）走 HTTP 清空——其进程持有日志文件 fd，管理器跨进程直删
 // 会被 Windows「文件被占用」拦截；未运行进程直删文件（带占用重试兜底）。
 // 失败按来源收集合并为单个 error（前端 toast 展示）。
@@ -332,10 +326,6 @@ func (m *Manager) ClearCallLog() error {
 		}
 	} else if err := removeLogFileRetry(m.ProviderServiceCallLogPath()); err != nil {
 		errs = append(errs, "供应商服务: "+err.Error())
-	}
-	// 阶段 L：Kilo 独立网关（由本进程内 kiloCallWriter 写，每次 open/close 不常驻 fd，直删可行）
-	if err := removeLogFileRetry(m.KiloCallsLogPath()); err != nil {
-		errs = append(errs, "Kilo 独立网关: "+err.Error())
 	}
 	if len(errs) > 0 {
 		return fmt.Errorf("清空日志失败: %s", strings.Join(errs, "；"))
