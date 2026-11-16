@@ -233,10 +233,22 @@ func (m *Manager) EngineConfigPath() string {
 
 // WriteEngineConfig 按当前面板配置生成引擎 config.json。
 func (m *Manager) WriteEngineConfig() error {
+	data, err := m.buildEngineConfigBytes()
+	if err != nil {
+		return err
+	}
+	return writeFileAtomic(m.EngineConfigPath(), data)
+}
+
+// buildEngineConfigBytes 生成引擎配置字节（不落盘）。
+//
+// 单独拆出来是为了让 Start 能在写盘之前算出配置指纹，用它判断端口上
+// 那个正在跑的引擎是不是用当前配置启动的（P0 配置漂移修复）。
+func (m *Manager) buildEngineConfigBytes() ([]byte, error) {
 	cfg := m.loadConfig()
 	dir := m.paths.FreeTierEngineDir()
 	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return fmt.Errorf("创建引擎目录失败: %w", err)
+		return nil, fmt.Errorf("创建引擎目录失败: %w", err)
 	}
 
 	port := m.managerGatewayPort()
@@ -339,11 +351,7 @@ func (m *Manager) WriteEngineConfig() error {
 		Prefer: "go",
 	}
 
-	data, err := json.MarshalIndent(ec, "", "  ")
-	if err != nil {
-		return err
-	}
-	return writeFileAtomic(m.EngineConfigPath(), data)
+	return json.MarshalIndent(ec, "", "  ")
 }
 
 // Start 启动引擎（幂等：已在运行则直接返回）。
@@ -364,17 +372,46 @@ func (m *Manager) StartFreeTierEngine(runner Runner) error {
 	}
 
 	port := m.managerGatewayPort()
-	if probePort(port, 300*time.Millisecond) {
-		setState("ready", "", -1)
-		return nil // 已在运行（可能是上次残留的进程）
+
+	// P0：端口活着不等于「配置已生效」。先用配置指纹判断端口上那个进程
+	// 是不是用当前配置启动的；无法证明就重启它——否则「改配置 / 点重启」
+	// 都是空操作（2026-11-11 的孤儿事故：进程从 11-06 起没加载过新配置）。
+	desired, buildErr := m.buildEngineConfigBytes()
+	if buildErr != nil {
+		setState("failed", buildErr.Error(), -1)
+		return buildErr
 	}
+	desiredFP := engineConfigFingerprint(desired)
+
+	portAlive := probePort(port, 300*time.Millisecond)
+	ownerPID := 0
+	if portAlive {
+		ownerPID, _ = m.enginePidByPort(port)
+	}
+	applied, appliedOK := m.readEngineApplied()
+	switch decideEngineStart(portAlive, ownerPID, applied, appliedOK, desiredFP) {
+	case engineReuseRunning:
+		setState("ready", "", ownerPID)
+		return nil
+	case engineRestartStale:
+		slog.Warn("engine holds a stale config; restarting it",
+			"port", port, "pid", ownerPID,
+			"applied_fingerprint", shortFP(applied.Fingerprint),
+			"desired_fingerprint", shortFP(desiredFP))
+		if err := m.stopEngineByPort(port, ownerPID, runner); err != nil {
+			msg := "端口已被占用且无法确认是本项目引擎: " + err.Error()
+			setState("failed", msg, -1)
+			return fmt.Errorf("%s", msg)
+		}
+	}
+
 	binPath := m.EngineBinPath()
 	if _, err := os.Stat(binPath); err != nil {
 		msg := "引擎未安装: " + binPath
 		setState("failed", msg, -1)
 		return fmt.Errorf("%s", msg)
 	}
-	if err := m.WriteEngineConfig(); err != nil {
+	if err := writeFileAtomic(m.EngineConfigPath(), desired); err != nil {
 		setState("failed", err.Error(), -1)
 		return err
 	}
@@ -396,6 +433,16 @@ func (m *Manager) StartFreeTierEngine(runner Runner) error {
 	}
 	// pid 先落库：这样等待期间状态接口也能看到进程已在跑
 	setState("starting", "", pid)
+
+	// 指纹与 pid 一起落盘：下次 Start 只有「指纹一致 + pid 一致」才复用。
+	// 必须落盘，否则管理器重启后又会把旧进程当成就绪（漂移死锁）。
+	if err := m.writeEngineApplied(engineApplied{
+		Fingerprint: desiredFP,
+		PID:         pid,
+		At:          time.Now().Format(time.RFC3339),
+	}); err != nil {
+		slog.Warn("write engine applied marker failed", "error", err)
+	}
 
 	// WARP 开启时引擎会先完成首次出口注册再监听端口（上游最长 90s），
 	// 因此等待窗口要覆盖这段：否则会误判「启动超时」并把状态打成 failed。
@@ -430,11 +477,27 @@ func (m *Manager) StopFreeTierEngine(runner Runner) error {
 	e.state = "stopping"
 	e.mu.Unlock()
 
+	port := m.managerGatewayPort()
+	// pid 未跟踪时按端口认领：这是 11-11 孤儿事故的直接修复——当时
+	// 管理器 pid=0，Stop 一个进程都没杀，端口一直被 5 天前的进程占着。
+	if pid <= 0 {
+		if owner, ok := m.enginePidByPort(port); ok {
+			pid = owner
+			slog.Warn("engine pid was untracked; claimed by port", "port", port, "pid", pid)
+		}
+	}
 	if pid > 0 {
 		_ = runner.Kill(pid)
 	}
-	port := m.managerGatewayPort()
 	err := waitPortClosed(port, 5*time.Second)
+	if err != nil {
+		// 二次收口：端口仍未释放时再认领一次（stop/start 竞态）。
+		if owner, ok := m.enginePidByPort(port); ok && owner != pid {
+			_ = runner.Kill(owner)
+			err = waitPortClosed(port, 3*time.Second)
+		}
+	}
+	m.clearEngineApplied()
 	e.mu.Lock()
 	if err != nil {
 		e.lastErr = err.Error()

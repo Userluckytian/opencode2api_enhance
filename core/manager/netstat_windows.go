@@ -9,17 +9,22 @@ import (
 	"strings"
 )
 
-// netstatRunner Windows 真实现：netstat -ano -tcp。
+// netstatRunner Windows 真实现。
+//
+// 注意参数：Windows netstat 的协议过滤是 `-p TCP`，**不是** `-tcp`。
+// 早先写成 `-tcp` 时命令只回表头（exit code 非 0），listPortPids 永远返回空，
+// 于是「按端口认领引擎进程」永远失败——这正是 P0 修复实测时才暴露出来的坑。
 func netstatRunner() *exec.Cmd {
-	return exec.Command("netstat", "-ano", "-tcp")
+	return exec.Command("netstat", "-ano", "-p", "TCP")
 }
 
-// netstatLineRe 匹配 netstat -ano -tcp 行：
+// netstatLineRe 匹配一行 TCP 连接：
 //
-//	TCP    127.0.0.1:18100    0.0.0.0:0    LISTENING    1234
+//	  TCP    127.0.0.1:40180    0.0.0.0:0    LISTENING    57312
 //
-// 捕获本地端口、状态、PID。
-var netstatLineRe = regexp.MustCompile(`^TCP\s+127\.0\.0\.1:(\d{2,5})\s+\S+:\d+\s+(LISTENING|ESTABLISHED|TIME_WAIT)\s+(\d+)$`)
+// 只取本地地址里的端口、状态与 PID；本地地址允许回环/通配/IPv6（表头是
+// 本地化文案，因此不按列名解析）。
+var netstatLineRe = regexp.MustCompile(`^\s*TCP\s+(\S+)\s+(\S+)\s+(LISTENING)\s+(\d+)\s*$`)
 
 // listPortPids Windows：解析 netstat 输出中占用给定端口的 PID 集合。
 func listPortPids(port uint16) []int {
@@ -30,11 +35,16 @@ func listPortPids(port uint16) []int {
 		if m == nil {
 			continue
 		}
-		p, _ := strconv.Atoi(m[1])
+		local := m[1]
+		i := strings.LastIndex(local, ":")
+		if i < 0 {
+			continue
+		}
+		p, _ := strconv.Atoi(local[i+1:])
 		if uint16(p) != port {
 			continue
 		}
-		pid, _ := strconv.Atoi(m[3])
+		pid, _ := strconv.Atoi(m[4])
 		if pid <= 0 || seen[pid] {
 			continue
 		}
