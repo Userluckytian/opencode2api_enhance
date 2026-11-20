@@ -78,9 +78,14 @@ type Vendor struct {
 	pool        *keyPool
 	mu          sync.Mutex
 	models      []contract.Model // 最近一次成功目录（失败时兜底返回）
-	affinity    map[string][]int // 原始模型名 → 提供它的 key 下标（ListModels 并集时记录，请求按模型亲和路由）
 	lastErr     string
 	lastSuccess time.Time
+	// 负缓存：模型 → 已知不提供它的 key 下标 → 过期时间。
+	// 用途只有一个：避免「同一个模型被反复路由到同一个不提供它的 key」白撞 404。
+	// 注意它与旧 affinity 的区别——affinity 记的是「谁有」，会把路由锁死在采样到的
+	// 少数 key 上；负缓存记的是「谁没有」，路由仍然覆盖全池（见 docs/issue-log/2026-11-20.md #1）。
+	negMu sync.Mutex
+	neg   map[string]map[int]time.Time
 }
 
 // New 构造自定义模型源厂商。
@@ -118,7 +123,7 @@ func New(cfg Config) (*Vendor, error) {
 	if k := strings.TrimSpace(cfg.APIKey); k != "" {
 		keys = append(keys, k)
 	}
-	v := &Vendor{cfg: cfg, proto: p, pool: newKeyPoolCooldown(keys, cfg.KeyStrategy, cfg.Key403Cooldown)}
+	v := &Vendor{cfg: cfg, proto: p, pool: newKeyPoolCooldown(keys, cfg.KeyStrategy, cfg.Key403Cooldown), neg: map[string]map[int]time.Time{}}
 	// 预热磁盘缓存：启动首拉失败时 ListModels 也能立即给出上次目录（stale-while-revalidate）。
 	if !cfg.NoModelCache {
 		v.models = v.loadModelsCache()
@@ -244,9 +249,14 @@ func (v *Vendor) PoolStatus() KeyPoolStatus { return v.pool.status() }
 // ConfiguredKeys 配置内的全部 key 明文（测试端点逐 key 连通验证用）。
 func (v *Vendor) ConfiguredKeys() []string { return v.pool.keysSnapshot() }
 
-// ResetKeys 清除全部 key 的运行态（禁用/冷却/熔断），让 key 池回到全可用。
+// ResetKeys 清除全部 key 的运行态（禁用/冷却/熔断）与 404 负缓存，让 key 池回到全可用。
 // 手动「恢复全部 Key」时调用；不触碰 key 配置与健康分数（保留实证供 health 排序）。
-func (v *Vendor) ResetKeys() { v.pool.reset() }
+func (v *Vendor) ResetKeys() {
+	v.pool.reset()
+	v.negMu.Lock()
+	v.neg = map[string]map[int]time.Time{}
+	v.negMu.Unlock()
+}
 
 // CountAuthCooling 当前 401/403 冷却中的 key 数（UI 展示恢复按钮状态用）。
 func (v *Vendor) CountAuthCooling() int { return v.pool.countAuthCooling() }
@@ -255,20 +265,18 @@ func (v *Vendor) CountAuthCooling() int { return v.pool.countAuthCooling() }
 // 内存缓存 → 磁盘缓存；成功则更新两级缓存并写盘（stale-while-revalidate：
 // 进程重启后无需等上游，首个 /v1/models 即含自定义模型）。
 //
-// 多 key 目录取**并集**：逐个可用 key 各自拉取合并去重——不同 key 的模型子集
-// 不一致时（如同一供应商下不同订阅档），任一 key 独有的模型都进目录；同时记录
-// 每个模型由哪些 key 提供（affinity），供请求侧按模型亲和路由（见 preferredKeys）。
+// 采样策略：只取**一个** key 的目录（首个成功即停，最多试 3 个）。
+// 早期实现是「逐 key 拉并集 + 记录模型亲和」，但亲和会被请求侧当作候选子集，
+// 于是 309 个 key 的源实际只在被采样的 8 个 key 之间轮询，其余额度全部闲置；
+// 且 8 个 key 串行约 12s，超过单厂商 8s 刷新预算，目录还会被腰斩后当成功写盘。
+// 现按「目录只用于展示、路由覆盖全池」拆分（见 docs/issue-log/2026-11-20.md #1）。
 func (v *Vendor) ListModels(ctx context.Context) ([]contract.Model, error) {
 	tried := map[int]bool{}
-	seen := map[string]bool{}
-	affinity := map[string][]int{}
 	var ids []string
 	var lastErr error
 	someOK := false
-	// 目录拉取按 key 逐个串行并集：key 数上百时（例如 500 个 openrouter key）
-	// 会把整轮预算耗光，拖死上层 /v1/models。目录只需少量 key 的代表性结果，
-	// 故限制单轮拉取的 key 数，并在每轮开始前检查预算。
-	const maxKeysPerListModels = 8
+	// 首个 key 失败时顺延：只为覆盖「第一个 key 恰好挂了」，不是全量并集。
+	const maxKeysPerListModels = 3
 	for n := 0; ; n++ {
 		if ctx.Err() != nil || n >= maxKeysPerListModels {
 			break
@@ -279,29 +287,25 @@ func (v *Vendor) ListModels(ctx context.Context) ([]contract.Model, error) {
 		}
 		tried[idx] = true
 		perKey, err := v.proto.listModels(ctx, v, key)
-			if err != nil {
-				lastErr = err
-				if se, ok := err.(*keyStatusError); ok {
-					switch se.status {
-					case http.StatusUnauthorized, http.StatusForbidden:
-						v.pool.authFail(idx)
-					case http.StatusTooManyRequests:
-						v.pool.cool(idx, se.retryAfter)
-					}
+		if err != nil {
+			lastErr = err
+			if se, ok := err.(*keyStatusError); ok {
+				switch se.status {
+				case http.StatusUnauthorized, http.StatusForbidden:
+					v.pool.authFail(idx)
+				case http.StatusTooManyRequests:
+					v.pool.cool(idx, se.retryAfter)
 				}
-				continue // 单 key 失败不阻断并集；全部失败走缓存兜底
 			}
+			continue // 单 key 失败不阻断；全部失败走缓存兜底
+		}
 		someOK = true
 		for _, id := range perKey {
-			if id == "" {
-				continue
-			}
-			if !seen[id] {
-				seen[id] = true
+			if id != "" {
 				ids = append(ids, id)
 			}
-			affinity[id] = appendKeyIdx(affinity[id], idx)
 		}
+		break // 拿到一个 key 的完整目录就够，不再问其余 key
 	}
 	var err error
 	if !someOK {
@@ -343,11 +347,10 @@ func (v *Vendor) ListModels(ctx context.Context) ([]contract.Model, error) {
 	if len(out) == 0 {
 		return nil, fmt.Errorf("custom %s: empty model list", v.cfg.ID)
 	}
-	// 内存/磁盘缓存保存全量（白名单变更无需重新拉取），返回时过滤；
-	// affinity 与目录同代更新，请求按模型直达可服务的 key。
+	// 内存/磁盘缓存保存全量（白名单变更无需重新拉取），返回时过滤。
+	// 不再写亲和：目录是单点采样，推不出「哪个 key 有哪个模型」。
 	v.mu.Lock()
 	v.models = out
-	v.affinity = affinity
 	v.mu.Unlock()
 	if !v.cfg.NoModelCache {
 		v.saveModelsCache(out)
@@ -355,22 +358,58 @@ func (v *Vendor) ListModels(ctx context.Context) ([]contract.Model, error) {
 	return v.filterAllowed(out), nil
 }
 
-// appendKeyIdx 去重追加 key 下标（同一模型被多个 key 提供时各记一次）。
-func appendKeyIdx(list []int, idx int) []int {
-	for _, i := range list {
-		if i == idx {
-			return list
-		}
+// negTTL 负缓存有效期：过期后重新允许该 key 试这个模型（上游可能补齐了权限/订阅）。
+const negTTL = 30 * time.Minute
+
+// negMaxModels 负缓存容量上限（模型数）。超限整体清空——代价只是一次重撞，
+// 远好过为淘汰策略引入 LRU 复杂度。
+const negMaxModels = 4096
+
+// isNeg 该 (模型, key) 是否已知「不提供」且仍在有效期内。
+func (v *Vendor) isNeg(model string, idx int) bool {
+	v.negMu.Lock()
+	defer v.negMu.Unlock()
+	m := v.neg[model]
+	if m == nil {
+		return false
 	}
-	return append(list, idx)
+	exp, ok := m[idx]
+	if !ok {
+		return false
+	}
+	if time.Now().After(exp) {
+		delete(m, idx)
+		if len(m) == 0 {
+			delete(v.neg, model)
+		}
+		return false
+	}
+	return true
 }
 
-// preferredKeys 返回能提供该模型（上游名）的 key 下标（affinity 命中时），
-// 目录未刷新/无记录返回 nil → 请求走全池普通调度。与 models 同锁保护。
-func (v *Vendor) preferredKeys(model string) []int {
-	v.mu.Lock()
-	defer v.mu.Unlock()
-	return v.affinity[model]
+// markNeg 记录「该 key 不提供该模型」（来自 404），避免后续请求反复撞同一堵墙。
+func (v *Vendor) markNeg(model string, idx int) {
+	v.negMu.Lock()
+	defer v.negMu.Unlock()
+	if v.neg == nil {
+		v.neg = map[string]map[int]time.Time{}
+	}
+	if len(v.neg) >= negMaxModels {
+		v.neg = map[string]map[int]time.Time{}
+	}
+	m := v.neg[model]
+	if m == nil {
+		m = map[int]time.Time{}
+		v.neg[model] = m
+	}
+	m[idx] = time.Now().Add(negTTL)
+}
+
+// clearNeg 清掉某模型的全部负缓存（整池都被挡住时重试一轮用）。
+func (v *Vendor) clearNeg(model string) {
+	v.negMu.Lock()
+	defer v.negMu.Unlock()
+	delete(v.neg, model)
 }
 
 // hasModel 目标模型（上游名）是否在本源并集目录中（缓存兜底态也计入）。
@@ -537,10 +576,10 @@ func preferredKeyFromExtra(msg *contract.Message) int {
 	return idx
 }
 
-// withKeys 非流式调用的 key 池编排：按模型亲和 + 调度挑可用 key，429 冷却
-// （Retry-After）、401/403 禁用并换下一个 key 重试，404（目标模型在并集目录中
-// 但当前 key 不提供）同样换 key 重试；同请求每 key 至多一次；400 等请求级错误
-// 与 key 无关立即返回；全部耗尽返回最后一次结果（交由外层厂商级 failover 接管）。
+// withKeys 非流式调用的 key 池编排：全池调度挑可用 key（不再受目录亲和约束），
+// 429 冷却（Retry-After）、401/403 失效处理、404（当前 key 不提供该模型）换 key
+// 并记负缓存；同请求每 key 至多一次；400 等请求级错误与 key 无关立即返回；
+// 全部耗尽返回最后一次结果（交由外层厂商级 failover 接管）。
 // stickyIdx >= 0 时优先命中该 key（会话粘性/续写同 key）。
 func (v *Vendor) withKeys(model string, stickyIdx int, call func(key string) (*contract.Reply, error)) (*contract.Reply, int, error) {
 	tried := map[int]bool{}
@@ -548,13 +587,28 @@ func (v *Vendor) withKeys(model string, stickyIdx int, call func(key string) (*c
 	var lastErr error
 	lastIdx := -1
 	attempted := false
+	negSkipped := 0
+	clearedNeg := false
 	for {
-		key, idx, ok := v.pool.tryAcquirePreferSticky(tried, v.preferredKeys(model), stickyIdx)
+		key, idx, ok := v.pool.tryAcquireSticky(tried, stickyIdx)
 		if !ok {
+			// 全池都被负缓存挡住（或确实无可用 key）：清一次该模型的负缓存重试，
+			// 避免上游补齐订阅/权限后仍然永久 404。
+			if negSkipped > 0 && !clearedNeg {
+				v.clearNeg(model)
+				clearedNeg = true
+				tried = map[int]bool{}
+				negSkipped = 0
+				continue
+			}
 			break
 		}
-		attempted = true
 		tried[idx] = true
+		if v.isNeg(model, idx) {
+			negSkipped++
+			continue
+		}
+		attempted = true
 		start := time.Now()
 		reply, err := call(key)
 		v.pool.recordResult(idx, err == nil && reply != nil && reply.Status >= 200 && reply.Status < 300, time.Since(start))
@@ -571,8 +625,9 @@ func (v *Vendor) withKeys(model string, stickyIdx int, call func(key string) (*c
 		case reply.Status == http.StatusTooManyRequests:
 			v.pool.cool(idx, parseRetryAfter(reply.Headers.Get("Retry-After")))
 		case reply.Status == http.StatusNotFound && v.hasModel(model):
-			// 多 key 模型子集不一致：当前 key 不提供该模型但并集目录中有它，
-			// 换下一个 key 再试（affinity 缺失/过期时的兜底）。
+			// 该 key 不提供这个模型（目录里有，说明是子集差异/权限差异）：
+			// 记负缓存后换 key，下次同一模型直接跳过它。
+			v.markNeg(model, idx)
 		case reply.Status >= 500 || reply.Status == http.StatusRequestTimeout:
 			// 上游侧问题：不标记 key，仅换 key 重试
 		default:
@@ -595,13 +650,26 @@ func (v *Vendor) withKeysStream(model string, stickyIdx int, call func(key strin
 	var lastErr error
 	lastIdx := -1
 	attempted := false
+	negSkipped := 0
+	clearedNeg := false
 	for {
-		key, idx, ok := v.pool.tryAcquirePreferSticky(tried, v.preferredKeys(model), stickyIdx)
+		key, idx, ok := v.pool.tryAcquireSticky(tried, stickyIdx)
 		if !ok {
+			if negSkipped > 0 && !clearedNeg {
+				v.clearNeg(model)
+				clearedNeg = true
+				tried = map[int]bool{}
+				negSkipped = 0
+				continue
+			}
 			break
 		}
-		attempted = true
 		tried[idx] = true
+		if v.isNeg(model, idx) {
+			negSkipped++
+			continue
+		}
+		attempted = true
 		if len(v.ConfiguredKeys()) > 1 {
 			slog.Info("custom-key: acquire stream attempt",
 				"vendor", v.cfg.ID, "model", model,
@@ -635,7 +703,8 @@ func (v *Vendor) withKeysStream(model string, stickyIdx int, call func(key strin
 		case stream.Status == http.StatusTooManyRequests:
 			v.pool.cool(idx, 0)
 		case stream.Status == http.StatusNotFound && v.hasModel(model):
-			// 同 withKeys：目标在并集目录中，当前 key 不提供 → 换 key 再试。
+			// 同 withKeys：该 key 不提供此模型 → 记负缓存后换 key 再试。
+			v.markNeg(model, idx)
 		case stream.Status >= 500 || stream.Status == http.StatusRequestTimeout:
 		default:
 			return stream, idx, nil

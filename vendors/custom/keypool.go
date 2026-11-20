@@ -125,49 +125,20 @@ func (p *keyPool) tryAcquire(tried map[int]bool) (string, int, bool) {
 	return p.tryAcquireLocked(tried, p.nowFn())
 }
 
-// tryAcquirePrefer 优先从 preferred（key 下标子集，如「并集目录中能提供目标模型
-// 的 key」）里挑可用且未试过的 key，子集无可挑时退回全池普通调度。
-// round_robin 在子集内同样轮询；failover 在子集内保持粘主。
-func (p *keyPool) tryAcquirePrefer(tried map[int]bool, preferred []int) (string, int, bool) {
-	return p.tryAcquirePreferSticky(tried, preferred, -1)
-}
-
-// tryAcquirePreferSticky 在 tryAcquirePrefer 基础上支持会话粘性：stickyIdx >= 0
-// 时优先命中该 key（续写同 key / 会话级粘性），不可用或已试过再回退 preferred
-// 子集与全池普通调度。命中 sticky 不推进 round_robin 游标——同一会话的续写
-// 重连稳定落在同一 key，避免重复输出/串对话。
-func (p *keyPool) tryAcquirePreferSticky(tried map[int]bool, preferred []int, stickyIdx int) (string, int, bool) {
+// tryAcquireSticky 在 tryAcquire 基础上支持会话粘性：stickyIdx >= 0 且可用、
+// 本请求未试过时优先命中该 key（续写同 key / 会话级粘性），否则回退全池普通调度。
+// 命中 sticky 不推进 round_robin 游标——同一会话的续写重连稳定落在同一 key，
+// 避免重复输出/串对话。
+//
+// 历史：早期还有「按模型亲和子集优先」的 tryAcquirePreferSticky，但它会让路由
+// 只在被采样的少数 key 上轮询（309 key 的源实际只用 8 个）。亲和已移除，见
+// docs/issue-log/2026-11-20.md #1。
+func (p *keyPool) tryAcquireSticky(tried map[int]bool, stickyIdx int) (string, int, bool) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	now := p.nowFn()
 	if stickyIdx >= 0 && stickyIdx < len(p.keys) && !tried[stickyIdx] && p.keys[stickyIdx].available(now) {
 		return p.keys[stickyIdx].value, stickyIdx, true
-	}
-	if len(preferred) > 0 {
-		if p.strategy == StrategyHealth {
-			// 健康优先：在模型亲和子集内按健康分挑选
-			if key, idx, ok := p.pickHealthLocked(tried, preferred, now); ok {
-				return key, idx, true
-			}
-		} else {
-			start := 0
-			if p.strategy == StrategyRoundRobin {
-				start = int(p.rr % uint64(len(preferred)))
-			}
-			for off := 0; off < len(preferred); off++ {
-				i := preferred[(start+off)%len(preferred)]
-				if i < 0 || i >= len(p.keys) {
-					continue
-				}
-				if tried[i] || !p.keys[i].available(now) {
-					continue
-				}
-				if p.strategy == StrategyRoundRobin {
-					p.rr++
-				}
-				return p.keys[i].value, i, true
-			}
-		}
 	}
 	return p.tryAcquireLocked(tried, now)
 }
