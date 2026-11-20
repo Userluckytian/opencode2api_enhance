@@ -252,7 +252,7 @@ func (p *ProviderService) Start(runner Runner) error {
 	// 端口预检：端口已被其他进程占用时，先判断是不是「我们自己的供应商服务」
 	// （管理器重启/被外部拉起后 pid 丢失的常见情形）——是则接管，不报错。
 	// 只有确认是别人的进程才拒绝启动，避免「启动→bind 失败→看门狗重启」的循环。
-	if !isPortFree(port) {
+	if kind, bindErr := probePortBind(port); kind != portBindOK {
 		if pid, ok := p.claimByPort(port, key); ok {
 			p.mu.Lock()
 			p.pid = pid
@@ -264,7 +264,9 @@ func (p *ProviderService) Start(runner Runner) error {
 			slog.Info("provider service adopted running process", "port", port, "pid", pid)
 			return nil
 		}
-		msg := fmt.Sprintf("端口 %d 已被其他进程占用，供应商服务无法启动", port)
+		// 区分「真被占用」与「被 Windows 保留端口段拒绝」：后者 netstat 看不到
+		// 监听者，报「被占用」会把排查带偏（2026-11-20 事故）。
+		msg := describePortBlock(port, kind, bindErr)
 		p.setErr(msg)
 		return fmt.Errorf("%s", msg)
 	}
