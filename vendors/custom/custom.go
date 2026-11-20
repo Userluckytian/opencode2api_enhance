@@ -173,10 +173,19 @@ func (v *Vendor) startHealthProbe() {
 	}()
 }
 
-// probeKeys 对每个可用 key 发最小探测请求并记账（404=模型子集不同，不计入，避免误伤）。
+// healthProbeMaxPerRound 单轮健康探测的 key 上限：只补测失败过的 key，
+// 不再「每 5 分钟把全池每个 key 都真实打一遍」（309 key 那等于每轮烧 309 次请求）。
+const healthProbeMaxPerRound = 8
+
+// probeKeys 对「失败过且已恢复」的 key 发最小探测请求并记账
+// （404=模型子集不同、403=权限差异，均不计入，避免误伤）。
 func (v *Vendor) probeKeys() {
 	model := v.probeModel()
 	if model == "" {
+		return
+	}
+	idxs := v.pool.needProbeIdxs(healthProbeMaxPerRound)
+	if len(idxs) == 0 {
 		return
 	}
 	rawBody, err := json.Marshal(map[string]any{
@@ -188,15 +197,16 @@ func (v *Vendor) probeKeys() {
 	if err != nil {
 		return
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-	for _, idx := range v.pool.availableIdxs() {
+	for _, idx := range idxs {
 		key := v.pool.keyAt(idx)
 		if key == "" {
 			continue
 		}
+		// 每个 key 独立超时：共用一个 ctx 时，前面几个慢 key 会把后面的全耗掉。
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		start := time.Now()
 		reply, err := v.proto.chat(ctx, v, model, key, rawBody)
+		cancel()
 		if err == nil && reply != nil && (reply.Status == http.StatusNotFound || reply.Status == http.StatusForbidden) {
 			// 该 key 不提供此探测模型（404）或无权限访问它（403）——均与 key 健康无关，
 			// 不记账，避免订阅差异/权限子集被误判为「key 坏」。

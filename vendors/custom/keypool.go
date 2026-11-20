@@ -3,8 +3,10 @@
 // 三种调度（providers[].params.key_strategy，仅作用于自定义源，与实例池 route_mode 无关）：
 //   - round_robin（默认）：可用 key 间均匀轮询
 //   - failover          ：按配置顺序优先（主 key 可用时恒用它，冷却/禁用才降级备用）
-//   - health            ：健康优先——按成功率（EWMA）降序、样本数降序、平均延迟升序挑选，
-//     让表现最好的 key 稳定回答，变差才落到下一个（借鉴 model-gateway 的质量分排序）
+//   - health            ：加权轮询——成功率（EWMA）越高的 key 被选中概率越大，
+//     但仍覆盖全池；样本不足的 key 有探索加成。冷却/熔断/禁用的 key 不参与。
+//     （旧实现按「成功率→样本数」排序取第一名，结果第一个有样本的 key 恒胜，
+//     整个池退化成单 key、其余额度闲置。）
 //
 // 健康语义：429/限流 → 冷却（Retry-After，缺省 60s）到期自动回池；
 // 401/403（key 失效）→ 按 key_403_cooldown 冷却（缺省 600s）到期自动回池重试；
@@ -14,8 +16,8 @@
 package custom
 
 import (
+	"math"
 	"net/http"
-	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -44,6 +46,23 @@ const circuitCooldown = 30 * time.Second
 
 // 健康分数平滑系数（EWMA）：样本越多，单次波动影响越小。
 const healthAlpha = 0.3
+
+// 加权轮询参数（health 策略）：
+//   - healthExploreSamples：样本数低于它的 key 权重放大，保证新 key 有机会被验证；
+//   - healthExploreBoost：放大倍数；
+//   - healthWeightFloor：成功率极低的 key 仍保留极小概率，避免永久饿死；
+//   - healthGoldenRatio：低差异序列的步长（黄金比例小数部分），让连续的 rr
+//     均匀铺满权重轴，而不是像 `rr/1000` 那样前几百次全挤在轴的一端。
+//
+// 早先的实现是「按成功率/样本数排序取第一名」，结果是第一个有样本的 key 恒胜
+// （samples 降序），整个池退化成单 key、其余额度全闲置。改成加权轮询后既能
+// 优先用表现好的 key，又保证覆盖全池。
+const (
+	healthExploreSamples = 3
+	healthExploreBoost   = 2.0
+	healthWeightFloor    = 0.01
+	healthGoldenRatio    = 0.6180339887498949
+)
 
 // keyState 单个 key 的运行时状态。
 type keyState struct {
@@ -151,7 +170,7 @@ func (p *keyPool) tryAcquireLocked(tried map[int]bool, now time.Time) (string, i
 		return "", -1, false
 	}
 	if p.strategy == StrategyHealth {
-		return p.pickHealthLocked(tried, nil, now)
+		return p.pickHealthLocked(tried, now)
 	}
 	start := 0
 	if p.strategy == StrategyRoundRobin {
@@ -170,42 +189,56 @@ func (p *keyPool) tryAcquireLocked(tried map[int]bool, now time.Time) (string, i
 	return "", -1, false
 }
 
-// pickHealthLocked 按健康分挑选可用且未试过的 key（调用方已持 p.mu）：
-// 成功率（EWMA）降序 → 样本数降序（有实证者优先于未测者）→ 平均延迟升序 → 配置序。
-// subset 非空时仅在子集内挑（模型亲和）；nil 表示全池。冷/禁用的 key 不参与。
-func (p *keyPool) pickHealthLocked(tried map[int]bool, subset []int, now time.Time) (string, int, bool) {
-	var cand []int
-	if len(subset) > 0 {
-		for _, i := range subset {
-			if i >= 0 && i < len(p.keys) && !tried[i] && p.keys[i].available(now) {
-				cand = append(cand, i)
-			}
-		}
-	} else {
-		for i, k := range p.keys {
-			if !tried[i] && k.available(now) {
-				cand = append(cand, i)
-			}
-		}
-	}
-	if len(cand) == 0 {
+// pickHealthLocked health 策略：按成功率加权的轮询（调用方已持 p.mu）。
+// 成功率越高被选中概率越大，但仍覆盖全池；样本不足的 key 有探索加成。
+func (p *keyPool) pickHealthLocked(tried map[int]bool, now time.Time) (string, int, bool) {
+	idx, ok := p.weightedPickLocked(tried, now)
+	if !ok {
 		return "", -1, false
 	}
-	sort.SliceStable(cand, func(a, b int) bool {
-		ka, kb := p.keys[cand[a]], p.keys[cand[b]]
-		if ka.okRate != kb.okRate {
-			return ka.okRate > kb.okRate
-		}
-		if ka.samples != kb.samples {
-			return ka.samples > kb.samples
-		}
-		if ka.latEWMA != kb.latEWMA {
-			return ka.latEWMA < kb.latEWMA
-		}
-		return cand[a] < cand[b]
-	})
-	idx := cand[0]
 	return p.keys[idx].value, idx, true
+}
+
+// weightedPickLocked 在可用且未试过的 key 上做加权抽签（权重轴由 rr 游标推进）。
+// 不用随机数：同一 rr 序列可复现，测试与排障都更稳定。
+func (p *keyPool) weightedPickLocked(tried map[int]bool, now time.Time) (int, bool) {
+	type cand struct {
+		idx int
+		w   float64
+	}
+	cands := make([]cand, 0, len(p.keys))
+	total := 0.0
+	for i, k := range p.keys {
+		if tried[i] || !k.available(now) {
+			continue
+		}
+		w := k.okRate
+		if k.samples < healthExploreSamples {
+			w *= healthExploreBoost
+		}
+		if w < healthWeightFloor {
+			w = healthWeightFloor
+		}
+		cands = append(cands, cand{i, w})
+		total += w
+	}
+	if len(cands) == 0 {
+		return -1, false
+	}
+	p.rr++
+	// 低差异序列（黄金比例）取点：连续 rr 在权重轴上均匀分布，且不依赖随机数，
+	// 同一 rr 序列可复现（测试与排障稳定）。
+	frac := float64(p.rr) * healthGoldenRatio
+	frac -= math.Floor(frac)
+	pos := frac * total
+	acc := 0.0
+	for _, c := range cands {
+		acc += c.w
+		if pos < acc {
+			return c.idx, true
+		}
+	}
+	return cands[len(cands)-1].idx, true
 }
 
 // recordResult 记录一次 key 请求的结果与耗时（health 策略排序依据）。
@@ -415,16 +448,24 @@ func (p *keyPool) keysSnapshot() []string {
 	return out
 }
 
-// availableIdxs 返回当前可用（未禁用、不在冷却期）的 key 下标（后台健康探测用）。
-func (p *keyPool) availableIdxs() []int {
+// needProbeIdxs 返回需要补测的 key 下标：可用、有实证、且成功率未满分（失败过）。
+// 上限 max。健康探测只补测这些 key——大池（几百个 key）全量探测等于每轮白烧一遍额度。
+func (p *keyPool) needProbeIdxs(max int) []int {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	now := p.nowFn()
 	var out []int
 	for i, k := range p.keys {
-		if k.available(now) {
-			out = append(out, i)
+		if len(out) >= max {
+			break
 		}
+		if !k.available(now) {
+			continue
+		}
+		if k.samples == 0 || k.okRate >= 1.0 {
+			continue
+		}
+		out = append(out, i)
 	}
 	return out
 }
