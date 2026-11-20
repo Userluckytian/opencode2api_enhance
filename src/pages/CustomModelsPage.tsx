@@ -19,8 +19,6 @@ type FormState = {
   use_proxy: boolean
   /** 本源显式代理地址（原样带回，避免整表保存洗掉） */
   proxy: string
-  /** 仅「测试并获取模型」生效：走本机系统代理（不落盘、不进配置） */
-  use_local_proxy: boolean
   enabled: boolean
   /** 全量模型清单（上游 ID；来自视图或测试结果） */
   allModels: string[]
@@ -42,7 +40,6 @@ const emptyForm = (): FormState => ({
   key_403_cooldown: 600, // 默认：401/403 冷却 600s 后自动恢复
   use_proxy: false,
   proxy: '',
-  use_local_proxy: false,
   enabled: true,
   allModels: [],
   exposeAll: true,
@@ -325,8 +322,7 @@ export default function CustomModelsPage({ toast }: { toast: (msg: string, ok?: 
       key_403_cooldown: p.key_403_cooldown >= 0 ? p.key_403_cooldown : 600,
       use_proxy: p.use_proxy,
       proxy: p.proxy ?? '',
-      use_local_proxy: false,
-      enabled: p.enabled,
+          enabled: p.enabled,
       allModels: p.models_all ?? [],
       exposeAll: !p.allowed_models || p.allowed_models.length === 0,
       allowed: new Set(p.allowed_models ?? []),
@@ -365,7 +361,6 @@ export default function CustomModelsPage({ toast }: { toast: (msg: string, ok?: 
       allowed_models: allowed,
       proxy: f.proxy || undefined,
       use_proxy: f.use_proxy,
-      use_local_proxy: forTest ? f.use_local_proxy : undefined, // 仅测试动作透传（保存不落盘）
       enabled: f.enabled,
     }
   }
@@ -1363,23 +1358,14 @@ export default function CustomModelsPage({ toast }: { toast: (msg: string, ok?: 
                 <span className="text-zinc-500 text-xs">（默认直连；供应商有地区限制时开启）</span>
               </div>
               <div className="text-[11px] text-zinc-400 pl-14">
-                出站走设置页「出口代理」的第一个可用项
-                {form.use_proxy ? `：${form.proxy || globalProxy || '未配置（请先到设置页添加）'}` : ''}
+                实际出站：
+                {form.proxy
+                  ? `本源代理 ${form.proxy}`
+                  : form.use_proxy
+                    ? `全局出口代理 ${globalProxy || '未配置（请先到设置页添加）'}`
+                    : '直连'}
+                ｜「测试并获取模型」与真实请求走同一条路径
               </div>
-            </div>
-
-            <div className="flex items-center space-x-3">
-              <label className="relative inline-flex items-center cursor-pointer">
-                <input
-                  type="checkbox"
-                  checked={form.use_local_proxy}
-                  onChange={(e) => setForm({ ...form, use_local_proxy: e.target.checked })}
-                  className="sr-only peer"
-                />
-                <div className="w-11 h-6 bg-zinc-200 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-zinc-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-zinc-900"></div>
-              </label>
-              <span className="text-sm text-zinc-700">测试走本机系统代理</span>
-              <span className="text-zinc-500 text-xs">（仅「测试并获取模型」时经系统代理拉取；与上方「使用代理」二选一，不写入配置）</span>
             </div>
 
             {/* 暴露模型白名单 */}

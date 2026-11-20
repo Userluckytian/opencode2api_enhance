@@ -289,38 +289,11 @@ type customProviderInput struct {
 	// UseProxy 勾选「使用代理」：出站走设置页维护的全局出口代理。配置里只存该
 	// 布尔值，具体地址在厂商装配时解析（改全局代理无需逐个重存）。Proxy 优先。
 	UseProxy bool `json:"use_proxy"`
-	// UseLocalProxy 测试专用：测试拉取模型走本机系统代理（http.ProxyFromEnvironment），
-	// 优先于 Proxy 字段；默认 false = 直连或按 Proxy 走指定代理。
-	UseLocalProxy bool `json:"use_local_proxy"`
 	// DataPolicyNote 数据去向提示（面板徽标）；提交缺键 = 保留旧值，
 	// 显式空串 = 清除提示（与 allowed_models 同款语义，防整表提交把提示洗掉）。
 	DataPolicyNote *string `json:"data_policy_note"`
 	Enabled        *bool   `json:"enabled"`
 }
-
-// localProxyTransport 测试专用的 Transport：经本机系统代理（默认 http.ProxyFromEnvironment，
-// 读 HTTP_PROXY/HTTPS_PROXY/NO_PROXY）出站，不经过节点池。仅测试「测试并获取模型」
-// 使用；生产出站仍走 proxy（或 use_proxy 解析的全局代理）或直连。
-//
-// localProxyFunc 独立变量（默认 http.ProxyFromEnvironment）：http.ProxyFromEnvironment
-// 内部用 sync.Once 缓存进程级环境快照，测试里 t.Setenv 无法刷新该缓存——独立变量让
-// 单测可确定性注入代理地址，验证「use_local_proxy 走系统代理」路径。
-var localProxyFunc = http.ProxyFromEnvironment
-
-type localProxyTransport struct{}
-
-// Client 实现 contract.Transport：返回使用系统代理的 HTTP 客户端（无出口地址，
-// 不参与节点池健康/统计）。
-func (localProxyTransport) Client(_ contract.Tier, streaming bool) (*http.Client, string) {
-	tr := &http.Transport{Proxy: localProxyFunc}
-	if streaming {
-		return &http.Client{Transport: tr}, ""
-	}
-	return &http.Client{Transport: tr, Timeout: 60 * time.Second}, ""
-}
-
-// Mark 实现 contract.Transport（本地系统代理不参与节点池健康维护）。
-func (localProxyTransport) Mark(string, int, error) {}
 
 // customProvidersView 聚合目录中该源模型数。
 func customModelCounts() map[string]int {
@@ -688,8 +661,10 @@ func customProvidersTestHandler() http.HandlerFunc {
 		}
 		// 与出站装配同口径：勾选「使用代理」时解析全局代理；没配就别静默直连，
 		// 否则用户会以为「测试通了 = 代理配好了」。
+		// 测试与生产走**同一条**代理路径——早先测试可勾「走本机系统代理」，
+		// 结果测的是系统代理、跑的是全局代理/直连，「测试通了」不代表生产能通。
 		proxyURL := strings.TrimSpace(in.Proxy)
-		if proxyURL == "" && in.UseProxy && !in.UseLocalProxy {
+		if proxyURL == "" && in.UseProxy {
 			proxyURL = globalEgressProxy()
 			if proxyURL == "" {
 				writeAdminErr(w, http.StatusBadRequest, "已勾选使用代理，但设置页「出口代理」为空，请先配置再测试")
@@ -724,10 +699,6 @@ func customProvidersTestHandler() http.HandlerFunc {
 				// 与出站装配同款：custom.New 自身不建 client，代理必须显式注入 Transport，
 				// 否则「测试通了」只能说明直连通，不能说明勾选的代理真在用。
 				cfg.Transport = contract.StaticProxyTransport{ProxyURL: proxyURL}
-			}
-			if in.UseLocalProxy {
-				// 走本机系统代理（http.ProxyFromEnvironment），优先于 Proxy 字段。
-				cfg.Transport = localProxyTransport{}
 			}
 			v, err := custom.New(cfg)
 			if err != nil {

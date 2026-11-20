@@ -164,8 +164,6 @@ export type CustomProviderInput = {
   proxy?: string
   /** 勾选「使用代理」：出站走设置页维护的全局出口代理（地址由后端解析） */
   use_proxy?: boolean
-  /** 仅「测试并获取模型」生效：走本机系统代理（http.ProxyFromEnvironment），不写入配置 */
-  use_local_proxy?: boolean
   /** 数据去向提示；提交缺键 = 保留旧值，空串 = 清除（与 allowed_models 同款三态） */
   data_policy_note?: string
   enabled?: boolean
