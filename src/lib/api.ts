@@ -188,6 +188,14 @@ export type CustomProviderTestResult = {
   count?: number
   latency_ms?: number
   error?: string
+  /** 配置内 key 总数（抽样测试时与 keys_tested 不同） */
+  keys_total?: number
+  /** 本次实际测试的 key 数（拿到目录即停） */
+  keys_tested?: number
+  /** 是否抽样（keys_total > keys_tested） */
+  truncated?: boolean
+  /** 后端整体耗时 */
+  elapsed_ms?: number
 }
 
 export type CustomProbeResult = {
@@ -1020,7 +1028,7 @@ export type CallLogAggregate = {
 /** 后端基础地址：Web 同源为空；桌面壳可经构建注入 VITE_API_BASE。 */
 const API_BASE: string = (import.meta.env?.VITE_API_BASE as string | undefined) ?? ''
 
-async function req<T>(method: string, path: string, body?: unknown, qs?: Record<string, unknown>): Promise<T> {
+async function req<T>(method: string, path: string, body?: unknown, qs?: Record<string, unknown>, opts?: { signal?: AbortSignal }): Promise<T> {
   let url = API_BASE + '/api/admin' + path
   if (qs) {
     const p = new URLSearchParams()
@@ -1030,12 +1038,13 @@ async function req<T>(method: string, path: string, body?: unknown, qs?: Record<
     const s = p.toString()
     if (s) url += '?' + s
   }
-  const opts: RequestInit = { method, headers: {} }
+  const init: RequestInit = { method, headers: {} }
+  if (opts?.signal) init.signal = opts.signal
   if (body !== undefined) {
-    opts.headers = { 'Content-Type': 'application/json' }
-    opts.body = JSON.stringify(body)
+    init.headers = { 'Content-Type': 'application/json' }
+    init.body = JSON.stringify(body)
   }
-  const res = await fetch(url, opts)
+  const res = await fetch(url, init)
   if (!res.ok) {
     let msg = `HTTP ${res.status}`
     try {
@@ -1171,9 +1180,9 @@ export const api = {
   /** 整表保存（增/改/删一次到位）；编辑时 api_key 留空 = 保留原 key */
   customProvidersSave: (providers: CustomProviderInput[]) =>
     req<{ status: string; providers: CustomProviderView[]; global_proxy: string }>('POST', '/custom-providers/save', { providers }),
-  /** 连通测试（不落盘）：拉取模型目录，返回模型列表与延迟 */
-  customProvidersTest: (input: CustomProviderInput) =>
-    req<CustomProviderTestResult>('POST', '/custom-providers/test', input),
+  /** 连通测试（不落盘）：拉取模型目录，返回模型列表与延迟。只采样前 3 个 key，拿到目录即停 */
+  customProvidersTest: (input: CustomProviderInput, signal?: AbortSignal) =>
+    req<CustomProviderTestResult>('POST', '/custom-providers/test', input, undefined, { signal }),
   /** 活性探测：真实拉一次上游目录，刷新健康并返回结果 */
   customProvidersProbe: (id: string) =>
     req<CustomProbeResult>('POST', '/custom-providers/probe', { id }),

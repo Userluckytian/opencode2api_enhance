@@ -677,6 +677,15 @@ func customProvidersTestHandler() http.HandlerFunc {
 		if len(keys) == 0 {
 			keys = []string{""} // 无 key（本地网关）也测
 		}
+		// 「测试并获取模型」只需要一个 key 的代表性目录：逐 key 尝试，首个成功即停。
+		// 早先是「全部 key 串行」，309 个 key 的源要跑约 8 分钟（单 key ~1.5s），
+		// 面板表现就是永久转圈（见 docs/issue-log/2026-11-20.md #1）。
+		// 多试两个只是覆盖「第一个 key 恰好挂了」，不是全量体检。
+		keysTotal := len(keys)
+		const maxTestKeys = 3
+		if len(keys) > maxTestKeys {
+			keys = keys[:maxTestKeys]
+		}
 		// 与出站装配同口径：勾选「使用代理」时解析全局代理；没配就别静默直连，
 		// 否则用户会以为「测试通了 = 代理配好了」。
 		proxyURL := strings.TrimSpace(in.Proxy)
@@ -695,9 +704,16 @@ func customProvidersTestHandler() http.HandlerFunc {
 			Error     string `json:"error,omitempty"`
 		}
 		results := make([]keyResult, 0, len(keys))
-		allOK := true
+		succeeded := false
 		var firstOKModels []string
+		startAll := time.Now()
+		// 整体预算 15s：即便前几个 key 都卡在超时上，也不会把面板挂在几十秒以上。
+		outerCtx, outerCancel := context.WithTimeout(r.Context(), 15*time.Second)
+		defer outerCancel()
 		for _, key := range keys {
+			if outerCtx.Err() != nil {
+				break
+			}
 			cfg := custom.Config{
 				ID: in.ID, Name: in.Name, BaseURL: in.BaseURL,
 				APIKey: key, Protocol: in.Protocol, Proxy: proxyURL,
@@ -715,17 +731,15 @@ func customProvidersTestHandler() http.HandlerFunc {
 			}
 			v, err := custom.New(cfg)
 			if err != nil {
-				allOK = false
 				results = append(results, keyResult{KeyTail: keyTail(key), Error: err.Error()})
 				continue
 			}
-			ctx, cancel := context.WithTimeout(r.Context(), 15*time.Second)
+			ctx, cancel := context.WithTimeout(outerCtx, 8*time.Second)
 			start := time.Now()
 			models, err := v.ListModels(ctx)
 			latency := time.Since(start).Milliseconds()
 			cancel()
 			if err != nil {
-				allOK = false
 				results = append(results, keyResult{KeyTail: keyTail(key), LatencyMS: latency, Error: err.Error()})
 				continue
 			}
@@ -733,13 +747,17 @@ func customProvidersTestHandler() http.HandlerFunc {
 			for _, m := range models {
 				ids = append(ids, strings.TrimPrefix(m.ID, in.ID+"/"))
 			}
-			if firstOKModels == nil {
-				firstOKModels = ids
-			}
+			firstOKModels = ids
+			succeeded = true
 			results = append(results, keyResult{KeyTail: keyTail(key), OK: true, Count: len(ids), LatencyMS: latency})
+			// 拿到一份目录就够勾选白名单了，不必把剩下的 key 也拉一遍。
+			break
 		}
 		writeAdminJSON(w, map[string]any{
-			"ok": allOK, "results": results, "count": len(results), "models": firstOKModels,
+			"ok": succeeded, "results": results, "count": len(results), "models": firstOKModels,
+			// 抽样口径：前端据此显示「已测 1/309（抽样）」，避免用户以为全部 key 都验过了。
+			"keys_total": keysTotal, "keys_tested": len(results),
+			"truncated": keysTotal > len(keys), "elapsed_ms": time.Since(startAll).Milliseconds(),
 		})
 	}
 }

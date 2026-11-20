@@ -166,6 +166,9 @@ export default function CustomModelsPage({ toast }: { toast: (msg: string, ok?: 
   const [list, setList] = useState<CustomProviderView[] | null>(null)
   const [form, setForm] = useState<FormState | null>(null)
   const [testing, setTesting] = useState(false)
+  const [testElapsed, setTestElapsed] = useState(0)
+  // 测试请求的中断句柄：硬超时与「取消」按钮共用（否则只能等后端跑完）
+  const testAbortRef = useRef<AbortController | null>(null)
   const [saving, setSaving] = useState(false)
   const [testResult, setTestResult] = useState<CustomProviderTestResult | null>(null)
   const [confirmDelete, setConfirmDelete] = useState<string | null>(null)
@@ -192,6 +195,16 @@ export default function CustomModelsPage({ toast }: { toast: (msg: string, ok?: 
   useEffect(() => {
     togglingIdsRef.current = togglingIds
   }, [togglingIds])
+  // 测试中显示已等待秒数：用户能看到「在动」，而不是一个静止的转圈
+  useEffect(() => {
+    if (!testing) {
+      setTestElapsed(0)
+      return
+    }
+    const t0 = Date.now()
+    const id = window.setInterval(() => setTestElapsed(Math.floor((Date.now() - t0) / 1000)), 500)
+    return () => window.clearInterval(id)
+  }, [testing])
   // 供应商服务（自定义源 + 插件供应商的独立入口，默认 50080）
   const [provSvc, setProvSvc] = useState<ProviderServiceStatus | null>(null)
   const [provBusy, setProvBusy] = useState(false)
@@ -359,24 +372,47 @@ export default function CustomModelsPage({ toast }: { toast: (msg: string, ok?: 
 
   // 「测试并获取模型」：当前表单临时拉取目录（不落盘）。
   // forTest=true：未填源 ID 也允许测试（后端 _test 占位），只校验 API 地址。
+  //
+  // 后端只采样前 3 个 key 并在拿到目录后立即返回（309 key 的源不再串行跑 8 分钟）。
+  // 前端再加一层硬超时 + 取消：任何情况下都不允许按钮无限转圈。
   const doTest = async () => {
-    if (!form) return
+    if (!form || testing) return
     const input = formToInput(form, true)
     if (!input) return
+    const ctrl = new AbortController()
+    testAbortRef.current = ctrl
+    let timedOut = false
+    const timer = setTimeout(() => {
+      timedOut = true
+      ctrl.abort()
+    }, 20000)
     setTesting(true)
     setTestResult(null)
     try {
-      const r = await api.customProvidersTest(input)
+      const r = await api.customProvidersTest(input, ctrl.signal)
       setTestResult(r)
       if (r.models && r.models.length > 0) {
         // 测试拿到最新全量清单：保留现有勾选状态（新模型默认不勾）。
         setForm((prev) => (prev ? { ...prev, allModels: r.models! } : prev))
       }
     } catch (e) {
-      setTestResult({ ok: false, error: String(e) })
+      setTestResult({
+        ok: false,
+        error: timedOut
+          ? '测试超时（20s）：上游无响应，请检查 API 地址 / 代理 / key'
+          : ctrl.signal.aborted
+            ? '已取消测试'
+            : String(e),
+      })
     } finally {
+      clearTimeout(timer)
+      testAbortRef.current = null
       setTesting(false)
     }
+  }
+
+  const doCancelTest = () => {
+    testAbortRef.current?.abort()
   }
 
   // 活性探测：手动触发（后台每 5 分钟也会自动刷新健康）
@@ -804,6 +840,22 @@ export default function CustomModelsPage({ toast }: { toast: (msg: string, ok?: 
 
   const visiblePlugins = (plugins ?? []).filter((p) => pluginFilter === 'all' || p.status === pluginFilter)
 
+  // 测试结果摘要：抽样口径（keys_total 可能远大于 keys_tested），失败只做汇总不逐条铺。
+  const testSummary = (() => {
+    if (!testResult) return null
+    const results = testResult.results ?? []
+    const tested = testResult.keys_tested ?? results.length
+    const total = testResult.keys_total ?? tested
+    return {
+      tested,
+      total,
+      okCount: results.filter((r) => r.ok).length,
+      fails: results.filter((r) => !r.ok),
+      models: testResult.models?.length ?? 0,
+      elapsed: testResult.elapsed_ms,
+    }
+  })()
+
   return (
     <div className="p-6 space-y-6">
       <div className="flex items-center justify-between gap-4">
@@ -1123,12 +1175,13 @@ export default function CustomModelsPage({ toast }: { toast: (msg: string, ok?: 
             <>
               <button
                 type="button"
-                onClick={() => void doTest()}
-                disabled={testing || saving}
+                onClick={() => (testing ? doCancelTest() : void doTest())}
+                disabled={saving}
                 className="flex items-center gap-1.5 px-4 py-2 rounded-lg border border-zinc-300 text-[13px] text-zinc-700 hover:bg-zinc-50 disabled:opacity-60 disabled:cursor-not-allowed"
+                title={testing ? '立即中断本次测试（后端只采样前 3 个 key）' : '用一个 key 拉取模型目录（不落盘）'}
               >
                 {testing ? <Loader2 size={14} className="animate-spin" /> : <PlugZap size={14} />}
-                {testing ? '测试中…' : '测试并获取模型'}
+                {testing ? `测试中… ${testElapsed}s（点击取消）` : '测试并获取模型'}
               </button>
               <div className="flex-1" />
               <button
@@ -1396,18 +1449,35 @@ export default function CustomModelsPage({ toast }: { toast: (msg: string, ok?: 
               )}
             </div>
 
-            {/* 测试结果 */}
-            {testResult && (
+            {/* 测试结果：抽样口径汇总（309 key 的源逐条铺不下，失败项折叠） */}
+            {testResult && testSummary && (
               <div className={clsx('rounded-lg p-3 text-xs space-y-1.5', testResult.ok ? 'bg-emerald-50 text-emerald-800' : 'bg-red-50 text-red-700')}>
-                <div className="font-medium">{testResult.ok ? '全部 key 连通成功' : '部分/全部 key 连通失败'}</div>
+                <div className="font-medium">
+                  {testResult.ok ? `连通成功 · 拉取到 ${testSummary.models} 个模型` : '测试失败'}
+                </div>
                 <div className="space-y-1">
-                  {(testResult.results ?? []).map((kr, i) => (
-                    <div key={i} className={clsx('flex items-center gap-2 font-mono', kr.ok ? 'text-emerald-700' : 'text-red-600')}>
-                      <span className="w-20 shrink-0">{kr.key_tail || '(无key)'}</span>
-                      <span>{kr.ok ? `✓ ${kr.count} 模型 · ${kr.latency_ms}ms` : `✗ ${kr.error}`}</span>
+                  {testSummary.okCount > 0 && (
+                    <div className="text-emerald-700">
+                      已测 {testSummary.tested}/{testSummary.total}
+                      {testSummary.total > testSummary.tested ? '（抽样：拿到目录即停）' : ''}
+                      {' · '}成功 {testSummary.okCount}
+                      {testSummary.elapsed != null ? ` · 耗时 ${(testSummary.elapsed / 1000).toFixed(1)}s` : ''}
                     </div>
-                  ))}
-                  {!testResult.results?.length && !testResult.ok && <div>{testResult.error}</div>}
+                  )}
+                  {testSummary.fails.length > 0 && (
+                    <details>
+                      <summary className="cursor-pointer">{testSummary.fails.length} 个 key 失败（点击展开）</summary>
+                      <div className="mt-1 space-y-1">
+                        {testSummary.fails.map((kr, i) => (
+                          <div key={i} className="flex items-center gap-2 font-mono text-red-600">
+                            <span className="w-20 shrink-0">{kr.key_tail || '(无key)'}</span>
+                            <span className="truncate">{kr.error}</span>
+                          </div>
+                        ))}
+                      </div>
+                    </details>
+                  )}
+                  {testSummary.fails.length === 0 && !testResult.ok && <div>{testResult.error}</div>}
                 </div>
               </div>
             )}
