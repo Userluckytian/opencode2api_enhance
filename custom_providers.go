@@ -977,6 +977,37 @@ func customProvidersResetKeysHandler() http.HandlerFunc {
 	}
 }
 
+// customProvidersKeysHandler POST：逐 key 运行态 {"id":"src1"}——
+// 面板「已保存的 Key 状态」折叠区用；只回末 4 位与状态，**绝不回明文**。
+func customProvidersKeysHandler() http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		var req struct {
+			ID string `json:"id"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.ID == "" {
+			writeAdminErr(w, http.StatusBadRequest, "请求体需为 {\"id\":\"源ID\"}")
+			return
+		}
+		if globalAgg == nil {
+			writeAdminErr(w, http.StatusServiceUnavailable, "聚合器未装配")
+			return
+		}
+		for _, v := range globalAgg.Vendors() {
+			if c, ok := v.(*custom.Vendor); ok && c.ID() == req.ID {
+				writeAdminJSON(w, map[string]any{
+					"id": req.ID, "keys": c.KeyStates(), "status": c.PoolStatus(),
+				})
+				return
+			}
+		}
+		writeAdminErr(w, http.StatusNotFound, "源 "+req.ID+" 未启用或未装配（停用状态请先启用）")
+	}
+}
+
 // startCustomProbeLoop 后台活性探测：每 5 分钟对所有已装配自定义源真实拉一次目录，
 // 刷新健康（LastSuccess/LastError 供列表页活性徽标；无流量时也保持新鲜）。
 func startCustomProbeLoop() {

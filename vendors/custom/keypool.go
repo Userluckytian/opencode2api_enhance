@@ -76,6 +76,7 @@ type keyState struct {
 	samples      int  // 已记录请求次数（health 策略排序用）
 	okRate       float64 // 成功率 EWMA，初始乐观 1.0（无数据视为可用）
 	latEWMA      float64 // 成功请求平均延迟（毫秒）EWMA，仅成功时更新
+	lastErr      string  // 最近一次被标记的原因（面板展示用，不含明文）
 }
 
 // available 该 key 当前是否可用（未禁用、不在限流冷却/401-403冷却/熔断期）。
@@ -91,6 +92,15 @@ type KeyPoolStatus struct {
 	AuthCooling int `json:"auth_cooling"` // 401/403 冷却中（到期自动恢复）
 	CircuitOpen int `json:"circuit_open"` // 连续失败熔断中（阈值后自动重试）
 	Disabled  int `json:"disabled"`       // key_403_cooldown=0 时被永久禁用
+}
+
+// KeyStateView 单个 key 的运行态（面板展示用；**不含明文**，只回末 4 位）。
+type KeyStateView struct {
+	KeyTail string `json:"key_tail"`
+	// State: available | cooling | auth_cooling | circuit_open | disabled
+	State string `json:"state"`
+	// LastError 最近一次被标记的原因（人话，不含 key 内容）。
+	LastError string `json:"last_error,omitempty"`
 }
 
 // keyPool 一源一池。
@@ -274,6 +284,7 @@ func (p *keyPool) recordSuccess(idx int, latency time.Duration) {
 	k.samples++
 	k.consecFails = 0
 	k.consec403 = 0
+	k.lastErr = ""
 }
 
 // recordFail 记一次 key 级失败（传输错误 / 5xx）：连续失败达阈值进入熔断冷却。
@@ -291,6 +302,7 @@ func (p *keyPool) recordFail(idx int, latency time.Duration) {
 	}
 	k.samples++
 	k.consecFails++
+	k.lastErr = "请求失败（传输错误或上游 5xx）"
 	if k.consecFails >= circuitOpenThreshold {
 		k.circuitUntil = p.nowFn().Add(circuitCooldown)
 	}
@@ -328,6 +340,7 @@ func (p *keyPool) cool(idx int, d time.Duration) {
 		return
 	}
 	p.keys[idx].coolingUntil = p.nowFn().Add(d)
+	p.keys[idx].lastErr = "429 限流冷却"
 }
 
 // authCool key 进入 401/403 冷却（到期自动回池重试）。
@@ -341,6 +354,7 @@ func (p *keyPool) authCool(idx int, d time.Duration) {
 		return
 	}
 	p.keys[idx].authCoolingUntil = p.nowFn().Add(d)
+	p.keys[idx].lastErr = "401/403 失效冷却"
 	// 401/403 冷却期间 key 不可用，其它限流/熔断标记一并清掉，避免状态叠加混乱。
 	p.keys[idx].coolingUntil = time.Time{}
 	p.keys[idx].consecFails = 0
@@ -356,6 +370,7 @@ func (p *keyPool) disable(idx int) {
 		return
 	}
 	p.keys[idx].disabled = true
+	p.keys[idx].lastErr = "401/403 永久禁用"
 }
 
 // authFail 401/403 失效处理：按 key403Cooldown 分流——
@@ -404,6 +419,37 @@ func (p *keyPool) status() KeyPoolStatus {
 		}
 	}
 	return st
+}
+
+// keyStates 逐 key 运行态快照（面板展示用；只回末 4 位，绝不含明文）。
+func (p *keyPool) keyStates() []KeyStateView {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	now := p.nowFn()
+	out := make([]KeyStateView, 0, len(p.keys))
+	for _, k := range p.keys {
+		state := "available"
+		switch {
+		case k.disabled:
+			state = "disabled"
+		case now.Before(k.authCoolingUntil):
+			state = "auth_cooling"
+		case now.Before(k.circuitUntil):
+			state = "circuit_open"
+		case now.Before(k.coolingUntil):
+			state = "cooling"
+		}
+		out = append(out, KeyStateView{KeyTail: keyTailOf(k.value), State: state, LastError: k.lastErr})
+	}
+	return out
+}
+
+// keyTailOf key 末 4 位（与面板/日志同款脱敏口径）。
+func keyTailOf(k string) string {
+	if len(k) <= 4 {
+		return strings.Repeat("*", len(k))
+	}
+	return "****" + k[len(k)-4:]
 }
 
 // countAuthCooling 当前 401/403 冷却中的 key 数（手动恢复按钮是否需要高亮等 UI 用）。

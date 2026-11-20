@@ -1,8 +1,24 @@
 import { useEffect, useRef, useState } from 'react'
 import clsx from 'clsx'
 import { Loader2, Pencil, Plus, PlugZap, Activity, Trash2, Plug, RefreshCw, ListChecks, Search, Globe, Copy, Play, Square, Server } from 'lucide-react'
-import { api, type CustomKeyStrategy, type CustomProviderInput, type CustomProviderTestResult, type CustomProviderView, type CustomProtocol, type PluginModelDetail, type PluginProviderView, type PluginStatus, type ProviderServiceStatus } from '../lib/api'
+import { api, type CustomKeyState, type CustomKeyStrategy, type CustomProviderInput, type CustomProviderTestResult, type CustomProviderView, type CustomProtocol, type PluginModelDetail, type PluginProviderView, type PluginStatus, type ProviderServiceStatus } from '../lib/api'
 import Modal from '../components/Modal'
+
+// Key 运行态徽标（与后端 KeyStateView.state 一一对应）
+const KEY_STATE_LABEL: Record<CustomKeyState['state'], string> = {
+  available: '可用',
+  cooling: '限流冷却',
+  auth_cooling: '403 冷却',
+  circuit_open: '熔断',
+  disabled: '禁用',
+}
+const KEY_STATE_CLS: Record<CustomKeyState['state'], string> = {
+  available: 'bg-emerald-50 text-emerald-700',
+  cooling: 'bg-amber-50 text-amber-700',
+  auth_cooling: 'bg-orange-50 text-orange-700',
+  circuit_open: 'bg-purple-50 text-purple-700',
+  disabled: 'bg-red-50 text-red-700',
+}
 
 // 自定义模型源表单（新增/编辑共用）。编辑时 key 留空 = 保留原 key。
 type FormState = {
@@ -168,6 +184,10 @@ export default function CustomModelsPage({ toast }: { toast: (msg: string, ok?: 
   const testAbortRef = useRef<AbortController | null>(null)
   const [saving, setSaving] = useState(false)
   const [testResult, setTestResult] = useState<CustomProviderTestResult | null>(null)
+  // 「已保存的 Key 状态」折叠区：只有编辑已存在的源才有运行态可查
+  const [keyStates, setKeyStates] = useState<CustomKeyState[] | null>(null)
+  const [keyStatesLoading, setKeyStatesLoading] = useState(false)
+  const [keyStatesLimit, setKeyStatesLimit] = useState(20)
   const [confirmDelete, setConfirmDelete] = useState<string | null>(null)
   const [confirmClear, setConfirmClear] = useState(false)
   const [clearing, setClearing] = useState(false)
@@ -306,11 +326,16 @@ export default function CustomModelsPage({ toast }: { toast: (msg: string, ok?: 
 
   const openAdd = () => {
     setTestResult(null)
+    setKeyStates(null)
+    setKeyStatesLimit(20)
     setForm(emptyForm())
   }
 
   const openEdit = (p: CustomProviderView) => {
     setTestResult(null)
+    // 每次打开编辑都重新拉一次运行态（上一次的可能是别的源）
+    setKeyStates(null)
+    setKeyStatesLimit(20)
     setForm({
       id: p.id,
       name: p.name,
@@ -408,6 +433,20 @@ export default function CustomModelsPage({ toast }: { toast: (msg: string, ok?: 
 
   const doCancelTest = () => {
     testAbortRef.current?.abort()
+  }
+
+  // 已保存的 Key 运行态：309 行 textarea 看不出哪个 key 坏了，单独给一份只读列表。
+  const loadKeyStates = async (id: string) => {
+    setKeyStatesLoading(true)
+    try {
+      const r = await api.customProvidersKeys(id)
+      setKeyStates(r.keys ?? [])
+    } catch (e) {
+      setKeyStates([])
+      toast(`读取 Key 状态失败：${String(e)}`, false)
+    } finally {
+      setKeyStatesLoading(false)
+    }
   }
 
   // 活性探测：手动触发（后台每 5 分钟也会自动刷新健康）
@@ -1049,8 +1088,17 @@ export default function CustomModelsPage({ toast }: { toast: (msg: string, ok?: 
                       </span>
                     )}
                     {p.keys_total > 1 && (
-                      <span className="text-[11px] px-1.5 py-0.5 rounded bg-zinc-100 text-zinc-600">
-                        {p.keys_total} key
+                      <span
+                        className="text-[11px] px-1.5 py-0.5 rounded bg-zinc-100 text-zinc-600"
+                        title={
+                          p.key_strategy === 'failover'
+                            ? '错误转移：主 key 优先，冷却/失效才降级（不会主动摊额度）'
+                            : p.key_strategy === 'health'
+                              ? '加权轮询：成功率高的 key 优先，仍覆盖全池'
+                              : '轮询：请求均匀分摊到全部 key'
+                        }
+                      >
+                        {p.keys_total} key · 可用 {p.keys_available}
                         {p.key_strategy === 'failover' ? ' · 错误转移' : p.key_strategy === 'health' ? ' · 加权轮询' : ' · 轮询'}
                       </span>
                     )}
@@ -1262,6 +1310,43 @@ export default function CustomModelsPage({ toast }: { toast: (msg: string, ok?: 
                 多 key 自动负载均衡与故障切换；Key 保存在本机配置中由网关持有，调用方无需携带；编辑时留空 = 保留原有 keys
               </p>
             </div>
+
+            {/* 已保存的 Key 运行态：只读、只显示末 4 位，用于定位坏 key */}
+            {form.editing && (
+              <details
+                className="rounded-lg border border-zinc-200 bg-zinc-50/60 p-3"
+                onToggle={(e) => {
+                  const open = (e.currentTarget as HTMLDetailsElement).open
+                  if (open && !keyStates && !keyStatesLoading) void loadKeyStates(form.editing!)
+                }}
+              >
+                <summary className="cursor-pointer text-xs text-zinc-600">
+                  已保存的 Key 状态（{form.api_keys.split('\n').filter((x) => x.trim()).length} 个，点击查看；只显示末 4 位）
+                </summary>
+                <div className="mt-2 space-y-1 max-h-64 overflow-y-auto">
+                  {keyStatesLoading && <div className="text-xs text-zinc-500">读取中…</div>}
+                  {!keyStatesLoading && keyStates && keyStates.length === 0 && (
+                    <div className="text-xs text-zinc-500">该源未启用或尚无运行态数据（启用后可查看）</div>
+                  )}
+                  {(keyStates ?? []).slice(0, keyStatesLimit).map((k, i) => (
+                    <div key={i} className="flex items-center gap-2 text-[11px] font-mono">
+                      <span className="w-20 shrink-0 text-zinc-600">{k.key_tail}</span>
+                      <span className={clsx('px-1.5 py-0.5 rounded shrink-0', KEY_STATE_CLS[k.state])}>{KEY_STATE_LABEL[k.state]}</span>
+                      {k.last_error && <span className="text-zinc-400 truncate">{k.last_error}</span>}
+                    </div>
+                  ))}
+                  {keyStates && keyStates.length > keyStatesLimit && (
+                    <button
+                      type="button"
+                      onClick={() => setKeyStatesLimit((n) => n + 50)}
+                      className="text-[11px] text-zinc-500 underline"
+                    >
+                      显示更多（已显示 {keyStatesLimit}/{keyStates.length}）
+                    </button>
+                  )}
+                </div>
+              </details>
+            )}
 
             <div className="space-y-2">
               <label className="block text-sm font-medium text-zinc-700">Key 调度策略</label>

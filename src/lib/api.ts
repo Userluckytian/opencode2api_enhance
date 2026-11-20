@@ -204,6 +204,14 @@ export type CustomProbeResult = {
   last_success?: string
 }
 
+/** 单个 key 的运行态（面板展示用；只回末 4 位，不含明文） */
+export type CustomKeyState = {
+  key_tail: string
+  state: 'available' | 'cooling' | 'auth_cooling' | 'circuit_open' | 'disabled'
+  /** 最近一次被标记的原因（人话） */
+  last_error?: string
+}
+
 // 插件式供应商（R1 后端 core/manager/pluginprovider.View，设计文档 docs/PLUGIN-PROVIDERS.md 七）
 export type PluginStatus = 'running' | 'need_config' | 'disabled' | 'starting' | 'error'
 
@@ -1184,6 +1192,11 @@ export const api = {
   /** 活性探测：真实拉一次上游目录，刷新健康并返回结果 */
   customProvidersProbe: (id: string) =>
     req<CustomProbeResult>('POST', '/custom-providers/probe', { id }),
+  /** 逐 key 运行态（只回末 4 位与状态，不含明文） */
+  customProvidersKeys: (id: string) =>
+    req<{ id: string; keys: CustomKeyState[]; status: { total: number; available: number } }>(
+      'POST', '/custom-providers/keys', { id },
+    ),
   /** 手动恢复该源全部 Key（清除禁用/冷却/熔断运行态，立即回到全可用） */
   customProvidersResetKeys: (id: string) =>
     req<{ id: string; status: string; keys_total: number; keys_available: number; keys_cooling: number; keys_auth_cooling: number; keys_circuit_open: number; keys_disabled: number }>('POST', '/custom-providers/reset-keys', { id }),

@@ -256,6 +256,9 @@ func (v *Vendor) prefixedModel(upstream string) string { return v.prefix() + ups
 // PoolStatus key 健康计数（可用/冷却/禁用；状态快照，非用量统计）。
 func (v *Vendor) PoolStatus() KeyPoolStatus { return v.pool.status() }
 
+// KeyStates 逐 key 运行态（面板展示用；只回末 4 位，不含明文）。
+func (v *Vendor) KeyStates() []KeyStateView { return v.pool.keyStates() }
+
 // ConfiguredKeys 配置内的全部 key 明文（测试端点逐 key 连通验证用）。
 func (v *Vendor) ConfiguredKeys() []string { return v.pool.keysSnapshot() }
 
