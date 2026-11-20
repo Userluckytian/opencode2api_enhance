@@ -611,25 +611,32 @@ func (v *Vendor) withKeys(model string, stickyIdx int, call func(key string) (*c
 		attempted = true
 		start := time.Now()
 		reply, err := call(key)
-		v.pool.recordResult(idx, err == nil && reply != nil && reply.Status >= 200 && reply.Status < 300, time.Since(start))
 		lastReply, lastErr, lastIdx = reply, err, idx
 		if err != nil || reply == nil {
-			continue // 传输错误：不标记，换下一个 key
+			// 传输层失败：key/链路问题，计入熔断后换 key。
+			v.pool.recordFail(idx, time.Since(start))
+			continue
 		}
 		if reply.Status >= 200 && reply.Status < 300 {
+			v.pool.recordSuccess(idx, time.Since(start))
 			return reply, idx, nil
 		}
 		switch {
-		case reply.Status == http.StatusUnauthorized || reply.Status == http.StatusForbidden:
-			v.pool.authFail(idx)
+		case reply.Status == http.StatusUnauthorized:
+			v.pool.authFail(idx) // 401 = key 失效，立即按 403 冷却策略处理
+		case reply.Status == http.StatusForbidden:
+			// 403 多为「该模型无权限 / 地区限制 / 风控」，不是 key 坏：三振才失效。
+			v.pool.softAuthFail(idx)
 		case reply.Status == http.StatusTooManyRequests:
+			// 429 只冷却，不计入连续失败（避免冷却 + 熔断双重惩罚）。
 			v.pool.cool(idx, parseRetryAfter(reply.Headers.Get("Retry-After")))
 		case reply.Status == http.StatusNotFound && v.hasModel(model):
 			// 该 key 不提供这个模型（目录里有，说明是子集差异/权限差异）：
-			// 记负缓存后换 key，下次同一模型直接跳过它。
+			// 记负缓存后换 key，下次同一模型直接跳过它。与 key 健康无关，不计失败。
 			v.markNeg(model, idx)
 		case reply.Status >= 500 || reply.Status == http.StatusRequestTimeout:
-			// 上游侧问题：不标记 key，仅换 key 重试
+			// 上游侧失败：计入熔断，但继续换 key 重试。
+			v.pool.recordFail(idx, time.Since(start))
 		default:
 			return reply, idx, nil // 请求级错误：换 key 也一样
 		}
@@ -678,19 +685,20 @@ func (v *Vendor) withKeysStream(model string, stickyIdx int, call func(key strin
 		}
 		start := time.Now()
 		stream, err := call(key)
-		v.pool.recordResult(idx, err == nil && stream != nil && stream.Status >= 200 && stream.Status < 300, time.Since(start))
 		lastStream, lastErr, lastIdx = stream, err, idx
 		if err != nil || stream == nil {
+			v.pool.recordFail(idx, time.Since(start))
 			slog.Info("custom-key: acquire stream attempt failed (transport)", "vendor", v.cfg.ID, "key_idx", idx, "model", model, "err", err)
 			continue
 		}
 		if stream.Status >= 200 && stream.Status < 300 {
+			v.pool.recordSuccess(idx, time.Since(start))
 			slog.Info("custom-key: acquire stream ok", "vendor", v.cfg.ID, "model", model,
 				"key_idx", idx, "sticky_idx", stickyIdx, "status", stream.Status)
 			// 流中途失败回传 key 池（health 策略用）：限流/断流/EOF 无 [DONE] 也能拉低健康分。
 			if v.cfg.KeyStrategy == StrategyHealth {
 				stream.ReadCloser = &keyFailStream{ReadCloser: stream.ReadCloser, onFail: func() {
-					v.pool.recordResult(idx, false, 0)
+					v.pool.recordFail(idx, 0)
 				}}
 			}
 			return stream, idx, nil
@@ -698,14 +706,17 @@ func (v *Vendor) withKeysStream(model string, stickyIdx int, call func(key strin
 		slog.Info("custom-key: acquire stream non-2xx, switching", "vendor", v.cfg.ID, "model", model,
 			"key_idx", idx, "status", stream.Status, "sticky_idx", stickyIdx)
 		switch {
-		case stream.Status == http.StatusUnauthorized || stream.Status == http.StatusForbidden:
+		case stream.Status == http.StatusUnauthorized:
 			v.pool.authFail(idx)
+		case stream.Status == http.StatusForbidden:
+			v.pool.softAuthFail(idx)
 		case stream.Status == http.StatusTooManyRequests:
-			v.pool.cool(idx, 0)
+			v.pool.cool(idx, 0) // 流式无响应头可读 Retry-After，用缺省冷却；不计熔断
 		case stream.Status == http.StatusNotFound && v.hasModel(model):
 			// 同 withKeys：该 key 不提供此模型 → 记负缓存后换 key 再试。
 			v.markNeg(model, idx)
 		case stream.Status >= 500 || stream.Status == http.StatusRequestTimeout:
+			v.pool.recordFail(idx, time.Since(start))
 		default:
 			return stream, idx, nil
 		}

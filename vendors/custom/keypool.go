@@ -52,6 +52,7 @@ type keyState struct {
 	disabled     bool // key_403_cooldown=0 时 401/403 → 永久禁用（运行期内不再使用）
 	authCoolingUntil time.Time // 401/403 冷却到期时间（key_403_cooldown>0 时使用）
 	consecFails  int  // 连续失败次数（熔断：达阈值进入 circuitUntil 冷却）
+	consec403    int  // 连续 403 次数（软失败：达 authSoftThreshold 才按失效处理）
 	circuitUntil time.Time
 	samples      int  // 已记录请求次数（health 策略排序用）
 	okRate       float64 // 成功率 EWMA，初始乐观 1.0（无数据视为可用）
@@ -208,40 +209,78 @@ func (p *keyPool) pickHealthLocked(tried map[int]bool, subset []int, now time.Ti
 }
 
 // recordResult 记录一次 key 请求的结果与耗时（health 策略排序依据）。
-// ok = 传输成功且 HTTP 2xx；失败不更新延迟（仅更新成功率）。
+// ok = 传输成功且 HTTP 2xx。
+//
+// 注意：调用方只对「key 级」结果调用它——404（模型不在该 key 上）、429（限流）、
+// 403（多为模型级无权限）都不该走到这里，否则健康 key 会被误熔断
+// （见 docs/issue-log/2026-11-20.md #1）。
 func (p *keyPool) recordResult(idx int, ok bool, latency time.Duration) {
+	if ok {
+		p.recordSuccess(idx, latency)
+		return
+	}
+	p.recordFail(idx, latency)
+}
+
+// recordSuccess 记一次成功：健康分拉高、连续失败/连续 403 清零。
+func (p *keyPool) recordSuccess(idx int, latency time.Duration) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if idx < 0 || idx >= len(p.keys) {
 		return
 	}
 	k := p.keys[idx]
-	v := 0.0
-	if ok {
-		v = 1.0
-	}
 	if k.samples == 0 {
 		// 首个样本直接落地（不再保留乐观初始值）
-		k.okRate = v
-		if ok {
-			k.latEWMA = float64(latency.Milliseconds())
-		}
+		k.okRate = 1.0
+		k.latEWMA = float64(latency.Milliseconds())
 	} else {
-		k.okRate = k.okRate*(1-healthAlpha) + v*healthAlpha
-		if ok {
-			k.latEWMA = k.latEWMA*(1-healthAlpha) + float64(latency.Milliseconds())*healthAlpha
-		}
+		k.okRate = k.okRate*(1-healthAlpha) + 1.0*healthAlpha
+		k.latEWMA = k.latEWMA*(1-healthAlpha) + float64(latency.Milliseconds())*healthAlpha
 	}
 	k.samples++
-	// 连续失败熔断：成功清零；连续失败达阈值 → 进入熔断冷却（到期自动重试）。
-	// 各策略（round_robin/failover/health）都受益：坏 key 不再被反复选中。
-	if ok {
-		k.consecFails = 0
+	k.consecFails = 0
+	k.consec403 = 0
+}
+
+// recordFail 记一次 key 级失败（传输错误 / 5xx）：连续失败达阈值进入熔断冷却。
+func (p *keyPool) recordFail(idx int, latency time.Duration) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if idx < 0 || idx >= len(p.keys) {
+		return
+	}
+	k := p.keys[idx]
+	if k.samples == 0 {
+		k.okRate = 0
 	} else {
-		k.consecFails++
-		if k.consecFails >= circuitOpenThreshold {
-			k.circuitUntil = p.nowFn().Add(circuitCooldown)
-		}
+		k.okRate = k.okRate * (1 - healthAlpha)
+	}
+	k.samples++
+	k.consecFails++
+	if k.consecFails >= circuitOpenThreshold {
+		k.circuitUntil = p.nowFn().Add(circuitCooldown)
+	}
+}
+
+// authSoftThreshold 403 软失败阈值：同一 key 连续这么多次 403 才按失效处理。
+// 403 在多数聚合/中转站是「该模型无权限」「地区限制」「风控」，不是 key 坏了，
+// 一次就冷却 600s（甚至永久禁用）会把好 key 打入冷宫。
+const authSoftThreshold = 3
+
+// softAuthFail 403 软失败：只计数并换 key，连续 3 次才按 401/403 失效处理。
+// 成功一次即清零（recordSuccess），所以偶发 403 不会累积。
+func (p *keyPool) softAuthFail(idx int) {
+	p.mu.Lock()
+	if idx < 0 || idx >= len(p.keys) {
+		p.mu.Unlock()
+		return
+	}
+	p.keys[idx].consec403++
+	n := p.keys[idx].consec403
+	p.mu.Unlock()
+	if n >= authSoftThreshold {
+		p.authFail(idx)
 	}
 }
 
@@ -272,6 +311,7 @@ func (p *keyPool) authCool(idx int, d time.Duration) {
 	// 401/403 冷却期间 key 不可用，其它限流/熔断标记一并清掉，避免状态叠加混乱。
 	p.keys[idx].coolingUntil = time.Time{}
 	p.keys[idx].consecFails = 0
+	p.keys[idx].consec403 = 0
 	p.keys[idx].circuitUntil = time.Time{}
 }
 
@@ -305,6 +345,7 @@ func (p *keyPool) reset() {
 		k.coolingUntil = time.Time{}
 		k.authCoolingUntil = time.Time{}
 		k.consecFails = 0
+		k.consec403 = 0
 		k.circuitUntil = time.Time{}
 	}
 }
