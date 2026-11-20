@@ -37,7 +37,7 @@ var chatRouterVar *chatRouter.Router
 //
 // 单一职责：把 providers[] 里的每条配置变成一个已注册的 Vendor。
 // 历史上这里有「供应商服务模式 / 显式配置 / 自动注册内建厂商」三条分支，
-// 前两条是 OpenCode 免费层与 50080 分离的产物；现在两条路径语义相同，
+// 前两条是 OpenCode 免费层与 30080 分离的产物；现在两条路径语义相同，
 // 合并为一条：按配置注册，未配置即空聚合器。
 func newAggregator() *aggregator.Aggregator {
 	agg := aggregator.New()

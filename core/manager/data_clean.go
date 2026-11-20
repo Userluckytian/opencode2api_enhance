@@ -16,7 +16,7 @@ func (m *Manager) DataClean(level int) error {
 	if level < 1 || level > 3 {
 		return fmt.Errorf("无效的清理级别: %d", level)
 	}
-	// 供应商服务（50080）持有 runtime/_provider-service 下的日志/统计文件句柄，
+	// 供应商服务（30080）持有 runtime/_provider-service 下的日志/统计文件句柄，
 	// 不先停掉会导致 Windows 上 RemoveAll 失败。它由主进程看护，清理后会自动重启。
 	m.stopProviderServiceForClean()
 

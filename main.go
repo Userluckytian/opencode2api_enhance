@@ -4,9 +4,9 @@
 //
 //	40000  本进程 —— 管理面板 + /api/admin/*（控制面，不代理推理）
 //	40080  opencode2api 引擎 —— OpenCode 免费层（独立进程，本进程托管）
-//	50080  供应商服务 —— 自定义源 + 插件供应商（本进程托管）
+//	30080  供应商服务 —— 自定义源 + 插件供应商（本进程托管）
 //
-// 推理请求走 40080 / 50080；40000 只负责配置、启停、健康、日志与统计。
+// 推理请求走 40080 / 30080；40000 只负责配置、启停、健康、日志与统计。
 package main
 
 import (
@@ -124,7 +124,7 @@ func main() {
 	// v2.1：管理进程也必须记录调用日志。
 	// 此前只有 -gateway / -provider-service 才开，而 v2.0 之后管理面不再代理推理，
 	// 导致「日志页永远空白」。管理面虽然自己不转发请求，但它的日志页要读这份日志，
-	// 而且插件/自定义源直连 50080 时管理面也会产生少量记录（鉴权失败、探活等）。
+	// 而且插件/自定义源直连 30080 时管理面也会产生少量记录（鉴权失败、探活等）。
 	callLogEnabled = true
 	slog.Info("config loaded", "path", configPath)
 
@@ -144,7 +144,7 @@ func main() {
 	managerInst := manager.New("")
 	managerInst.SetRunner(manager.NewRealRunner())
 
-	// 供应商服务（50080）：自定义源 + 插件的唯一宿主。
+	// 供应商服务（30080）：自定义源 + 插件的唯一宿主。
 	providerSvc := manager.NewProviderService(managerInst, configPath)
 	if err := providerSvc.Start(manager.NewRealRunner()); err != nil {
 		slog.Warn("provider service unavailable", "error", err)
@@ -536,7 +536,7 @@ func registerHTTPRoutes(mux *http.ServeMux, managerInst *manager.Manager, plugin
 	mux.HandleFunc("/api/admin/custom-providers/keys", loggingMiddleware(requireAuth(customProvidersKeysHandler())))
 	mux.HandleFunc("/api/admin/custom-providers/clear", loggingMiddleware(requireAuth(customProvidersClearHandler(managerInst))))
 
-	// 插件式供应商：由供应商服务（50080）唯一托管，管理进程只做反代。
+	// 插件式供应商：由供应商服务（30080）唯一托管，管理进程只做反代。
 	if pluginMgr != nil {
 		mux.HandleFunc("/api/admin/plugins", loggingMiddleware(requireAuth(pluginMgr.ListHandler())))
 		mux.HandleFunc("/api/admin/plugins/rescan", loggingMiddleware(requireAuth(pluginMgr.RescanHandler())))

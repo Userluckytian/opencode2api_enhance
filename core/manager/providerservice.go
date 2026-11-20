@@ -2,7 +2,7 @@
 //
 // 背景（2026-10 拆分）：自定义源与插件此前随每个 opencode2api 进程装配（管理器 / 每个
 // 实例 / 统一网关），既与 OpenCode 免费池共用 40080，又导致插件子进程重复拉起、账号状态
-// 与固定面板端口互相打架。本服务把两类供应商收敛到独立端口（默认 50080）：
+// 与固定面板端口互相打架。本服务把两类供应商收敛到独立端口（默认 30080）：
 //   - 只装配 type=custom 与插件 remote 厂商，不加载 opencode；
 //   - 不启动 sidecar / sing-box / 实例池，OpenCode 池故障不影响本端口；
 //   - 插件子进程全局只由本进程托管一份。
@@ -25,8 +25,13 @@ import (
 	"time"
 )
 
-// providerServicePortDefault 供应商服务默认端口（与实例段 40100+ / 网关 40080 错开）。
-const providerServicePortDefault uint16 = 50080
+// providerServicePortDefault 供应商服务默认端口。
+//
+// 选 30080 而不是 50080：Windows 的 Hyper-V/WinNAT 会从动态端口段
+// （默认 49152-65535）里划走成片的保留端口，50000-50459 就是这样被占的，
+// 表现为 bind 返回 WSAEACCES、netstat 却看不到任何监听者。端口落在动态段
+// 之外，换机器/重启都不会再被抢。
+const providerServicePortDefault uint16 = 30080
 
 // providerServiceDirBase 供应商服务运行目录名（runtime/_provider-service）。
 const providerServiceDirBase = "_provider-service"
@@ -82,7 +87,7 @@ func NewProviderService(m *Manager, configPath string) *ProviderService {
 }
 
 // managerProviderPort 供应商服务端口：优先环境变量 OPCODE2API_PROVIDER_PORT，
-// 其次 config.provider_port，否则默认 50080。
+// 其次 config.provider_port，否则默认 30080。
 func (m *Manager) managerProviderPort() uint16 {
 	if s := os.Getenv("OPCODE2API_PROVIDER_PORT"); s != "" {
 		if n := parsePositiveInt(s); n > 0 && n < 65536 {
@@ -417,7 +422,7 @@ func (p *ProviderService) setErr(msg string) {
 }
 
 // ProxyHandler 把管理进程收到的插件管理 API 反代到供应商服务。
-// 管理进程不再自己托管插件子进程，插件列表/启停/配置/模型刷新统一由 50080 处理。
+// 管理进程不再自己托管插件子进程，插件列表/启停/配置/模型刷新统一由 30080 处理。
 func (p *ProviderService) ProxyHandler() http.Handler {
 	target := &url.URL{Scheme: "http", Host: fmt.Sprintf("127.0.0.1:%d", p.Port())}
 	proxy := httputil.NewSingleHostReverseProxy(target)

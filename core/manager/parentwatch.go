@@ -1,7 +1,7 @@
 // M2 T2 — provider-service 父进程自检（缺陷 D3 止血，计划
 // docs/ai-framework/plans/2026-11-10-orphan-governance-m2.md T2）。
 //
-// 背景：三层进程架构中 provider-service（-provider-service，:50080）的父进程是
+// 背景：三层进程架构中 provider-service（-provider-service，:30080）的父进程是
 // 管理面。管理面被强杀/崩溃后，provider-service 存活且其插件管理器持续拉起插件，
 // 整棵子树沦为孤儿。本看护在父进程消失时回收全部插件并退出本进程。
 //

@@ -34,7 +34,7 @@ func (m *Manager) suggestFreePorts(start uint16, count int) []uint16 {
 }
 
 // PortSuggest 建议一个可用端口（41000~43000 段内 LCG 取 2000 次尝试）。
-// 该段避开默认三端口（40000/40080/50080）与常见冲突区。
+// 该段避开默认三端口（40000/40080/30080）与常见冲突区。
 func (m *Manager) PortSuggest() (uint16, error) {
 	seed := randSeed()
 	for i := 0; i < 2000; i++ {

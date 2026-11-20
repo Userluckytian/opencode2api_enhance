@@ -3,7 +3,7 @@
 // v2.0.0 起本包不再管理「实例池 / 统一网关 / 节点池 / 订阅 / 扫描」——
 // 那些能力随 OpenCode 免费层自研路径一并移除。剩余职责：
 //   - 配置文件读写与校验（config.go）
-//   - 供应商服务（50080）的启停与看门狗（providerservice.go）
+//   - 供应商服务（30080）的启停与看门狗（providerservice.go）
 //   - 免费层引擎（40080）的启停与看门狗（freetier_engine.go）
 //   - 调用日志 / 统计 / 日志聚合（calllog*.go / stats*.go / logs.go）
 //   - 平台相关工具（autostart / open_url / port / process / netstat / caps）

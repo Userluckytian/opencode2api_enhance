@@ -15,7 +15,7 @@
 
 
 
-本地**三端口 LLM 代理管理器**，支持 Windows / Linux / macOS 桌面（Tauri 2 壳）与 **Docker / Headless Web**（同一 Go core）多端部署。40000 是管理面（不代理推理），40080 托管 OpenCode 免费层引擎，50080 托管自定义源与插件供应商；管理器负责启停、健康、配置热更新、调用日志与统计。
+本地**三端口 LLM 代理管理器**，支持 Windows / Linux / macOS 桌面（Tauri 2 壳）与 **Docker / Headless Web**（同一 Go core）多端部署。40000 是管理面（不代理推理），40080 托管 OpenCode 免费层引擎，30080 托管自定义源与插件供应商；管理器负责启停、健康、配置热更新、调用日志与统计。
 
 除内建免费源外，还支持**自定义模型源**：用你自己的 API Key 接入任意第三方供应商（GLM / DeepSeek / Kimi / OpenRouter / OpenAI / Anthropic / Gemini 等，四种上游协议），多 Key 轮询/错误转移，与免费源并列聚合在同一网关下——详见 [自定义模型源指南](docs/CUSTOM-MODELS.md)。
 
@@ -47,7 +47,7 @@ UI 参照 Windsurf Account Manager 的浅色官网风格：无边框窗口 + 自
 ## 功能
 
 - **OpenCode 免费层（40080）**：托管 opencode2api 引擎（独立子进程 + 看门狗），面板含通道顺序（`warp_first` / `key_first`）、WARP 出口池（活跃/冷却计数、一键重试）、密钥通道（zen / go key 列表，保存即热生效）、免费模型清单与游标、接入信息（地址 + API Key 一键复制）、启停 / 重启（异步模式避免前端转圈 95 秒）
-- **自定义模型源（50080）**：自带 API Key 接入第三方供应商（**OpenAI 兼容 / Anthropic / OpenAI Responses / Gemini** 四协议，多源并存），多 Key 池支持**轮询 / 错误转移**——429 自动冷却、401/403 自动禁用换 Key；保存即热生效、模型清单磁盘缓存；模型带 `源ID/` 前缀进入统一 `/v1/models`，详见 [指南](docs/CUSTOM-MODELS.md)
+- **自定义模型源（30080）**：自带 API Key 接入第三方供应商（**OpenAI 兼容 / Anthropic / OpenAI Responses / Gemini** 四协议，多源并存），多 Key 池支持**轮询 / 错误转移**——429 自动冷却、401/403 自动禁用换 Key；保存即热生效、模型清单磁盘缓存；模型带 `源ID/` 前缀进入统一 `/v1/models`，详见 [指南](docs/CUSTOM-MODELS.md)
 - **插件供应商**：`provider.json` 契约 + 子进程托管，统一启停、配置、日志与模型刷新，详见 [插件能力](docs/PLUGIN-CAPABILITIES.md)
 - **调用日志**：供应商 JSONL 与引擎 stdout 事件合并，按天 / 供应商 / 关键词筛选；逐条显示 WARP / key 通道徽标、上游真实 model、错误大类
 - **Token 统计**：按天 / 模型聚合用量，重置统计；诊断页另有「通道分析」（WARP vs key 的请求数、成功率与占比，以引擎记录为分母）
@@ -59,7 +59,7 @@ UI 参照 Windsurf Account Manager 的浅色官网风格：无边框窗口 + 自
 
 1. 启动 `opencode2api-manager.exe`（首次运行自动在 exe 旁生成 `bin/` 目录，内含 opencode2api 引擎）
 2. **OpenCode** 页 → 填 zen / go key（留空则走匿名通道）→ 选通道顺序 → 「启动」→ 用 `http://127.0.0.1:40080/v1` 作为 API 地址
-3. **自定义模型** 页（可选）→「添加模型源」→ 填 API 地址 / 协议 / Key（可多 Key）→「测试并获取模型」→ 保存即热生效 → 用 `http://127.0.0.1:50080/v1`
+3. **自定义模型** 页（可选）→「添加模型源」→ 填 API 地址 / 协议 / Key（可多 Key）→「测试并获取模型」→ 保存即热生效 → 用 `http://127.0.0.1:30080/v1`
 4. **统计 / 日志 / 诊断** 页观察用量、逐条调用与三端口自检
 
 ## Linux / Headless 部署
@@ -180,7 +180,7 @@ npm run tauri:dev
 │  Go core 管理器（main 包 + core/manager）              │
 │  引擎托管 / 供应商服务 / 日志 / 统计 / 配置 / 诊断      │
 └───────┬───────────────────────────────┬──────────────┘
-        │ 子进程：40080                 │ 子进程：50080
+        │ 子进程：40080                 │ 子进程：30080
 ┌───────▼──────────────┐      ┌─────────▼─────────────┐
 │ opencode2api 引擎     │      │ 供应商服务             │
 │ 免费层 → OpenCode 上游 │      │ 自定义源 + 插件供应商  │
@@ -189,7 +189,7 @@ npm run tauri:dev
 
 - **Tauri 壳**：只做窗口/托盘/内嵌二进制释放/拉起 core 管理器（`src-tauri/src/lib.rs`），管理职责全部在 Go core；headless 端（Docker/Web）不依赖壳，同一 core 直接监听 HTTP 提供完整管理 UI
 - **Go core**：一份实现服务所有端（桌面 exe / Web 浏览器 / Docker），经 `/api/admin/*` HTTP 暴露；协议转换（OpenAI/Anthropic/Responses）在 `core/protocol` 与 `core/contract`
-- **三端口**：40000 控制面（不代理推理）、40080 免费层引擎（外部独立进程，GPL 隔离）、50080 供应商服务（自定义源 + 插件）
+- **三端口**：40000 控制面（不代理推理）、40080 免费层引擎（外部独立进程，GPL 隔离）、30080 供应商服务（自定义源 + 插件）
 - **环境隔离**：正式版 / dev（tauri dev）/ 便携测试（portable.txt）/ Docker 各自独立数据目录与**端口槽位**（40000 起每环境一段），互不干扰
 - **端口配置化**：来源优先级 环境变量 > config.json（gateway_port/provider_port/instance_base_port/probe_*_port）> 编译默认
 

@@ -80,7 +80,7 @@ func runDiag(ctx context.Context, m *manager.Manager) DiagReport {
 	st := m.FreeTierEngineStatus()
 	rep.Checks = append(rep.Checks, probeHealthz(ctx, st.Port))
 
-	// 3) 供应商服务（50080）
+	// 3) 供应商服务（30080）
 	view := m.ConfigViewOf()
 	rep.Checks = append(rep.Checks, probeHealth(ctx, view.ProviderPortEffective))
 

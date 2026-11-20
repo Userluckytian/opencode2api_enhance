@@ -18,7 +18,7 @@ const DefaultPassword = "123456"
 // Config 应用级配置（字段与 Rust Config 一一对应，JSON 名一致）。
 //
 // v2.0.0 精简：免费层（实例池/节点池/订阅/扫描/竞速/sidecar/链路）全部配置项已移除，
-// 只剩管理域与服务端口、以及供应商/路由透传（50080 子进程需要）。
+// 只剩管理域与服务端口、以及供应商/路由透传（30080 子进程需要）。
 type Config struct {
 	BaseURL         string `json:"base_url"`
 	DefaultPassword string `json:"default_password"`

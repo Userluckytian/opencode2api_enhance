@@ -9,7 +9,7 @@ import (
 	"time"
 )
 
-// fetchProviderModels 从供应商服务（50080）的 /v1/models 拉取模型 ID 列表。
+// fetchProviderModels 从供应商服务（30080）的 /v1/models 拉取模型 ID 列表。
 func fetchProviderModels(port uint16, key string) ([]string, error) {
 	url := fmt.Sprintf("http://127.0.0.1:%d/v1/models", port)
 	req, err := http.NewRequest("GET", url, nil)

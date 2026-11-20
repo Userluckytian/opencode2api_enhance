@@ -42,7 +42,7 @@ func providerCfgsForProcess(cfgs []ProviderCfg) []ProviderCfg {
 }
 
 // providersWithoutCustom 生成实例/网关配置时剔除自定义源：
-// 自定义源已迁到供应商服务（50080），不再随 OpenCode 池子进程启动/传播。
+// 自定义源已迁到供应商服务（30080），不再随 OpenCode 池子进程启动/传播。
 func providersWithoutCustom(cfgs []map[string]any) []map[string]any {
 	out := make([]map[string]any, 0, len(cfgs))
 	for _, p := range cfgs {
@@ -106,7 +106,7 @@ func rebuildVendors() {
 	configMu.RLock()
 	cfgs := append([]ProviderCfg(nil), providersCfg...)
 	configMu.RUnlock()
-	// 供应商服务只装配自定义源；OpenCode/内建厂商不进 50080。
+	// 供应商服务只装配自定义源；OpenCode/内建厂商不进 30080。
 	cfgs = providerCfgsForProcess(cfgs)
 
 	old := map[string]contract.Vendor{}
@@ -154,7 +154,7 @@ func rebuildVendors() {
 	skipped := []string{}
 	if providerServiceMode {
 		// 供应商服务：只注册自定义源；没有 custom 条目时保持空集合，
-		// 绝不回退到「自动注册内建厂商」（否则 OpenCode 又混进 50080）。
+		// 绝不回退到「自动注册内建厂商」（否则 OpenCode 又混进 30080）。
 		for _, pc := range cfgs {
 			if pc.ID == "" || (pc.Enabled != nil && !*pc.Enabled) {
 				continue
@@ -594,7 +594,7 @@ func applyCustomProvidersSave(m *manager.Manager, inputs []customProviderInput) 
 	}()
 
 	// manager 配置透传：供应商服务与主进程共用同一 config.json，custom 保存后
-	// 50080 经配置监视热重建（不再向实例/网关 runtime 配置传播，见 2026-10 拆分）。
+	// 30080 经配置监视热重建（不再向实例/网关 runtime 配置传播，见 2026-10 拆分）。
 	if m != nil {
 		if err := m.SyncCustomProviders(configPath, customEntriesForManager(kept)); err != nil {
 			slog.Warn("sync custom providers to manager config failed", "error", err)

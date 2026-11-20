@@ -222,7 +222,7 @@ export default function CustomModelsPage({ toast }: { toast: (msg: string, ok?: 
     const id = window.setInterval(() => setTestElapsed(Math.floor((Date.now() - t0) / 1000)), 500)
     return () => window.clearInterval(id)
   }, [testing])
-  // 供应商服务（自定义源 + 插件供应商的独立入口，默认 50080）
+  // 供应商服务（自定义源 + 插件供应商的独立入口，默认 30080）
   const [provSvc, setProvSvc] = useState<ProviderServiceStatus | null>(null)
   const [provBusy, setProvBusy] = useState(false)
   const [provModelsRefreshing, setProvModelsRefreshing] = useState(false)
@@ -734,7 +734,7 @@ export default function CustomModelsPage({ toast }: { toast: (msg: string, ok?: 
       // 密钥获取失败不阻断：面板照常打开，接入信息区显示占位与指引
     }
     // gateway 参数 = 「全链路测试」该打的模型入口。2026-10 拆分后插件/自定义源的
-    // 模型入口在**供应商服务**（默认 127.0.0.1:50080/v1），不再是管理面板同源的
+    // 模型入口在**供应商服务**（默认 127.0.0.1:30080/v1），不再是管理面板同源的
     // /v1（40000 不路由插件模型，经它测必报 400 Model is unavailable）。
     // 优先用运行时的 provider-service 状态地址；拿不到才回退本页 origin（旧形态）。
     let gw = `${window.location.origin}/v1`
@@ -900,7 +900,7 @@ export default function CustomModelsPage({ toast }: { toast: (msg: string, ok?: 
           </h1>
           <p className="text-zinc-500 text-xs mt-1">
             接入自带 API Key 的第三方模型供应商（OpenAI / Anthropic / Gemini 三种协议），可同时接入多个。
-            保存后模型进入 /v1/models（模型名带 <code className="bg-zinc-100 px-1 rounded">源ID/</code> 前缀），调用、日志与统计全部复用供应商服务（50080）。
+            保存后模型进入 /v1/models（模型名带 <code className="bg-zinc-100 px-1 rounded">源ID/</code> 前缀），调用、日志与统计全部复用供应商服务（30080）。
           </p>
         </div>
         <div className="flex items-center gap-2">
@@ -958,11 +958,11 @@ export default function CustomModelsPage({ toast }: { toast: (msg: string, ok?: 
           <div className="rounded-xl border border-zinc-100 bg-zinc-50/60 p-4">
             <div className="text-[12px] text-zinc-500 mb-1.5">供应商 API 地址（自定义源 + 插件）</div>
             <button
-              onClick={() => void copyText(provSvc?.address ?? 'http://127.0.0.1:50080/v1', '供应商 API 地址')}
+              onClick={() => void copyText(provSvc?.address ?? 'http://127.0.0.1:30080/v1', '供应商 API 地址')}
               className="flex items-center gap-1 text-teal-700 hover:underline"
               title="点击复制"
             >
-              <code className="text-[13px]">{provSvc?.address ?? 'http://127.0.0.1:50080/v1'}</code>
+              <code className="text-[13px]">{provSvc?.address ?? 'http://127.0.0.1:30080/v1'}</code>
               <Copy size={12} />
             </button>
             <div className="mt-1 text-[11px] text-zinc-400">OpenCode 免费池仍用统一网关（40080），两者互不影响</div>

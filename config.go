@@ -86,7 +86,7 @@ func saveConfigWithWriter(path string, cfg AppConfig, writer string) error {
 // applyConfig 把配置应用到进程内全局状态（热重载与启动共用）。
 //
 // 注意：providers 变化必须重建厂商聚合器，否则新加的 custom 源在供应商服务
-// （50080）热重载后仍不可见（它只在进程启动时装配过一次）。
+// （30080）热重载后仍不可见（它只在进程启动时装配过一次）。
 // rebuildVendors 需要读 configMu（RLock），因此必须在**释放 configMu 之后**调用。
 func applyConfig(cfg AppConfig) {
 	configMu.Lock()

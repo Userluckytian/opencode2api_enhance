@@ -211,7 +211,7 @@ export default function SettingsPage({
               <tr className="border-t border-zinc-100">
                 <td className="px-3 py-2">供应商服务</td>
                 <td className="px-3 py-2 font-mono">{config?.provider_port || '—'}</td>
-                <td className="px-3 py-2 font-mono">{config?.provider_port_effective ?? 50080}</td>
+                <td className="px-3 py-2 font-mono">{config?.provider_port_effective ?? 30080}</td>
                 <td className="px-3 py-2 text-zinc-400 text-[11px]">见诊断页</td>
                 <td className="px-3 py-2 text-zinc-500">自定义源 + 插件供应商入口</td>
               </tr>

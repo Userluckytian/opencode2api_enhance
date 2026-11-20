@@ -1,7 +1,7 @@
 # 自定义模型源使用指南
 
 > 面板第七页「自定义模型」——用你自己的 API Key 接入任意第三方模型供应商。
-> 2026-10 起自定义源与插件供应商独立到**供应商服务**（默认 `127.0.0.1:50080`），
+> 2026-10 起自定义源与插件供应商独立到**供应商服务**（默认 `127.0.0.1:30080`），
 > 不再与 OpenCode 免费池（统一网关 40080）混在一起。
 
 ## 这是什么
@@ -31,12 +31,12 @@
 之后在任意客户端：
 
 ```bash
-# 模型列表：自定义模型带 {源ID}/ 前缀（供应商服务端口 50080）
-curl http://127.0.0.1:50080/v1/models \
+# 模型列表：自定义模型带 {源ID}/ 前缀（供应商服务端口 30080）
+curl http://127.0.0.1:30080/v1/models \
   -H 'Authorization: Bearer sk-unified-local'
 
 # 对话（三种入站协议都行，OpenAI / Claude / Responses）
-curl http://127.0.0.1:50080/v1/chat/completions \
+curl http://127.0.0.1:30080/v1/chat/completions \
   -H 'Authorization: Bearer sk-unified-local' \
   -H 'Content-Type: application/json' \
   -d '{"model":"myglm/glm-4.7","messages":[{"role":"user","content":"你好"}]}'
