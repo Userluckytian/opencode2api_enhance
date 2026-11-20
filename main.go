@@ -569,9 +569,20 @@ func registerHTTPRoutes(mux *http.ServeMux, managerInst *manager.Manager, plugin
 
 	// 前端静态托管
 	if distDir := frontendDistDir(); distDir != "" {
-		mux.Handle("/assets/", http.StripPrefix("/assets/", http.FileServer(http.Dir(filepath.Join(distDir, "assets")))))
+		// 缓存策略（2026-11-20 事故）：此前两者都不发 Cache-Control，WebView2/浏览器会按
+		// 启发式规则（Last-Modified 之后经过时长的 10%）长期缓存 index.html。于是升级到
+		// 新版本后，外壳仍加载缓存里的旧 bundle —— 表现为「设置页还显示旧版本号」且
+		// 「已删除的页面（如 Kilo）还在」。
+		//   · /assets/*（文件名带内容 hash）→ 长期强缓存，内容一变文件名就变
+		//   · index.html 与顶层静态        → 每次重新校验（304 很便宜）
+		assetServer := http.StripPrefix("/assets/", http.FileServer(http.Dir(filepath.Join(distDir, "assets"))))
+		mux.HandleFunc("/assets/", func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
+			assetServer.ServeHTTP(w, r)
+		})
 		fileServer := http.FileServer(http.Dir(distDir))
 		mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Cache-Control", "no-cache, must-revalidate")
 			switch {
 			case r.URL.Path == "/" || r.URL.Path == "/index.html":
 				http.ServeFile(w, r, filepath.Join(distDir, "index.html"))
