@@ -288,6 +288,9 @@ func (v *Vendor) CountAuthCooling() int { return v.pool.countAuthCooling() }
 // 现按「目录只用于展示、路由覆盖全池」拆分（见 docs/issue-log/2026-11-20.md #1）。
 func (v *Vendor) ListModels(ctx context.Context) ([]contract.Model, error) {
 	tried := map[int]bool{}
+	// 单个 key 的响应也可能重复列出同一个模型（部分聚合站会），去重后再入目录：
+	// 否则 /v1/models 会出现同名重复项。旧版靠「多 key 并集」的 seen 顺带去了重。
+	seen := map[string]bool{}
 	var ids []string
 	var lastErr error
 	someOK := false
@@ -317,9 +320,11 @@ func (v *Vendor) ListModels(ctx context.Context) ([]contract.Model, error) {
 		}
 		someOK = true
 		for _, id := range perKey {
-			if id != "" {
-				ids = append(ids, id)
+			if id == "" || seen[id] {
+				continue
 			}
+			seen[id] = true
+			ids = append(ids, id)
 		}
 		break // 拿到一个 key 的完整目录就够，不再问其余 key
 	}

@@ -315,7 +315,7 @@
 | A9 | 向后兼容 | `health` 旧配置加载不报错、key 数不变 | 自动化 + 端到端 | ✅ 枚举未变；隔离实例 `health` 源正常装配 |
 | A10 | 安全 | 新增接口不返回 key 明文；`git ls-files` 无敏感文件 | 自动化（执行方） | ✅ `TestKeyStatesNoPlaintext` + 端点实测 309 条 0 泄露 |
 | A11 | 构建 | `go build ./... && go vet ./... && go test ./...` 与 `npx tsc -b && npm run build` 全绿 | 自动化（执行方） | ⚠️ 见下：仅既有失败（`core/manager` 4 条 callmetric 时间炸弹、`web` 包 `undefined: App`），与本阶段无关；其余全绿，`npm run build` 通过 |
-| A12 | 代码审查 | 结论 ✅ 或 ⚠️（问题已登记） | 独立角色 | ⚠️ 独立子代理不可用，改由实现方自查；已修 2 项，建议补审 |
+| A12 | 代码审查 | 结论 ✅ 或 ⚠️（问题已登记） | 独立角色 | ⚠️ 独立子代理三次均返回「all accounts are temporarily unavailable」，改由实现方逐文件审查 + `go test -race`；审查发现并修复 1 项（单 key 采样丢失去重，`git diff` 复核）；**建议合并后补一次独立审查** |
 
 **跳过项（本次如实登记，非缺陷）**
 
