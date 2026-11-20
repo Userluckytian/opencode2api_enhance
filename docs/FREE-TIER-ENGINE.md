@@ -89,7 +89,16 @@ CI（`.github/workflows/build-release.yml`）按矩阵交叉构建三平台：
 - **出口代理**：多行，每行一个（默认 `direct`）；关闭 WARP 时免费通道回落到该列表。
 保存后面板重写配置并重启引擎生效。
 
-### 通道顺序：WARP 优先 → 密钥兜底
+### 通道：v2.0.9 起只有匿名（WARP / 代理出口）
+
+> **v2.0.9 变更**：免费层移除了 `engine_zen_keys` / `engine_go_keys`，不再有 key 兜底。
+> 匿名通道是唯一通道，引擎配置里 `anonymous` 恒为 `true`。
+> 代价：匿名连续失败 6 次触发熔断（1h 起，逐次翻倍至 24h）期间，请求会**直接失败**。
+> 依据：额度按 (session, egress /64, project) 记账，换 key 并不能再生额度
+> （见 [FREE-TIER-QUOTA-MODEL.md](FREE-TIER-QUOTA-MODEL.md)）。
+> 出口池配置已移到管理面板「设置 → 免费层出口池（WARP）」。
+
+以下为 v2.0.9 之前的历史语义，保留备查。
 
 面板「通道顺序」有两种档位（对应管理面配置 `engine_channel_order`）：
 
