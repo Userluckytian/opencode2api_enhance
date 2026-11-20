@@ -55,9 +55,10 @@ type Config struct {
 	EngineWarpSourceIPv6 string `json:"engine_warp_source_ipv6,omitempty"`
 	// EngineProxies 引擎出口代理列表（每项 http/https/socks5/socks5h 或 direct）。
 	EngineProxies []string `json:"engine_proxies,omitempty"`
-	// EngineZenKeys / EngineGoKeys 引擎的可选付费密钥池（空 = 纯匿名免费层）。
-	EngineZenKeys []string `json:"engine_zen_keys,omitempty"`
-	EngineGoKeys  []string `json:"engine_go_keys,omitempty"`
+	// 注意：v2.0.9 起移除了 engine_zen_keys / engine_go_keys。
+	// 免费层只走匿名通道（WARP / 代理出口），不再有 key 兜底——额度按
+	// (session, egress /64, project) 记账，换 key 并不能再生额度
+	// （见 docs/FREE-TIER-QUOTA-MODEL.md）。旧配置里的这两个键在加载时被忽略。
 	// EngineRetryMaxAttempts 引擎单请求重试上限（0 = 默认 3）。
 	EngineRetryMaxAttempts int `json:"engine_retry_max_attempts,omitempty"`
 	// EngineAttemptTimeoutSec 引擎单次上游尝试的超时上限（秒，0 = 不设上限，沿用请求级超时）。
@@ -269,10 +270,6 @@ func (m *Manager) ConfigGet(key string) (string, error) {
 		return cfg.EngineWarpSourceIPv6, nil
 	case "engine_proxies":
 		return strings.Join(cfg.EngineProxies, "\n"), nil
-	case "engine_zen_keys":
-		return strings.Join(cfg.EngineZenKeys, "\n"), nil
-	case "engine_go_keys":
-		return strings.Join(cfg.EngineGoKeys, "\n"), nil
 	case "engine_retry_max_attempts":
 		return strconv.Itoa(cfg.EngineRetryMaxAttempts), nil
 	case "engine_models_refresh_sec":
@@ -401,10 +398,6 @@ func (m *Manager) ConfigSet(key, value string) error {
 		cfg.EngineWarpSourceIPv6 = strings.TrimSpace(value)
 	case "engine_proxies":
 		cfg.EngineProxies = splitLinesOrCommas(value)
-	case "engine_zen_keys":
-		cfg.EngineZenKeys = splitLinesOrCommas(value)
-	case "engine_go_keys":
-		cfg.EngineGoKeys = splitLinesOrCommas(value)
 	case "engine_retry_max_attempts":
 		v, err := parseInt()
 		if err != nil {
@@ -554,10 +547,6 @@ type ConfigView struct {
 	EngineWarpPoolSize     int      `json:"engine_warp_pool_size"`
 	EngineWarpSourceIPv6   string   `json:"engine_warp_source_ipv6"`
 	EngineProxies          []string `json:"engine_proxies"`
-	EngineZenKeys          []string `json:"engine_zen_keys"`
-	EngineGoKeys           []string `json:"engine_go_keys"`
-	EngineZenKeyCount      int      `json:"engine_zen_key_count"`
-	EngineGoKeyCount       int      `json:"engine_go_key_count"`
 	EngineRetryMaxAttempts int      `json:"engine_retry_max_attempts"`
 	EngineModelsRefreshSec int      `json:"engine_models_refresh_sec"`
 	// EngineFreeOnly 只暴露/路由免费模型（默认 true）。
@@ -602,10 +591,6 @@ func (m *Manager) ConfigViewOf() ConfigView {
 		EngineWarpPoolSize:     cfg.EngineWarpPoolSize,
 		EngineWarpSourceIPv6:   cfg.EngineWarpSourceIPv6,
 		EngineProxies:          cfg.EngineProxies,
-		EngineZenKeys:          cfg.EngineZenKeys,
-		EngineGoKeys:           cfg.EngineGoKeys,
-		EngineZenKeyCount:      len(cfg.EngineZenKeys),
-		EngineGoKeyCount:       len(cfg.EngineGoKeys),
 		EngineRetryMaxAttempts: cfg.EngineRetryMaxAttempts,
 		EngineModelsRefreshSec: cfg.EngineModelsRefreshSec,
 		EngineFreeOnly:         engineFreeOnly(cfg),

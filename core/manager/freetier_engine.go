@@ -112,8 +112,6 @@ func (m *Manager) EngineBinPath() string {
 type engineConfig struct {
 	Listen      string            `json:"listen"`
 	ServerKeys  []string          `json:"server_keys"`
-	ZenKeys     []string          `json:"zen_keys,omitempty"`
-	GoKeys      []string          `json:"go_keys,omitempty"`
 	Anonymous   bool              `json:"anonymous"`
 	Warp        engineWarpConfig  `json:"warp"`
 	Proxies     []string          `json:"proxies"`
@@ -252,14 +250,14 @@ func (m *Manager) buildEngineConfigBytes() ([]byte, error) {
 	}
 
 	port := m.managerGatewayPort()
-	// WARP 出口池大小：未显式设置时按 key 数量自动推导（额度最大化）。
+	// WARP 出口池大小：未显式设置时用默认值。
 	//
-	// 引擎把 key 均匀绑定到出口（proxyIndex = i % len(transports)），而
-	// 上游免费额度按「key × 出口 IP」计算：出口数不足时多个 key 共享同一 IP，
-	// 会一起 429。因此出口数至少要与 key 数量同量级。
+	// 历史：早先按 key 数量自动推导（key 越多出口越多）。v2.0.9 起不再有 key，
+	// 出口池是唯一的「额度再生」旋钮——每个出口对应 Cloudflare 分配的一个
+	// 独立 /64，额度按 /64 记账（docs/FREE-TIER-QUOTA-MODEL.md）。
 	poolSize := cfg.EngineWarpPoolSize
 	if poolSize <= 0 {
-		poolSize = autoWarpPoolSize(len(cfg.EngineZenKeys) + len(cfg.EngineGoKeys))
+		poolSize = defaultWarpPoolSize
 	}
 	retryMax := cfg.EngineRetryMaxAttempts
 	if retryMax <= 0 {
@@ -277,8 +275,7 @@ func (m *Manager) buildEngineConfigBytes() ([]byte, error) {
 	ec := engineConfig{
 		Listen:     fmt.Sprintf("127.0.0.1:%d", port),
 		ServerKeys: []string{effectiveGatewayKey(cfg)},
-		ZenKeys:    cfg.EngineZenKeys,
-		GoKeys:     cfg.EngineGoKeys,
+		// 注意：v2.0.9 起不再写 zen_keys / go_keys——免费层只走匿名通道。
 		// Anonymous 决定引擎是否启用匿名（无 key）通道，也就是「WARP 优先」
 		// 这档能不能成立。
 		//
@@ -621,32 +618,21 @@ func waitPortClosed(port uint16, timeout time.Duration) error {
 	return fmt.Errorf("端口 %d 未在 %v 内释放", port, timeout)
 }
 
-func autoWarpPoolSize(keyCount int) int {
-	// 额度主要绑 session id，而不是出口 IP（见引擎 sessions.go：同一对话耗尽后
-	// 换任何新出口都仍 429，反而把整池烧掉 24h）。所以出口多不等于额度多，
-	// 盲目开大只会拖慢启动（每个出口注册 10~90s）并加速冷却消耗。
-	//
-	// 策略：小起点 + 按需扩容
-	//   - 无 key（纯匿名）：2 个（匿名本身按 IP 限流，多出口收益递减）
-	//   - 有 key：4 个（key 能开新 session，多出口才有意义）
-	//   - 上限 4，不够时由诊断页/面板手动调大
-	if keyCount <= 0 {
-		return 2
-	}
-	return 4
-}
-
-// engineAnonymousEnabled 引擎匿名通道开关（按通道顺序）。
+// defaultWarpPoolSize 未配置时的出口池大小。
 //
-//   - warp_first（默认）：**恒开**。引擎路由是「匿名(WARP) → key tier」，
-//     匿名不通才落到 key，于是 key 的额度只用来兜 WARP 兜不住的场景。
-//   - key_first：只在完全没有 key 时才开（v2.1 之前的行为），保留作回退档。
+// 额度主要绑 session id，而不是出口 IP（见引擎 sessions.go：同一对话耗尽后
+// 换任何新出口都仍 429，反而把整池烧掉 24h）。所以出口多不等于额度多，
+// 盲目开大只会拖慢启动（每个出口注册 10~90s）并加速冷却消耗。
+// v2.0.9 起没有 key 兜底，出口池是唯一的旋钮，但起点仍要小：不够时由面板调大。
+const defaultWarpPoolSize = 4
+
+// engineAnonymousEnabled 引擎匿名通道开关。
+//
+// v2.0.9 起免费层不再有 key，匿名通道是**唯一**通道，所以恒为 true。
+// 保留函数是为了单一出口，便于将来若有需要再加回分档。
 //
 // 注意：WARP 开关本身（engine_warp_enabled）与本函数正交。开匿名通道但
 // 关掉 WARP 时，引擎会走「出口代理」列表的匿名通道（不是 WARP）。
 func engineAnonymousEnabled(cfg Config) bool {
-	if engineChannelOrder(cfg) == ChannelOrderKeyFirst {
-		return len(cfg.EngineZenKeys) == 0 && len(cfg.EngineGoKeys) == 0
-	}
 	return true
 }

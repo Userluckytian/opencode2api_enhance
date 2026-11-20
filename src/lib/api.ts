@@ -330,10 +330,7 @@ export type ConfigView = {
   /** 出口代理列表（http/https/socks5/socks5h 或 direct） */
   engine_proxies: string[]
   /** 可选付费密钥池（空 = 纯匿名免费层） */
-  engine_zen_keys: string[]
-  engine_go_keys: string[]
-  engine_zen_key_count: number
-  engine_go_key_count: number
+  // v2.0.9 起移除：免费层只走匿名通道（WARP/代理出口），不再有 key。
   engine_retry_max_attempts: number
   engine_models_refresh_sec: number
   /** 只暴露/路由免费模型（写引擎 models.free_only；默认 true） */
