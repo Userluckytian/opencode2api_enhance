@@ -494,8 +494,9 @@ func (p *keyPool) keysSnapshot() []string {
 	return out
 }
 
-// needProbeIdxs 返回需要补测的 key 下标：可用、有实证、且成功率未满分（失败过）。
-// 上限 max。健康探测只补测这些 key——大池（几百个 key）全量探测等于每轮白烧一遍额度。
+// needProbeIdxs 返回需要补测的 key 下标：可用且仍有未清零的连续失败计数。
+// 上限 max。健康探测只补测这些 key——大池（几百个 key）全量探测等于每轮白烧一遍额度；
+// 补测成功后 consecFails 归零，该 key 就不再被探测。
 func (p *keyPool) needProbeIdxs(max int) []int {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -508,7 +509,7 @@ func (p *keyPool) needProbeIdxs(max int) []int {
 		if !k.available(now) {
 			continue
 		}
-		if k.samples == 0 || k.okRate >= 1.0 {
+		if k.samples == 0 || k.consecFails == 0 {
 			continue
 		}
 		out = append(out, i)

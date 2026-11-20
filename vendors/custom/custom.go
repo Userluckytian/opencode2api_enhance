@@ -86,6 +86,8 @@ type Vendor struct {
 	// 少数 key 上；负缓存记的是「谁没有」，路由仍然覆盖全池（见 docs/issue-log/2026-11-20.md #1）。
 	negMu sync.Mutex
 	neg   map[string]map[int]time.Time
+	// negCount 当前负缓存条目数（模型×key），用于封顶内存（见 negMaxEntries）。
+	negCount int
 }
 
 // New 构造自定义模型源厂商。
@@ -268,6 +270,7 @@ func (v *Vendor) ResetKeys() {
 	v.pool.reset()
 	v.negMu.Lock()
 	v.neg = map[string]map[int]time.Time{}
+	v.negCount = 0
 	v.negMu.Unlock()
 }
 
@@ -374,9 +377,10 @@ func (v *Vendor) ListModels(ctx context.Context) ([]contract.Model, error) {
 // negTTL 负缓存有效期：过期后重新允许该 key 试这个模型（上游可能补齐了权限/订阅）。
 const negTTL = 30 * time.Minute
 
-// negMaxModels 负缓存容量上限（模型数）。超限整体清空——代价只是一次重撞，
-// 远好过为淘汰策略引入 LRU 复杂度。
-const negMaxModels = 4096
+// negMaxEntries 负缓存条目上限（模型 × key 对）。超限整体清空——代价只是一次重撞，
+// 远好过为淘汰策略引入 LRU 复杂度。按**条目**而非模型数封顶：一个模型最多可能
+// 挂 300+ 个 key，只按模型数限制挡不住内存。
+const negMaxEntries = 8192
 
 // isNeg 该 (模型, key) 是否已知「不提供」且仍在有效期内。
 func (v *Vendor) isNeg(model string, idx int) bool {
@@ -392,6 +396,9 @@ func (v *Vendor) isNeg(model string, idx int) bool {
 	}
 	if time.Now().After(exp) {
 		delete(m, idx)
+		if v.negCount > 0 {
+			v.negCount--
+		}
 		if len(m) == 0 {
 			delete(v.neg, model)
 		}
@@ -407,13 +414,17 @@ func (v *Vendor) markNeg(model string, idx int) {
 	if v.neg == nil {
 		v.neg = map[string]map[int]time.Time{}
 	}
-	if len(v.neg) >= negMaxModels {
+	if v.negCount >= negMaxEntries {
 		v.neg = map[string]map[int]time.Time{}
+		v.negCount = 0
 	}
 	m := v.neg[model]
 	if m == nil {
 		m = map[int]time.Time{}
 		v.neg[model] = m
+	}
+	if _, exists := m[idx]; !exists {
+		v.negCount++
 	}
 	m[idx] = time.Now().Add(negTTL)
 }
@@ -422,7 +433,13 @@ func (v *Vendor) markNeg(model string, idx int) {
 func (v *Vendor) clearNeg(model string) {
 	v.negMu.Lock()
 	defer v.negMu.Unlock()
-	delete(v.neg, model)
+	if m := v.neg[model]; m != nil {
+		v.negCount -= len(m)
+		if v.negCount < 0 {
+			v.negCount = 0
+		}
+		delete(v.neg, model)
+	}
 }
 
 // hasModel 目标模型（上游名）是否在本源并集目录中（缓存兜底态也计入）。
