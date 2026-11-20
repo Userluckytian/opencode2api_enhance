@@ -1402,12 +1402,16 @@ function ChannelStatusBar({
     //
     // 也不能断言「引擎会自动跳过匿名通道」—— 那要等熔断真的跳闸。
     lane = 'fallback'
-    laneLabel = keyCount > 0 ? 'WARP 不可用，回落到 key' : '匿名直连'
+    // 标签只能描述「顺序」，不能断言「已在用 key」：面板拿不到引擎进程内的熔断状态
+    // （breakerUntil 不外露），而实际顺序是「匿名 → 失败达阈值 → key」。
+    // 早先这里写死「WARP 不可用，回落到 key」，与下面那行「先试匿名通道」自相矛盾，
+    // 会让人以为请求根本没走匿名（2026-11-20 用户反馈）。
+    laneLabel = keyCount > 0 ? '匿名通道（失败后回落 key）' : '匿名直连'
     // 阈值从后端取（单一事实源）：后端调参时前端不会继续说「6 次」。
     const breakerThreshold = config?.engine_anonymous_backoff_threshold
     laneHint =
       keyCount > 0
-        ? `WARP 出口未就绪：引擎先试匿名通道，连续失败达 ${breakerThreshold ?? 6} 次后熔断并改走 key`
+        ? `WARP 出口未就绪：先走匿名通道（本机 IP 直连）；连续失败达 ${breakerThreshold ?? 6} 次后熔断，改走 ${keyCount} 个 key。key 的 429 是额度限流，不等于 key 失效`
         : '未配 key 且 WARP 未启用，全靠本机 IP（易 429）'
     cls = 'bg-amber-50 text-amber-800 border-amber-200'
   }
