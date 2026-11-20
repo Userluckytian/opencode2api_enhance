@@ -3,8 +3,10 @@
 // 三种调度（providers[].params.key_strategy，仅作用于自定义源，与实例池 route_mode 无关）：
 //   - round_robin（默认）：可用 key 间均匀轮询
 //   - failover          ：按配置顺序优先（主 key 可用时恒用它，冷却/禁用才降级备用）
-//   - health            ：健康优先——按成功率（EWMA）降序、样本数降序、平均延迟升序挑选，
-//     让表现最好的 key 稳定回答，变差才落到下一个（借鉴 model-gateway 的质量分排序）
+//   - health            ：加权轮询——成功率（EWMA）越高的 key 被选中概率越大，
+//     但仍覆盖全池；样本不足的 key 有探索加成。冷却/熔断/禁用的 key 不参与。
+//     （旧实现按「成功率→样本数」排序取第一名，结果第一个有样本的 key 恒胜，
+//     整个池退化成单 key、其余额度闲置。）
 //
 // 健康语义：429/限流 → 冷却（Retry-After，缺省 60s）到期自动回池；
 // 401/403（key 失效）→ 按 key_403_cooldown 冷却（缺省 600s）到期自动回池重试；
@@ -14,8 +16,8 @@
 package custom
 
 import (
+	"math"
 	"net/http"
-	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -45,6 +47,23 @@ const circuitCooldown = 30 * time.Second
 // 健康分数平滑系数（EWMA）：样本越多，单次波动影响越小。
 const healthAlpha = 0.3
 
+// 加权轮询参数（health 策略）：
+//   - healthExploreSamples：样本数低于它的 key 权重放大，保证新 key 有机会被验证；
+//   - healthExploreBoost：放大倍数；
+//   - healthWeightFloor：成功率极低的 key 仍保留极小概率，避免永久饿死；
+//   - healthGoldenRatio：低差异序列的步长（黄金比例小数部分），让连续的 rr
+//     均匀铺满权重轴，而不是像 `rr/1000` 那样前几百次全挤在轴的一端。
+//
+// 早先的实现是「按成功率/样本数排序取第一名」，结果是第一个有样本的 key 恒胜
+// （samples 降序），整个池退化成单 key、其余额度全闲置。改成加权轮询后既能
+// 优先用表现好的 key，又保证覆盖全池。
+const (
+	healthExploreSamples = 3
+	healthExploreBoost   = 2.0
+	healthWeightFloor    = 0.01
+	healthGoldenRatio    = 0.6180339887498949
+)
+
 // keyState 单个 key 的运行时状态。
 type keyState struct {
 	value        string
@@ -52,10 +71,12 @@ type keyState struct {
 	disabled     bool // key_403_cooldown=0 时 401/403 → 永久禁用（运行期内不再使用）
 	authCoolingUntil time.Time // 401/403 冷却到期时间（key_403_cooldown>0 时使用）
 	consecFails  int  // 连续失败次数（熔断：达阈值进入 circuitUntil 冷却）
+	consec403    int  // 连续 403 次数（软失败：达 authSoftThreshold 才按失效处理）
 	circuitUntil time.Time
 	samples      int  // 已记录请求次数（health 策略排序用）
 	okRate       float64 // 成功率 EWMA，初始乐观 1.0（无数据视为可用）
 	latEWMA      float64 // 成功请求平均延迟（毫秒）EWMA，仅成功时更新
+	lastErr      string  // 最近一次被标记的原因（面板展示用，不含明文）
 }
 
 // available 该 key 当前是否可用（未禁用、不在限流冷却/401-403冷却/熔断期）。
@@ -71,6 +92,15 @@ type KeyPoolStatus struct {
 	AuthCooling int `json:"auth_cooling"` // 401/403 冷却中（到期自动恢复）
 	CircuitOpen int `json:"circuit_open"` // 连续失败熔断中（阈值后自动重试）
 	Disabled  int `json:"disabled"`       // key_403_cooldown=0 时被永久禁用
+}
+
+// KeyStateView 单个 key 的运行态（面板展示用；**不含明文**，只回末 4 位）。
+type KeyStateView struct {
+	KeyTail string `json:"key_tail"`
+	// State: available | cooling | auth_cooling | circuit_open | disabled
+	State string `json:"state"`
+	// LastError 最近一次被标记的原因（人话，不含 key 内容）。
+	LastError string `json:"last_error,omitempty"`
 }
 
 // keyPool 一源一池。
@@ -125,49 +155,20 @@ func (p *keyPool) tryAcquire(tried map[int]bool) (string, int, bool) {
 	return p.tryAcquireLocked(tried, p.nowFn())
 }
 
-// tryAcquirePrefer 优先从 preferred（key 下标子集，如「并集目录中能提供目标模型
-// 的 key」）里挑可用且未试过的 key，子集无可挑时退回全池普通调度。
-// round_robin 在子集内同样轮询；failover 在子集内保持粘主。
-func (p *keyPool) tryAcquirePrefer(tried map[int]bool, preferred []int) (string, int, bool) {
-	return p.tryAcquirePreferSticky(tried, preferred, -1)
-}
-
-// tryAcquirePreferSticky 在 tryAcquirePrefer 基础上支持会话粘性：stickyIdx >= 0
-// 时优先命中该 key（续写同 key / 会话级粘性），不可用或已试过再回退 preferred
-// 子集与全池普通调度。命中 sticky 不推进 round_robin 游标——同一会话的续写
-// 重连稳定落在同一 key，避免重复输出/串对话。
-func (p *keyPool) tryAcquirePreferSticky(tried map[int]bool, preferred []int, stickyIdx int) (string, int, bool) {
+// tryAcquireSticky 在 tryAcquire 基础上支持会话粘性：stickyIdx >= 0 且可用、
+// 本请求未试过时优先命中该 key（续写同 key / 会话级粘性），否则回退全池普通调度。
+// 命中 sticky 不推进 round_robin 游标——同一会话的续写重连稳定落在同一 key，
+// 避免重复输出/串对话。
+//
+// 历史：早期还有「按模型亲和子集优先」的 tryAcquirePreferSticky，但它会让路由
+// 只在被采样的少数 key 上轮询（309 key 的源实际只用 8 个）。亲和已移除，见
+// docs/issue-log/2026-11-20.md #1。
+func (p *keyPool) tryAcquireSticky(tried map[int]bool, stickyIdx int) (string, int, bool) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	now := p.nowFn()
 	if stickyIdx >= 0 && stickyIdx < len(p.keys) && !tried[stickyIdx] && p.keys[stickyIdx].available(now) {
 		return p.keys[stickyIdx].value, stickyIdx, true
-	}
-	if len(preferred) > 0 {
-		if p.strategy == StrategyHealth {
-			// 健康优先：在模型亲和子集内按健康分挑选
-			if key, idx, ok := p.pickHealthLocked(tried, preferred, now); ok {
-				return key, idx, true
-			}
-		} else {
-			start := 0
-			if p.strategy == StrategyRoundRobin {
-				start = int(p.rr % uint64(len(preferred)))
-			}
-			for off := 0; off < len(preferred); off++ {
-				i := preferred[(start+off)%len(preferred)]
-				if i < 0 || i >= len(p.keys) {
-					continue
-				}
-				if tried[i] || !p.keys[i].available(now) {
-					continue
-				}
-				if p.strategy == StrategyRoundRobin {
-					p.rr++
-				}
-				return p.keys[i].value, i, true
-			}
-		}
 	}
 	return p.tryAcquireLocked(tried, now)
 }
@@ -179,7 +180,7 @@ func (p *keyPool) tryAcquireLocked(tried map[int]bool, now time.Time) (string, i
 		return "", -1, false
 	}
 	if p.strategy == StrategyHealth {
-		return p.pickHealthLocked(tried, nil, now)
+		return p.pickHealthLocked(tried, now)
 	}
 	start := 0
 	if p.strategy == StrategyRoundRobin {
@@ -198,79 +199,133 @@ func (p *keyPool) tryAcquireLocked(tried map[int]bool, now time.Time) (string, i
 	return "", -1, false
 }
 
-// pickHealthLocked 按健康分挑选可用且未试过的 key（调用方已持 p.mu）：
-// 成功率（EWMA）降序 → 样本数降序（有实证者优先于未测者）→ 平均延迟升序 → 配置序。
-// subset 非空时仅在子集内挑（模型亲和）；nil 表示全池。冷/禁用的 key 不参与。
-func (p *keyPool) pickHealthLocked(tried map[int]bool, subset []int, now time.Time) (string, int, bool) {
-	var cand []int
-	if len(subset) > 0 {
-		for _, i := range subset {
-			if i >= 0 && i < len(p.keys) && !tried[i] && p.keys[i].available(now) {
-				cand = append(cand, i)
-			}
-		}
-	} else {
-		for i, k := range p.keys {
-			if !tried[i] && k.available(now) {
-				cand = append(cand, i)
-			}
-		}
-	}
-	if len(cand) == 0 {
+// pickHealthLocked health 策略：按成功率加权的轮询（调用方已持 p.mu）。
+// 成功率越高被选中概率越大，但仍覆盖全池；样本不足的 key 有探索加成。
+func (p *keyPool) pickHealthLocked(tried map[int]bool, now time.Time) (string, int, bool) {
+	idx, ok := p.weightedPickLocked(tried, now)
+	if !ok {
 		return "", -1, false
 	}
-	sort.SliceStable(cand, func(a, b int) bool {
-		ka, kb := p.keys[cand[a]], p.keys[cand[b]]
-		if ka.okRate != kb.okRate {
-			return ka.okRate > kb.okRate
-		}
-		if ka.samples != kb.samples {
-			return ka.samples > kb.samples
-		}
-		if ka.latEWMA != kb.latEWMA {
-			return ka.latEWMA < kb.latEWMA
-		}
-		return cand[a] < cand[b]
-	})
-	idx := cand[0]
 	return p.keys[idx].value, idx, true
 }
 
+// weightedPickLocked 在可用且未试过的 key 上做加权抽签（权重轴由 rr 游标推进）。
+// 不用随机数：同一 rr 序列可复现，测试与排障都更稳定。
+func (p *keyPool) weightedPickLocked(tried map[int]bool, now time.Time) (int, bool) {
+	type cand struct {
+		idx int
+		w   float64
+	}
+	cands := make([]cand, 0, len(p.keys))
+	total := 0.0
+	for i, k := range p.keys {
+		if tried[i] || !k.available(now) {
+			continue
+		}
+		w := k.okRate
+		if k.samples < healthExploreSamples {
+			w *= healthExploreBoost
+		}
+		if w < healthWeightFloor {
+			w = healthWeightFloor
+		}
+		cands = append(cands, cand{i, w})
+		total += w
+	}
+	if len(cands) == 0 {
+		return -1, false
+	}
+	p.rr++
+	// 低差异序列（黄金比例）取点：连续 rr 在权重轴上均匀分布，且不依赖随机数，
+	// 同一 rr 序列可复现（测试与排障稳定）。
+	frac := float64(p.rr) * healthGoldenRatio
+	frac -= math.Floor(frac)
+	pos := frac * total
+	acc := 0.0
+	for _, c := range cands {
+		acc += c.w
+		if pos < acc {
+			return c.idx, true
+		}
+	}
+	return cands[len(cands)-1].idx, true
+}
+
 // recordResult 记录一次 key 请求的结果与耗时（health 策略排序依据）。
-// ok = 传输成功且 HTTP 2xx；失败不更新延迟（仅更新成功率）。
+// ok = 传输成功且 HTTP 2xx。
+//
+// 注意：调用方只对「key 级」结果调用它——404（模型不在该 key 上）、429（限流）、
+// 403（多为模型级无权限）都不该走到这里，否则健康 key 会被误熔断
+// （见 docs/issue-log/2026-11-20.md #1）。
 func (p *keyPool) recordResult(idx int, ok bool, latency time.Duration) {
+	if ok {
+		p.recordSuccess(idx, latency)
+		return
+	}
+	p.recordFail(idx, latency)
+}
+
+// recordSuccess 记一次成功：健康分拉高、连续失败/连续 403 清零。
+func (p *keyPool) recordSuccess(idx int, latency time.Duration) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if idx < 0 || idx >= len(p.keys) {
 		return
 	}
 	k := p.keys[idx]
-	v := 0.0
-	if ok {
-		v = 1.0
-	}
 	if k.samples == 0 {
 		// 首个样本直接落地（不再保留乐观初始值）
-		k.okRate = v
-		if ok {
-			k.latEWMA = float64(latency.Milliseconds())
-		}
+		k.okRate = 1.0
+		k.latEWMA = float64(latency.Milliseconds())
 	} else {
-		k.okRate = k.okRate*(1-healthAlpha) + v*healthAlpha
-		if ok {
-			k.latEWMA = k.latEWMA*(1-healthAlpha) + float64(latency.Milliseconds())*healthAlpha
-		}
+		k.okRate = k.okRate*(1-healthAlpha) + 1.0*healthAlpha
+		k.latEWMA = k.latEWMA*(1-healthAlpha) + float64(latency.Milliseconds())*healthAlpha
 	}
 	k.samples++
-	// 连续失败熔断：成功清零；连续失败达阈值 → 进入熔断冷却（到期自动重试）。
-	// 各策略（round_robin/failover/health）都受益：坏 key 不再被反复选中。
-	if ok {
-		k.consecFails = 0
+	k.consecFails = 0
+	k.consec403 = 0
+	k.lastErr = ""
+}
+
+// recordFail 记一次 key 级失败（传输错误 / 5xx）：连续失败达阈值进入熔断冷却。
+func (p *keyPool) recordFail(idx int, latency time.Duration) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if idx < 0 || idx >= len(p.keys) {
+		return
+	}
+	k := p.keys[idx]
+	if k.samples == 0 {
+		k.okRate = 0
 	} else {
-		k.consecFails++
-		if k.consecFails >= circuitOpenThreshold {
-			k.circuitUntil = p.nowFn().Add(circuitCooldown)
-		}
+		k.okRate = k.okRate * (1 - healthAlpha)
+	}
+	k.samples++
+	k.consecFails++
+	k.lastErr = "请求失败（传输错误或上游 5xx）"
+	if k.consecFails >= circuitOpenThreshold {
+		k.circuitUntil = p.nowFn().Add(circuitCooldown)
+	}
+}
+
+// authSoftThreshold 403 软失败阈值：同一 key 连续这么多次 403 才按失效处理。
+// 403 在多数聚合/中转站是「该模型无权限」「地区限制」「风控」，不是 key 坏了，
+// 一次就冷却 600s（甚至永久禁用）会把好 key 打入冷宫。
+const authSoftThreshold = 3
+
+// softAuthFail 403 软失败：只计数并换 key，连续 3 次才按 401/403 失效处理。
+// 成功一次即清零（recordSuccess），所以偶发 403 不会累积。
+func (p *keyPool) softAuthFail(idx int) {
+	p.mu.Lock()
+	if idx < 0 || idx >= len(p.keys) {
+		p.mu.Unlock()
+		return
+	}
+	p.keys[idx].consec403++
+	n := p.keys[idx].consec403
+	p.mu.Unlock()
+	if n >= authSoftThreshold {
+		p.authFail(idx)
 	}
 }
 
@@ -285,6 +340,7 @@ func (p *keyPool) cool(idx int, d time.Duration) {
 		return
 	}
 	p.keys[idx].coolingUntil = p.nowFn().Add(d)
+	p.keys[idx].lastErr = "429 限流冷却"
 }
 
 // authCool key 进入 401/403 冷却（到期自动回池重试）。
@@ -298,9 +354,11 @@ func (p *keyPool) authCool(idx int, d time.Duration) {
 		return
 	}
 	p.keys[idx].authCoolingUntil = p.nowFn().Add(d)
+	p.keys[idx].lastErr = "401/403 失效冷却"
 	// 401/403 冷却期间 key 不可用，其它限流/熔断标记一并清掉，避免状态叠加混乱。
 	p.keys[idx].coolingUntil = time.Time{}
 	p.keys[idx].consecFails = 0
+	p.keys[idx].consec403 = 0
 	p.keys[idx].circuitUntil = time.Time{}
 }
 
@@ -312,6 +370,7 @@ func (p *keyPool) disable(idx int) {
 		return
 	}
 	p.keys[idx].disabled = true
+	p.keys[idx].lastErr = "401/403 永久禁用"
 }
 
 // authFail 401/403 失效处理：按 key403Cooldown 分流——
@@ -334,6 +393,7 @@ func (p *keyPool) reset() {
 		k.coolingUntil = time.Time{}
 		k.authCoolingUntil = time.Time{}
 		k.consecFails = 0
+		k.consec403 = 0
 		k.circuitUntil = time.Time{}
 	}
 }
@@ -359,6 +419,37 @@ func (p *keyPool) status() KeyPoolStatus {
 		}
 	}
 	return st
+}
+
+// keyStates 逐 key 运行态快照（面板展示用；只回末 4 位，绝不含明文）。
+func (p *keyPool) keyStates() []KeyStateView {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	now := p.nowFn()
+	out := make([]KeyStateView, 0, len(p.keys))
+	for _, k := range p.keys {
+		state := "available"
+		switch {
+		case k.disabled:
+			state = "disabled"
+		case now.Before(k.authCoolingUntil):
+			state = "auth_cooling"
+		case now.Before(k.circuitUntil):
+			state = "circuit_open"
+		case now.Before(k.coolingUntil):
+			state = "cooling"
+		}
+		out = append(out, KeyStateView{KeyTail: keyTailOf(k.value), State: state, LastError: k.lastErr})
+	}
+	return out
+}
+
+// keyTailOf key 末 4 位（与面板/日志同款脱敏口径）。
+func keyTailOf(k string) string {
+	if len(k) <= 4 {
+		return strings.Repeat("*", len(k))
+	}
+	return "****" + k[len(k)-4:]
 }
 
 // countAuthCooling 当前 401/403 冷却中的 key 数（手动恢复按钮是否需要高亮等 UI 用）。
@@ -403,16 +494,25 @@ func (p *keyPool) keysSnapshot() []string {
 	return out
 }
 
-// availableIdxs 返回当前可用（未禁用、不在冷却期）的 key 下标（后台健康探测用）。
-func (p *keyPool) availableIdxs() []int {
+// needProbeIdxs 返回需要补测的 key 下标：可用且仍有未清零的连续失败计数。
+// 上限 max。健康探测只补测这些 key——大池（几百个 key）全量探测等于每轮白烧一遍额度；
+// 补测成功后 consecFails 归零，该 key 就不再被探测。
+func (p *keyPool) needProbeIdxs(max int) []int {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	now := p.nowFn()
 	var out []int
 	for i, k := range p.keys {
-		if k.available(now) {
-			out = append(out, i)
+		if len(out) >= max {
+			break
 		}
+		if !k.available(now) {
+			continue
+		}
+		if k.samples == 0 || k.consecFails == 0 {
+			continue
+		}
+		out = append(out, i)
 	}
 	return out
 }

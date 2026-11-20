@@ -533,6 +533,7 @@ func registerHTTPRoutes(mux *http.ServeMux, managerInst *manager.Manager, plugin
 	mux.HandleFunc("/api/admin/custom-providers/test", loggingMiddleware(requireAuth(customProvidersTestHandler())))
 	mux.HandleFunc("/api/admin/custom-providers/probe", loggingMiddleware(requireAuth(customProvidersProbeHandler())))
 	mux.HandleFunc("/api/admin/custom-providers/reset-keys", loggingMiddleware(requireAuth(customProvidersResetKeysHandler())))
+	mux.HandleFunc("/api/admin/custom-providers/keys", loggingMiddleware(requireAuth(customProvidersKeysHandler())))
 	mux.HandleFunc("/api/admin/custom-providers/clear", loggingMiddleware(requireAuth(customProvidersClearHandler(managerInst))))
 
 	// 插件式供应商：由供应商服务（50080）唯一托管，管理进程只做反代。

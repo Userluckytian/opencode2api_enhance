@@ -1,8 +1,24 @@
 import { useEffect, useRef, useState } from 'react'
 import clsx from 'clsx'
 import { Loader2, Pencil, Plus, PlugZap, Activity, Trash2, Plug, RefreshCw, ListChecks, Search, Globe, Copy, Play, Square, Server } from 'lucide-react'
-import { api, type CustomKeyStrategy, type CustomProviderInput, type CustomProviderTestResult, type CustomProviderView, type CustomProtocol, type PluginModelDetail, type PluginProviderView, type PluginStatus, type ProviderServiceStatus } from '../lib/api'
+import { api, type CustomKeyState, type CustomKeyStrategy, type CustomProviderInput, type CustomProviderTestResult, type CustomProviderView, type CustomProtocol, type PluginModelDetail, type PluginProviderView, type PluginStatus, type ProviderServiceStatus } from '../lib/api'
 import Modal from '../components/Modal'
+
+// Key 运行态徽标（与后端 KeyStateView.state 一一对应）
+const KEY_STATE_LABEL: Record<CustomKeyState['state'], string> = {
+  available: '可用',
+  cooling: '限流冷却',
+  auth_cooling: '403 冷却',
+  circuit_open: '熔断',
+  disabled: '禁用',
+}
+const KEY_STATE_CLS: Record<CustomKeyState['state'], string> = {
+  available: 'bg-emerald-50 text-emerald-700',
+  cooling: 'bg-amber-50 text-amber-700',
+  auth_cooling: 'bg-orange-50 text-orange-700',
+  circuit_open: 'bg-purple-50 text-purple-700',
+  disabled: 'bg-red-50 text-red-700',
+}
 
 // 自定义模型源表单（新增/编辑共用）。编辑时 key 留空 = 保留原 key。
 type FormState = {
@@ -19,8 +35,6 @@ type FormState = {
   use_proxy: boolean
   /** 本源显式代理地址（原样带回，避免整表保存洗掉） */
   proxy: string
-  /** 仅「测试并获取模型」生效：走本机系统代理（不落盘、不进配置） */
-  use_local_proxy: boolean
   enabled: boolean
   /** 全量模型清单（上游 ID；来自视图或测试结果） */
   allModels: string[]
@@ -42,7 +56,6 @@ const emptyForm = (): FormState => ({
   key_403_cooldown: 600, // 默认：401/403 冷却 600s 后自动恢复
   use_proxy: false,
   proxy: '',
-  use_local_proxy: false,
   enabled: true,
   allModels: [],
   exposeAll: true,
@@ -166,8 +179,15 @@ export default function CustomModelsPage({ toast }: { toast: (msg: string, ok?: 
   const [list, setList] = useState<CustomProviderView[] | null>(null)
   const [form, setForm] = useState<FormState | null>(null)
   const [testing, setTesting] = useState(false)
+  const [testElapsed, setTestElapsed] = useState(0)
+  // 测试请求的中断句柄：硬超时与「取消」按钮共用（否则只能等后端跑完）
+  const testAbortRef = useRef<AbortController | null>(null)
   const [saving, setSaving] = useState(false)
   const [testResult, setTestResult] = useState<CustomProviderTestResult | null>(null)
+  // 「已保存的 Key 状态」折叠区：只有编辑已存在的源才有运行态可查
+  const [keyStates, setKeyStates] = useState<CustomKeyState[] | null>(null)
+  const [keyStatesLoading, setKeyStatesLoading] = useState(false)
+  const [keyStatesLimit, setKeyStatesLimit] = useState(20)
   const [confirmDelete, setConfirmDelete] = useState<string | null>(null)
   const [confirmClear, setConfirmClear] = useState(false)
   const [clearing, setClearing] = useState(false)
@@ -192,6 +212,16 @@ export default function CustomModelsPage({ toast }: { toast: (msg: string, ok?: 
   useEffect(() => {
     togglingIdsRef.current = togglingIds
   }, [togglingIds])
+  // 测试中显示已等待秒数：用户能看到「在动」，而不是一个静止的转圈
+  useEffect(() => {
+    if (!testing) {
+      setTestElapsed(0)
+      return
+    }
+    const t0 = Date.now()
+    const id = window.setInterval(() => setTestElapsed(Math.floor((Date.now() - t0) / 1000)), 500)
+    return () => window.clearInterval(id)
+  }, [testing])
   // 供应商服务（自定义源 + 插件供应商的独立入口，默认 50080）
   const [provSvc, setProvSvc] = useState<ProviderServiceStatus | null>(null)
   const [provBusy, setProvBusy] = useState(false)
@@ -296,11 +326,16 @@ export default function CustomModelsPage({ toast }: { toast: (msg: string, ok?: 
 
   const openAdd = () => {
     setTestResult(null)
+    setKeyStates(null)
+    setKeyStatesLimit(20)
     setForm(emptyForm())
   }
 
   const openEdit = (p: CustomProviderView) => {
     setTestResult(null)
+    // 每次打开编辑都重新拉一次运行态（上一次的可能是别的源）
+    setKeyStates(null)
+    setKeyStatesLimit(20)
     setForm({
       id: p.id,
       name: p.name,
@@ -312,8 +347,7 @@ export default function CustomModelsPage({ toast }: { toast: (msg: string, ok?: 
       key_403_cooldown: p.key_403_cooldown >= 0 ? p.key_403_cooldown : 600,
       use_proxy: p.use_proxy,
       proxy: p.proxy ?? '',
-      use_local_proxy: false,
-      enabled: p.enabled,
+          enabled: p.enabled,
       allModels: p.models_all ?? [],
       exposeAll: !p.allowed_models || p.allowed_models.length === 0,
       allowed: new Set(p.allowed_models ?? []),
@@ -352,30 +386,66 @@ export default function CustomModelsPage({ toast }: { toast: (msg: string, ok?: 
       allowed_models: allowed,
       proxy: f.proxy || undefined,
       use_proxy: f.use_proxy,
-      use_local_proxy: forTest ? f.use_local_proxy : undefined, // 仅测试动作透传（保存不落盘）
       enabled: f.enabled,
     }
   }
 
   // 「测试并获取模型」：当前表单临时拉取目录（不落盘）。
   // forTest=true：未填源 ID 也允许测试（后端 _test 占位），只校验 API 地址。
+  //
+  // 后端只采样前 3 个 key 并在拿到目录后立即返回（309 key 的源不再串行跑 8 分钟）。
+  // 前端再加一层硬超时 + 取消：任何情况下都不允许按钮无限转圈。
   const doTest = async () => {
-    if (!form) return
+    if (!form || testing) return
     const input = formToInput(form, true)
     if (!input) return
+    const ctrl = new AbortController()
+    testAbortRef.current = ctrl
+    let timedOut = false
+    const timer = setTimeout(() => {
+      timedOut = true
+      ctrl.abort()
+    }, 20000)
     setTesting(true)
     setTestResult(null)
     try {
-      const r = await api.customProvidersTest(input)
+      const r = await api.customProvidersTest(input, ctrl.signal)
       setTestResult(r)
       if (r.models && r.models.length > 0) {
         // 测试拿到最新全量清单：保留现有勾选状态（新模型默认不勾）。
         setForm((prev) => (prev ? { ...prev, allModels: r.models! } : prev))
       }
     } catch (e) {
-      setTestResult({ ok: false, error: String(e) })
+      setTestResult({
+        ok: false,
+        error: timedOut
+          ? '测试超时（20s）：上游无响应，请检查 API 地址 / 代理 / key'
+          : ctrl.signal.aborted
+            ? '已取消测试'
+            : String(e),
+      })
     } finally {
+      clearTimeout(timer)
+      testAbortRef.current = null
       setTesting(false)
+    }
+  }
+
+  const doCancelTest = () => {
+    testAbortRef.current?.abort()
+  }
+
+  // 已保存的 Key 运行态：309 行 textarea 看不出哪个 key 坏了，单独给一份只读列表。
+  const loadKeyStates = async (id: string) => {
+    setKeyStatesLoading(true)
+    try {
+      const r = await api.customProvidersKeys(id)
+      setKeyStates(r.keys ?? [])
+    } catch (e) {
+      setKeyStates([])
+      toast(`读取 Key 状态失败：${String(e)}`, false)
+    } finally {
+      setKeyStatesLoading(false)
     }
   }
 
@@ -804,6 +874,22 @@ export default function CustomModelsPage({ toast }: { toast: (msg: string, ok?: 
 
   const visiblePlugins = (plugins ?? []).filter((p) => pluginFilter === 'all' || p.status === pluginFilter)
 
+  // 测试结果摘要：抽样口径（keys_total 可能远大于 keys_tested），失败只做汇总不逐条铺。
+  const testSummary = (() => {
+    if (!testResult) return null
+    const results = testResult.results ?? []
+    const tested = testResult.keys_tested ?? results.length
+    const total = testResult.keys_total ?? tested
+    return {
+      tested,
+      total,
+      okCount: results.filter((r) => r.ok).length,
+      fails: results.filter((r) => !r.ok),
+      models: testResult.models?.length ?? 0,
+      elapsed: testResult.elapsed_ms,
+    }
+  })()
+
   return (
     <div className="p-6 space-y-6">
       <div className="flex items-center justify-between gap-4">
@@ -1002,9 +1088,18 @@ export default function CustomModelsPage({ toast }: { toast: (msg: string, ok?: 
                       </span>
                     )}
                     {p.keys_total > 1 && (
-                      <span className="text-[11px] px-1.5 py-0.5 rounded bg-zinc-100 text-zinc-600">
-                        {p.keys_total} key
-                        {p.key_strategy === 'failover' ? ' · 错误转移' : p.key_strategy === 'health' ? ' · 健康优先' : ' · 轮询'}
+                      <span
+                        className="text-[11px] px-1.5 py-0.5 rounded bg-zinc-100 text-zinc-600"
+                        title={
+                          p.key_strategy === 'failover'
+                            ? '错误转移：主 key 优先，冷却/失效才降级（不会主动摊额度）'
+                            : p.key_strategy === 'health'
+                              ? '加权轮询：成功率高的 key 优先，仍覆盖全池'
+                              : '轮询：请求均匀分摊到全部 key'
+                        }
+                      >
+                        {p.keys_total} key · 可用 {p.keys_available}
+                        {p.key_strategy === 'failover' ? ' · 错误转移' : p.key_strategy === 'health' ? ' · 加权轮询' : ' · 轮询'}
                       </span>
                     )}
                   </div>
@@ -1123,12 +1218,13 @@ export default function CustomModelsPage({ toast }: { toast: (msg: string, ok?: 
             <>
               <button
                 type="button"
-                onClick={() => void doTest()}
-                disabled={testing || saving}
+                onClick={() => (testing ? doCancelTest() : void doTest())}
+                disabled={saving}
                 className="flex items-center gap-1.5 px-4 py-2 rounded-lg border border-zinc-300 text-[13px] text-zinc-700 hover:bg-zinc-50 disabled:opacity-60 disabled:cursor-not-allowed"
+                title={testing ? '立即中断本次测试（后端只采样前 3 个 key）' : '用一个 key 拉取模型目录（不落盘）'}
               >
                 {testing ? <Loader2 size={14} className="animate-spin" /> : <PlugZap size={14} />}
-                {testing ? '测试中…' : '测试并获取模型'}
+                {testing ? `测试中… ${testElapsed}s（点击取消）` : '测试并获取模型'}
               </button>
               <div className="flex-1" />
               <button
@@ -1215,6 +1311,43 @@ export default function CustomModelsPage({ toast }: { toast: (msg: string, ok?: 
               </p>
             </div>
 
+            {/* 已保存的 Key 运行态：只读、只显示末 4 位，用于定位坏 key */}
+            {form.editing && (
+              <details
+                className="rounded-lg border border-zinc-200 bg-zinc-50/60 p-3"
+                onToggle={(e) => {
+                  const open = (e.currentTarget as HTMLDetailsElement).open
+                  if (open && !keyStates && !keyStatesLoading) void loadKeyStates(form.editing!)
+                }}
+              >
+                <summary className="cursor-pointer text-xs text-zinc-600">
+                  已保存的 Key 状态（{form.api_keys.split('\n').filter((x) => x.trim()).length} 个，点击查看；只显示末 4 位）
+                </summary>
+                <div className="mt-2 space-y-1 max-h-64 overflow-y-auto">
+                  {keyStatesLoading && <div className="text-xs text-zinc-500">读取中…</div>}
+                  {!keyStatesLoading && keyStates && keyStates.length === 0 && (
+                    <div className="text-xs text-zinc-500">该源未启用或尚无运行态数据（启用后可查看）</div>
+                  )}
+                  {(keyStates ?? []).slice(0, keyStatesLimit).map((k, i) => (
+                    <div key={i} className="flex items-center gap-2 text-[11px] font-mono">
+                      <span className="w-20 shrink-0 text-zinc-600">{k.key_tail}</span>
+                      <span className={clsx('px-1.5 py-0.5 rounded shrink-0', KEY_STATE_CLS[k.state])}>{KEY_STATE_LABEL[k.state]}</span>
+                      {k.last_error && <span className="text-zinc-400 truncate">{k.last_error}</span>}
+                    </div>
+                  ))}
+                  {keyStates && keyStates.length > keyStatesLimit && (
+                    <button
+                      type="button"
+                      onClick={() => setKeyStatesLimit((n) => n + 50)}
+                      className="text-[11px] text-zinc-500 underline"
+                    >
+                      显示更多（已显示 {keyStatesLimit}/{keyStates.length}）
+                    </button>
+                  )}
+                </div>
+              </details>
+            )}
+
             <div className="space-y-2">
               <label className="block text-sm font-medium text-zinc-700">Key 调度策略</label>
               <div className="grid grid-cols-3 gap-2">
@@ -1252,9 +1385,9 @@ export default function CustomModelsPage({ toast }: { toast: (msg: string, ok?: 
                     form.key_strategy === 'health' ? 'border-zinc-900 bg-zinc-900 text-white' : 'border-zinc-200 text-zinc-600 hover:bg-zinc-50',
                   )}
                 >
-                  健康优先
+                  加权轮询
                   <span className={clsx('block text-[11px] mt-0.5', form.key_strategy === 'health' ? 'text-zinc-300' : 'text-zinc-400')}>
-                    成功率最高者稳定回答，变差才降级
+                    成功率高的 key 优先，仍覆盖全池
                   </span>
                 </button>
               </div>
@@ -1310,23 +1443,14 @@ export default function CustomModelsPage({ toast }: { toast: (msg: string, ok?: 
                 <span className="text-zinc-500 text-xs">（默认直连；供应商有地区限制时开启）</span>
               </div>
               <div className="text-[11px] text-zinc-400 pl-14">
-                出站走设置页「出口代理」的第一个可用项
-                {form.use_proxy ? `：${form.proxy || globalProxy || '未配置（请先到设置页添加）'}` : ''}
+                实际出站：
+                {form.proxy
+                  ? `本源代理 ${form.proxy}`
+                  : form.use_proxy
+                    ? `全局出口代理 ${globalProxy || '未配置（请先到设置页添加）'}`
+                    : '直连'}
+                ｜「测试并获取模型」与真实请求走同一条路径
               </div>
-            </div>
-
-            <div className="flex items-center space-x-3">
-              <label className="relative inline-flex items-center cursor-pointer">
-                <input
-                  type="checkbox"
-                  checked={form.use_local_proxy}
-                  onChange={(e) => setForm({ ...form, use_local_proxy: e.target.checked })}
-                  className="sr-only peer"
-                />
-                <div className="w-11 h-6 bg-zinc-200 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-zinc-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-zinc-900"></div>
-              </label>
-              <span className="text-sm text-zinc-700">测试走本机系统代理</span>
-              <span className="text-zinc-500 text-xs">（仅「测试并获取模型」时经系统代理拉取；与上方「使用代理」二选一，不写入配置）</span>
             </div>
 
             {/* 暴露模型白名单 */}
@@ -1396,18 +1520,35 @@ export default function CustomModelsPage({ toast }: { toast: (msg: string, ok?: 
               )}
             </div>
 
-            {/* 测试结果 */}
-            {testResult && (
+            {/* 测试结果：抽样口径汇总（309 key 的源逐条铺不下，失败项折叠） */}
+            {testResult && testSummary && (
               <div className={clsx('rounded-lg p-3 text-xs space-y-1.5', testResult.ok ? 'bg-emerald-50 text-emerald-800' : 'bg-red-50 text-red-700')}>
-                <div className="font-medium">{testResult.ok ? '全部 key 连通成功' : '部分/全部 key 连通失败'}</div>
+                <div className="font-medium">
+                  {testResult.ok ? `连通成功 · 拉取到 ${testSummary.models} 个模型` : '测试失败'}
+                </div>
                 <div className="space-y-1">
-                  {(testResult.results ?? []).map((kr, i) => (
-                    <div key={i} className={clsx('flex items-center gap-2 font-mono', kr.ok ? 'text-emerald-700' : 'text-red-600')}>
-                      <span className="w-20 shrink-0">{kr.key_tail || '(无key)'}</span>
-                      <span>{kr.ok ? `✓ ${kr.count} 模型 · ${kr.latency_ms}ms` : `✗ ${kr.error}`}</span>
+                  {testSummary.okCount > 0 && (
+                    <div className="text-emerald-700">
+                      已测 {testSummary.tested}/{testSummary.total}
+                      {testSummary.total > testSummary.tested ? '（抽样：拿到目录即停）' : ''}
+                      {' · '}成功 {testSummary.okCount}
+                      {testSummary.elapsed != null ? ` · 耗时 ${(testSummary.elapsed / 1000).toFixed(1)}s` : ''}
                     </div>
-                  ))}
-                  {!testResult.results?.length && !testResult.ok && <div>{testResult.error}</div>}
+                  )}
+                  {testSummary.fails.length > 0 && (
+                    <details>
+                      <summary className="cursor-pointer">{testSummary.fails.length} 个 key 失败（点击展开）</summary>
+                      <div className="mt-1 space-y-1">
+                        {testSummary.fails.map((kr, i) => (
+                          <div key={i} className="flex items-center gap-2 font-mono text-red-600">
+                            <span className="w-20 shrink-0">{kr.key_tail || '(无key)'}</span>
+                            <span className="truncate">{kr.error}</span>
+                          </div>
+                        ))}
+                      </div>
+                    </details>
+                  )}
+                  {testSummary.fails.length === 0 && !testResult.ok && <div>{testResult.error}</div>}
                 </div>
               </div>
             )}

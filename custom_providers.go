@@ -289,38 +289,11 @@ type customProviderInput struct {
 	// UseProxy 勾选「使用代理」：出站走设置页维护的全局出口代理。配置里只存该
 	// 布尔值，具体地址在厂商装配时解析（改全局代理无需逐个重存）。Proxy 优先。
 	UseProxy bool `json:"use_proxy"`
-	// UseLocalProxy 测试专用：测试拉取模型走本机系统代理（http.ProxyFromEnvironment），
-	// 优先于 Proxy 字段；默认 false = 直连或按 Proxy 走指定代理。
-	UseLocalProxy bool `json:"use_local_proxy"`
 	// DataPolicyNote 数据去向提示（面板徽标）；提交缺键 = 保留旧值，
 	// 显式空串 = 清除提示（与 allowed_models 同款语义，防整表提交把提示洗掉）。
 	DataPolicyNote *string `json:"data_policy_note"`
 	Enabled        *bool   `json:"enabled"`
 }
-
-// localProxyTransport 测试专用的 Transport：经本机系统代理（默认 http.ProxyFromEnvironment，
-// 读 HTTP_PROXY/HTTPS_PROXY/NO_PROXY）出站，不经过节点池。仅测试「测试并获取模型」
-// 使用；生产出站仍走 proxy（或 use_proxy 解析的全局代理）或直连。
-//
-// localProxyFunc 独立变量（默认 http.ProxyFromEnvironment）：http.ProxyFromEnvironment
-// 内部用 sync.Once 缓存进程级环境快照，测试里 t.Setenv 无法刷新该缓存——独立变量让
-// 单测可确定性注入代理地址，验证「use_local_proxy 走系统代理」路径。
-var localProxyFunc = http.ProxyFromEnvironment
-
-type localProxyTransport struct{}
-
-// Client 实现 contract.Transport：返回使用系统代理的 HTTP 客户端（无出口地址，
-// 不参与节点池健康/统计）。
-func (localProxyTransport) Client(_ contract.Tier, streaming bool) (*http.Client, string) {
-	tr := &http.Transport{Proxy: localProxyFunc}
-	if streaming {
-		return &http.Client{Transport: tr}, ""
-	}
-	return &http.Client{Transport: tr, Timeout: 60 * time.Second}, ""
-}
-
-// Mark 实现 contract.Transport（本地系统代理不参与节点池健康维护）。
-func (localProxyTransport) Mark(string, int, error) {}
 
 // customProvidersView 聚合目录中该源模型数。
 func customModelCounts() map[string]int {
@@ -677,10 +650,21 @@ func customProvidersTestHandler() http.HandlerFunc {
 		if len(keys) == 0 {
 			keys = []string{""} // 无 key（本地网关）也测
 		}
+		// 「测试并获取模型」只需要一个 key 的代表性目录：逐 key 尝试，首个成功即停。
+		// 早先是「全部 key 串行」，309 个 key 的源要跑约 8 分钟（单 key ~1.5s），
+		// 面板表现就是永久转圈（见 docs/issue-log/2026-11-20.md #1）。
+		// 多试两个只是覆盖「第一个 key 恰好挂了」，不是全量体检。
+		keysTotal := len(keys)
+		const maxTestKeys = 3
+		if len(keys) > maxTestKeys {
+			keys = keys[:maxTestKeys]
+		}
 		// 与出站装配同口径：勾选「使用代理」时解析全局代理；没配就别静默直连，
 		// 否则用户会以为「测试通了 = 代理配好了」。
+		// 测试与生产走**同一条**代理路径——早先测试可勾「走本机系统代理」，
+		// 结果测的是系统代理、跑的是全局代理/直连，「测试通了」不代表生产能通。
 		proxyURL := strings.TrimSpace(in.Proxy)
-		if proxyURL == "" && in.UseProxy && !in.UseLocalProxy {
+		if proxyURL == "" && in.UseProxy {
 			proxyURL = globalEgressProxy()
 			if proxyURL == "" {
 				writeAdminErr(w, http.StatusBadRequest, "已勾选使用代理，但设置页「出口代理」为空，请先配置再测试")
@@ -695,9 +679,16 @@ func customProvidersTestHandler() http.HandlerFunc {
 			Error     string `json:"error,omitempty"`
 		}
 		results := make([]keyResult, 0, len(keys))
-		allOK := true
+		succeeded := false
 		var firstOKModels []string
+		startAll := time.Now()
+		// 整体预算 15s：即便前几个 key 都卡在超时上，也不会把面板挂在几十秒以上。
+		outerCtx, outerCancel := context.WithTimeout(r.Context(), 15*time.Second)
+		defer outerCancel()
 		for _, key := range keys {
+			if outerCtx.Err() != nil {
+				break
+			}
 			cfg := custom.Config{
 				ID: in.ID, Name: in.Name, BaseURL: in.BaseURL,
 				APIKey: key, Protocol: in.Protocol, Proxy: proxyURL,
@@ -709,23 +700,17 @@ func customProvidersTestHandler() http.HandlerFunc {
 				// 否则「测试通了」只能说明直连通，不能说明勾选的代理真在用。
 				cfg.Transport = contract.StaticProxyTransport{ProxyURL: proxyURL}
 			}
-			if in.UseLocalProxy {
-				// 走本机系统代理（http.ProxyFromEnvironment），优先于 Proxy 字段。
-				cfg.Transport = localProxyTransport{}
-			}
 			v, err := custom.New(cfg)
 			if err != nil {
-				allOK = false
 				results = append(results, keyResult{KeyTail: keyTail(key), Error: err.Error()})
 				continue
 			}
-			ctx, cancel := context.WithTimeout(r.Context(), 15*time.Second)
+			ctx, cancel := context.WithTimeout(outerCtx, 8*time.Second)
 			start := time.Now()
 			models, err := v.ListModels(ctx)
 			latency := time.Since(start).Milliseconds()
 			cancel()
 			if err != nil {
-				allOK = false
 				results = append(results, keyResult{KeyTail: keyTail(key), LatencyMS: latency, Error: err.Error()})
 				continue
 			}
@@ -733,13 +718,17 @@ func customProvidersTestHandler() http.HandlerFunc {
 			for _, m := range models {
 				ids = append(ids, strings.TrimPrefix(m.ID, in.ID+"/"))
 			}
-			if firstOKModels == nil {
-				firstOKModels = ids
-			}
+			firstOKModels = ids
+			succeeded = true
 			results = append(results, keyResult{KeyTail: keyTail(key), OK: true, Count: len(ids), LatencyMS: latency})
+			// 拿到一份目录就够勾选白名单了，不必把剩下的 key 也拉一遍。
+			break
 		}
 		writeAdminJSON(w, map[string]any{
-			"ok": allOK, "results": results, "count": len(results), "models": firstOKModels,
+			"ok": succeeded, "results": results, "count": len(results), "models": firstOKModels,
+			// 抽样口径：前端据此显示「已测 1/309（抽样）」，避免用户以为全部 key 都验过了。
+			"keys_total": keysTotal, "keys_tested": len(results),
+			"truncated": keysTotal > len(keys), "elapsed_ms": time.Since(startAll).Milliseconds(),
 		})
 	}
 }
@@ -985,6 +974,37 @@ func customProvidersResetKeysHandler() http.HandlerFunc {
 			"keys_cooling": st.Cooling, "keys_auth_cooling": st.AuthCooling,
 			"keys_circuit_open": st.CircuitOpen, "keys_disabled": st.Disabled,
 		})
+	}
+}
+
+// customProvidersKeysHandler POST：逐 key 运行态 {"id":"src1"}——
+// 面板「已保存的 Key 状态」折叠区用；只回末 4 位与状态，**绝不回明文**。
+func customProvidersKeysHandler() http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		var req struct {
+			ID string `json:"id"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.ID == "" {
+			writeAdminErr(w, http.StatusBadRequest, "请求体需为 {\"id\":\"源ID\"}")
+			return
+		}
+		if globalAgg == nil {
+			writeAdminErr(w, http.StatusServiceUnavailable, "聚合器未装配")
+			return
+		}
+		for _, v := range globalAgg.Vendors() {
+			if c, ok := v.(*custom.Vendor); ok && c.ID() == req.ID {
+				writeAdminJSON(w, map[string]any{
+					"id": req.ID, "keys": c.KeyStates(), "status": c.PoolStatus(),
+				})
+				return
+			}
+		}
+		writeAdminErr(w, http.StatusNotFound, "源 "+req.ID+" 未启用或未装配（停用状态请先启用）")
 	}
 }
 
