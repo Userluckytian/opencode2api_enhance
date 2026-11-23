@@ -98,8 +98,8 @@ jobs:
       - name: Build free-tier engine (opencode2api-win)
         shell: bash
         env:
-          ENGINE_REPO: https://github.com/jasonxu114514/opencode2api.git
-          ENGINE_COMMIT: b296a61d0e3ef93b4df58e298be2c4e34e397322 # v1.4.7
+          ENGINE_REPO: https://github.com/wbi35772/opencode2api-win.git
+          ENGINE_COMMIT: 1a208acbda4346e9492a6ad5266a46b70b21642f # v1.5.1-win.1
         run: |
           set -euo pipefail
           rm -rf engine-src

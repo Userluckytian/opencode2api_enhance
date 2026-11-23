@@ -18,23 +18,28 @@ All rights reserved（明确未授予复制/修改/分发/使用），且配置�
                    见本目录 LICENSE
 
 2) 上游仓库
-   https://github.com/jasonxu114514/opencode2api.git
-   （浏览页面：https://github.com/jasonxu114514/opencode2api ；
+   https://github.com/wbi35772/opencode2api-win.git
+   （浏览页面：https://github.com/wbi35772/opencode2api-win ；
      CI clone 用带 .git 的上述地址，见 build-release.yml 的 ENGINE_REPO）
-   （原分叉 wbi35772/opencode2api-win 于 2026-11-11 起 404/删除，
-     自 v2.0.5 起改用真上游 stock 版本交叉构建）
+   该仓库已于 2026-11-20 恢复并合并上游 v1.5.1 全量（18b6a15），
+   同时保留其 WARP / 会话亲和 / 免费通道增强。
+   血脉祖先仍为 jasonxu114514/opencode2api（同样 GPL-3.0）。
 
 3) 对应上游提交（我们内嵌/分发的二进制即由该提交构建）
-   commit  : b296a61d0e3ef93b4df58e298be2c4e34e397322
-   短提交  : b296a61
-   提交说明: jasonxu114514/opencode2api v1.4.7（2026-11-05，stock）
-   说明    : 11-11 调研已实测 stock v1.4.7 兼容本项目现有配置
-             （SHA256 校验、/healthz 12/44、真实推理 3/3 200）；
-             相对旧分叉失去的 sessionGuard 只在 WARP lane 生效。
-             注意：本项目**全新安装默认 WARP 开启**（engineWarpEnabled 缺省
-             true、通道默认 warp_first），该路径可达；11-11 事故后当前生产
-             运行态因看门狗自动降级而关闭了 WARP。启用 WARP 前请评估
-             sessionGuard 缺失的影响。
+   commit  : 1a208acbda4346e9492a6ad5266a46b70b21642f
+   短提交  : 1a208ac
+   标签    : v1.5.1-win.1（2026-11-20）
+   提交说明: docs: v1.5.1-win.1 baseline, canvas and release notes
+   说明    : 相对 stock v1.5.1 多出的关键修复（见其 doc/07-已知问题与限制.md）：
+             · 工具前缀 clint_ → mcp_（#182）—— 带 tools 的请求此前被免费层 429
+             · 工具描述 NBSP 替换（#188）
+             · 客户端环境隔离（#190）
+             · 出口惩罚分类：普通限速 1~5min，额度冷却 30m→2h→8h→24h、
+               Retry-After 优先且跨重启持久
+             · 池空时不复活刚被 429 的 /64（防 429 死循环）
+             · warp.registration_proxies —— 注册走多代理，换取不同 egress /64
+             2026-11-23 实测：带 Claude Code system prompt + tools 的请求
+             由 429 变为 200（连续 3 次成功）。
 
 4) 构建命令（CI 与本仓库脚本 scripts/fetch-free-tier-engine.ps1 一致）
    CGO_ENABLED=0 GOOS=<os> GOARCH=<arch> \
