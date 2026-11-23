@@ -1,5 +1,23 @@
 # Changelog
 
+## v2.0.9（2026-11-23）
+
+### 修复
+
+- **升级后仍显示旧版本 / 旧页面**：`index.html` 此前不发 `Cache-Control`，WebView2 会按启发式规则（Last-Modified 之后经过时长的 10%）长期缓存它，于是更新到新版本后外壳仍加载旧 bundle——设置页版本号停在旧值、已删除的页面（如 Kilo）还在。现在 `/assets/*`（文件名带内容 hash）用 `immutable` 强缓存，`index.html` 与顶层静态用 `no-cache, must-revalidate`。
+- **通道标签误导**：WARP 不可用时标签写死「回落到 key」，与同一卡片里「先试匿名通道」的说明自相矛盾。现在只描述顺序（「匿名通道（失败后回落 key）」），并点明「key 的 429 是额度限流，不等于 key 失效」。
+
+### 变更
+
+- **免费层移除 key 通道**：删除 `engine_zen_keys` / `engine_go_keys`（配置项、引擎注入、API 字段），引擎 `anonymous` 恒为 `true`，出口池未配置时默认 4。依据：免费额度按 `(session, egress /64, project)` 记账，换 key 并不能再生额度（见 `docs/FREE-TIER-QUOTA-MODEL.md`）。
+- **OpenCode 页收敛**：只保留「接入信息」与「可用模型」；「通道顺序 / WARP 出口池 / 密钥通道 / 免费模型」四张卡片移除（页面 1440 → 816 行）。
+- **WARP 出口池配置移到「设置」**：池大小、源 IPv6 前缀、重置出口冷却。
+
+### 说明
+
+- 没有 key 之后，匿名通道连续失败 6 次会熔断（1h 起，逐次翻倍，上限 24h），熔断期间请求**直接失败**——这是显式取舍，面板通道提示里已写明。
+- 本版修的是「今后升级不再吃到旧缓存」。从 v2.0.8 升级到本版时，若仍看到旧页面，需手动清一次 `%LOCALAPPDATA%\com.opencode2api.manager\EBWebView\Default\Cache`（仅此一次）。
+
 ## v2.0.8（2026-11-20）
 
 ### 修复
