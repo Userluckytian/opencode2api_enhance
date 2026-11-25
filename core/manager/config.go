@@ -82,6 +82,9 @@ type Config struct {
 	NodePoolEnabled *bool `json:"node_pool_enabled,omitempty"`
 	// NodePoolLastWarning 最近一次应用的可达性预检结果（空 = 全部可达）。
 	NodePoolLastWarning string `json:"node_pool_last_warning,omitempty"`
+	// NodePoolSlotMap 上次自动选源结果（指纹，换行分隔）。订阅刷新/重启沿用，
+	// 避免把「实测可达的 8 个」又冲回列表前 8 个。
+	NodePoolSlotMap string `json:"node_pool_slot_map,omitempty"`
 	// NodePoolSubscriptionURL 订阅地址（仅为记录来源，刷新时可重拉）。
 	NodePoolSubscriptionURL string `json:"node_pool_subscription_url,omitempty"`
 	// NodePoolMihomoPath mihomo 可执行文件路径；留空找 bin 目录。
@@ -316,6 +319,8 @@ func (m *Manager) ConfigGet(key string) (string, error) {
 		return cfg.EngineWarpSocksUDPManual, nil
 	case "node_pool_last_warning":
 		return cfg.NodePoolLastWarning, nil
+	case "node_pool_slot_map":
+		return cfg.NodePoolSlotMap, nil
 	case "node_pool_enabled":
 		return strconv.FormatBool(cfg.NodePoolEnabled != nil && *cfg.NodePoolEnabled), nil
 	case "node_pool_subscription_url":
@@ -482,6 +487,10 @@ func (m *Manager) ConfigSet(key, value string) error {
 			return fmt.Errorf("engine_warp_socks_udp_manual 必须是 socks5://host:port 或 host:port")
 		}
 		cfg.EngineWarpSocksUDPManual = s
+	case "node_pool_last_warning":
+		cfg.NodePoolLastWarning = strings.TrimSpace(value)
+	case "node_pool_slot_map":
+		cfg.NodePoolSlotMap = strings.TrimSpace(value)
 	case "node_pool_enabled":
 		b, err := parseBool()
 		if err != nil {

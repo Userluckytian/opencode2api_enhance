@@ -175,7 +175,7 @@ func slotNodes(nodes []PoolNode, slots int) []PoolNode {
 //
 // external-controller + secret 用于热重载（PUT /configs?force=true）：
 // 增删节点只改槽位映射，不重启引擎也不需要重启 mihomo 进程。
-func buildFarmConfig(cache nodePoolCache, slots []PoolNode, ports []int, ctlPort int, secret string) string {
+func buildFarmConfig(cache nodePoolCache, all []PoolNode, slots []PoolNode, ports []int, ctlPort int, secret string) string {
 	var b strings.Builder
 	b.WriteString("# 由 opencode2api 节点池自动生成，仅用于 WARP 注册\n")
 	b.WriteString("allow-lan: false\nmode: rule\nlog-level: warning\nipv6: false\n")
@@ -244,7 +244,8 @@ func (m *Manager) StartNodeFarm() error {
 	m.StopNodeFarm()
 	used := map[int]bool{}
 	// 固定槽位：端口集合在引擎生命周期内不变（引擎只在启动时读注册列表）。
-	mapped := slotNodes(nodes, nodeFarmSlots)
+	// 槽位映射优先用上次自动选源（实测可达）的结果。
+	mapped := preferredSlotNodes(nodes, splitLinesOrCommas(cfg.NodePoolSlotMap), nodeFarmSlots)
 	ports := make([]int, 0, len(mapped))
 	for range mapped {
 		p, perr := pickPort(base, used)
@@ -265,7 +266,12 @@ func (m *Manager) StartNodeFarm() error {
 		return err
 	}
 	configPath := filepath.Join(dir, "farm.yaml")
-	if err := os.WriteFile(configPath, []byte(buildFarmConfig(cache, mapped, ports, ctlPort, secret)), 0o600); err != nil {
+	// 保留「所有候选」在 proxies 段，槽位只决定 listeners。
+	all := m.SelectedNodes()
+	if len(all) == 0 {
+		all = nodes
+	}
+	if err := os.WriteFile(configPath, []byte(buildFarmConfig(cache, all, mapped, ports, ctlPort, secret)), 0o600); err != nil {
 		return err
 	}
 
@@ -399,9 +405,15 @@ func (m *Manager) ReloadNodeFarm(nodes []PoolNode) error {
 		// 2.0.14 及更早的农场按节点数分配端口；升级后第一次需要重建成固定槽位。
 		return fmt.Errorf("农场槽位未固定（%d 个端口），需要重建农场", len(ports))
 	}
-	mapped := slotNodes(nodes, len(ports))
+	preferred := splitLinesOrCommas(m.loadConfig().NodePoolSlotMap)
+	mapped := preferredSlotNodes(nodes, preferred, len(ports))
 	cache := m.LoadNodePoolCache()
-	if err := os.WriteFile(configPath, []byte(buildFarmConfig(cache, mapped, ports, ctlPort, secret)), 0o600); err != nil {
+	// 保留「所有候选」在 proxies 段，槽位只决定 listeners。
+	all := m.SelectedNodes()
+	if len(all) == 0 {
+		all = nodes
+	}
+	if err := os.WriteFile(configPath, []byte(buildFarmConfig(cache, all, mapped, ports, ctlPort, secret)), 0o600); err != nil {
 		return err
 	}
 	if ctlPort > 0 {
@@ -609,8 +621,24 @@ func (m *Manager) ApplyNodePool(selected []string) (hot bool, err error) {
 	if len(info.Ports) == 0 {
 		return false, fmt.Errorf("农场未就绪: %s", info.LastError)
 	}
-	// 可达性预检：全挂就拒绝应用（否则会写一组死端口、引擎 90s 后无出口启动）；
-	// 部分挂写进告警，用户能直接看到哪些节点是死的。
+	// 自动选源：mihomo 对每个候选节点跑一次真实请求（delay API），按延迟挑
+	// 可达的填槽位——不再固定用列表前 8 个。verified=false（无 controller）
+	// 时退回槽位探测。
+	info, verified, selErr := m.autoSelectNodeSlots(info)
+	if selErr != nil {
+		_ = m.ConfigSet("node_pool_last_warning", selErr.Error())
+		return false, selErr
+	}
+	if !verified {
+		if err := m.verifySlotReachability(info); err != nil {
+			return false, err
+		}
+	}
+	return m.syncRegistrationAfterApply()
+}
+
+// verifySlotReachability 槽位级兜底探测（没有 controller 时用）。
+func (m *Manager) verifySlotReachability(info NodeFarmInfo) error {
 	probes := probeNodeFarmSlots(info.Ports)
 	slots := m.farmNodes()
 	dead := make([]string, 0, len(probes))
@@ -628,7 +656,7 @@ func (m *Manager) ApplyNodePool(selected []string) (hot bool, err error) {
 		msg := fmt.Sprintf("选中节点全部不可达（%d/%d）：%s；请检查订阅节点或先停用节点池",
 			len(dead), len(probes), strings.Join(dead, "、"))
 		_ = m.ConfigSet("node_pool_last_warning", msg)
-		return false, fmt.Errorf("%s", msg)
+		return fmt.Errorf("%s", msg)
 	}
 	if len(dead) > 0 {
 		msg := fmt.Sprintf("%d/%d 个节点不可达：%s（这些槽位的注册会失败）",
@@ -638,7 +666,88 @@ func (m *Manager) ApplyNodePool(selected []string) (hot bool, err error) {
 	} else {
 		_ = m.ConfigSet("node_pool_last_warning", "")
 	}
-	return m.syncRegistrationAfterApply()
+	return nil
+}
+
+// autoSelectNodeSlots 用 mihomo 的 /proxies/{name}/delay 测所有选中的节点，
+// 按延迟挑可达的填满槽位（0 号槽优先 UDP），并把结果持久化到 node_pool_slot_map。
+//
+// 返回 verified=false 表示当前农场没有 controller（2.0.14 及更早的农场），
+// 调用方应退回槽位探测。
+func (m *Manager) autoSelectNodeSlots(info NodeFarmInfo) (NodeFarmInfo, bool, error) {
+	candidates := m.SelectedNodes()
+	if len(candidates) == 0 {
+		return info, false, nil
+	}
+	const maxCandidates = 120
+	if len(candidates) > maxCandidates {
+		candidates = candidates[:maxCandidates]
+	}
+	f := m.farm()
+	f.mu.Lock()
+	cfgPath, ctlPort, secret := f.configPath, f.ctlPort, f.secret
+	ports := append([]int(nil), f.ports...)
+	current := append([]PoolNode(nil), f.nodes...)
+	f.mu.Unlock()
+	if !info.Running || ctlPort <= 0 || len(ports) == 0 || cfgPath == "" {
+		return info, false, nil
+	}
+	cache := m.LoadNodePoolCache()
+	// 第一阶段：把所有候选写进 proxies 段（listeners 保持当前映射），
+	// 这样 delay API 能测到任意候选节点。
+	if err := os.WriteFile(cfgPath, []byte(buildFarmConfig(cache, candidates, current, ports, ctlPort, secret)), 0o600); err != nil {
+		return info, true, err
+	}
+	if err := mihomoReload(ctlPort, secret, cfgPath); err != nil {
+		return info, true, err
+	}
+	delays := probeCandidates(ctlPort, secret, candidates, 4*time.Second)
+	chosen := chooseSlotNodes(candidates, delays, len(ports))
+	if len(chosen) == 0 {
+		return info, true, fmt.Errorf("所有选中节点都不可达（延迟测试全部失败）；请检查订阅节点或先停用节点池")
+	}
+	if !sameSlotFingerprints(chosen, current) {
+		if err := os.WriteFile(cfgPath, []byte(buildFarmConfig(cache, candidates, chosen, ports, ctlPort, secret)), 0o600); err != nil {
+			return info, true, err
+		}
+		if err := mihomoReload(ctlPort, secret, cfgPath); err != nil {
+			return info, true, err
+		}
+		f.mu.Lock()
+		f.nodes = chosen
+		f.mu.Unlock()
+	}
+	dead := len(candidates) - len(delays)
+	if dead > 0 {
+		_ = m.ConfigSet("node_pool_last_warning",
+			fmt.Sprintf("%d/%d 个候选节点不可达，已自动跳过（按延迟选源）", dead, len(candidates)))
+	} else {
+		_ = m.ConfigSet("node_pool_last_warning", "")
+	}
+	// 持久化槽位映射：订阅刷新/农场重启沿用，不再冲回列表前 8 个。
+	uniq := make([]string, 0, len(chosen))
+	seen := map[string]bool{}
+	for _, n := range chosen {
+		if !seen[n.Fingerprint] {
+			seen[n.Fingerprint] = true
+			uniq = append(uniq, n.Fingerprint)
+		}
+	}
+	_ = m.ConfigSet("node_pool_slot_map", strings.Join(uniq, "\n"))
+	return m.NodeFarmInfo(), true, nil
+}
+
+// sameSlotFingerprints 比较两组槽位映射是否一致。
+func sameSlotFingerprints(a, b []PoolNode) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i].Fingerprint != b[i].Fingerprint {
+			return false
+		}
+	}
+	return true
 }
 
 // AutoStartNodePool 启动时按配置恢复农场（仅当启用且已选节点）。
