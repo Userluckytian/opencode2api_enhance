@@ -165,6 +165,10 @@ func main() {
 	}()
 	go managerInst.WatchdogFreeTierEngine(engineRunner)
 
+	// 节点池：订阅节点 → 本地端口 → 引擎注册代理列表（只服务 OpenCode 免费层）。
+	// 后台恢复，不阻塞 40000 监听。
+	go managerInst.AutoStartNodePool()
+
 
 	// 调用指标采集：增量消费引擎 stdout，把 request_routed 落成分析用的指标行。
 	// 与看门狗一样常驻；指标是旁路，采不到只记 warn，不影响推理。
@@ -322,6 +326,79 @@ func providerServiceStopHandler(p *manager.ProviderService) http.HandlerFunc {
 		_ = p.Stop(manager.NewRealRunner())
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(p.Status())
+	}
+}
+
+// nodePoolStatusHandler 节点池状态。
+func nodePoolStatusHandler(m *manager.Manager) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		writeJSONResp(w, m.NodePoolStatusOf())
+	}
+}
+
+// nodePoolImportHandler 导入订阅（URL 或粘贴内容），只保存不启动。
+func nodePoolImportHandler(m *manager.Manager) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			writeErrResp(w, http.StatusMethodNotAllowed, "POST only")
+			return
+		}
+		var req struct {
+			URL     string `json:"url"`
+			Content string `json:"content"`
+		}
+		if json.NewDecoder(r.Body).Decode(&req) != nil {
+			writeErrResp(w, http.StatusBadRequest, "请求体需含 url 或 content")
+			return
+		}
+		cache, bad, err := m.ImportNodePool(req.URL, req.Content)
+		if err != nil {
+			writeErrResp(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		if strings.TrimSpace(req.URL) != "" {
+			_ = m.ConfigSet("node_pool_subscription_url", req.URL)
+		}
+		writeJSONResp(w, map[string]any{
+			"status": "ok", "node_count": len(cache.Nodes), "bad": bad, "fetched_at": cache.FetchedAt,
+		})
+	}
+}
+
+// nodePoolApplyHandler 保存选中项 → 启动农场 → 同步到引擎。
+func nodePoolApplyHandler(m *manager.Manager) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			writeErrResp(w, http.StatusMethodNotAllowed, "POST only")
+			return
+		}
+		var req struct {
+			Selected []string `json:"selected"`
+		}
+		if json.NewDecoder(r.Body).Decode(&req) != nil {
+			writeErrResp(w, http.StatusBadRequest, "请求体需含 selected")
+			return
+		}
+		if err := m.ApplyNodePool(req.Selected); err != nil {
+			writeErrResp(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		writeJSONResp(w, m.NodePoolStatusOf())
+	}
+}
+
+// nodePoolStopHandler 停用节点池并回退单代理注册。
+func nodePoolStopHandler(m *manager.Manager) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			writeErrResp(w, http.StatusMethodNotAllowed, "POST only")
+			return
+		}
+		if err := m.DisableNodePool(); err != nil {
+			writeErrResp(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		writeJSONResp(w, m.NodePoolStatusOf())
 	}
 }
 
@@ -516,6 +593,11 @@ func registerHTTPRoutes(mux *http.ServeMux, managerInst *manager.Manager, plugin
 
 	// 手动探测：对引擎发一次最小请求，用真实状态码判定模型可用性
 	mux.HandleFunc("/api/admin/free-tier/probe", loggingMiddleware(requireAuth(modelProbeHandler(managerInst))))
+	// WARP 注册节点池（订阅 → 本地端口 → registration_proxies）
+	mux.HandleFunc("/api/admin/node-pool/status", loggingMiddleware(requireAuth(nodePoolStatusHandler(managerInst))))
+	mux.HandleFunc("/api/admin/node-pool/import", loggingMiddleware(requireAuth(nodePoolImportHandler(managerInst))))
+	mux.HandleFunc("/api/admin/node-pool/apply", loggingMiddleware(requireAuth(nodePoolApplyHandler(managerInst))))
+	mux.HandleFunc("/api/admin/node-pool/stop", loggingMiddleware(requireAuth(nodePoolStopHandler(managerInst))))
 	// 诊断：四服务自检 + 配置/二进制检查
 	mux.HandleFunc("/api/admin/diag", loggingMiddleware(requireAuth(diagHandler(managerInst))))
 	// 失败聚合：从调用日志现算「厂商 × 错误码」
