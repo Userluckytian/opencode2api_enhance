@@ -59,8 +59,10 @@ type NodePoolStatus struct {
 	NodeCount   int        `json:"node_count"`
 	SelectedLen int        `json:"selected_count"`
 	// HiddenCount 用户移除的节点数（重新导入不会复活）。
-	HiddenCount int    `json:"hidden_count"`
-	MihomoPath  string `json:"mihomo_path"`
+	HiddenCount int `json:"hidden_count"`
+	// Slots 固定注册槽位数（0 = 农场未按固定槽位运行）。
+	Slots      int    `json:"slots"`
+	MihomoPath string `json:"mihomo_path"`
 	// SocksUDP 当前写进引擎的握手中继（空 = 直连）。
 	SocksUDP  string `json:"socks_udp,omitempty"`
 	Warning   string `json:"warning,omitempty"`

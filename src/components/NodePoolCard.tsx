@@ -25,6 +25,8 @@ type PoolStatus = {
   selected_count: number
   /** 被移除（屏蔽）的节点数：订阅刷新不会复活 */
   hidden_count?: number
+  /** 固定注册槽位数（0 = 农场未按固定槽位运行） */
+  slots?: number
   mihomo_path: string
   socks_udp?: string
   warning?: string
@@ -127,9 +129,15 @@ export default function NodePoolCard({
   const apply = async () => {
     setBusy('apply')
     try {
-      await post('/api/admin/node-pool/apply', { selected: sel })
-      onEngineRestarting?.()
-      toast('已应用：农场启动并同步到引擎，引擎正在重启（WARP 重新注册出口，最长 90s）', true)
+      const r = await post<{ hot?: boolean }>('/api/admin/node-pool/apply', { selected: sel })
+      // hot = 只热重载了 mihomo 的槽位映射，引擎没重启：加/换节点不再断服务。
+      if (!r.hot) onEngineRestarting?.()
+      toast(
+        r.hot
+          ? '已应用：节点映射已热重载（引擎未重启，下一次出口注册走新节点）'
+          : '已应用：首次启用/中继变化，引擎正在重启（WARP 重新注册出口，最长 90s）',
+        true,
+      )
       await load()
     } catch (e) {
       toast((e as Error).message, false)
@@ -325,7 +333,9 @@ export default function NodePoolCard({
             >
               {busy === 'remove' ? '处理中…' : '清空列表'}
             </button>
-            <span className="ml-auto">端口基址 {st.port_base}</span>
+            <span className="ml-auto">
+              端口基址 {st.port_base} · 固定槽位 {st.slots || st.ports.length || '—'}
+            </span>
           </div>
           {(st.hidden_count ?? 0) > 0 ? (
             <div className="text-[11px] text-zinc-500">
@@ -431,7 +441,8 @@ export default function NodePoolCard({
         </button>
       </div>
       <p className="text-[11px] text-zinc-400">
-        应用后注册请求会轮换走这些本地端口；引擎重启期间免费层可能短暂不可用（30–90 秒）。
+        增删/替换节点只热重载 mihomo 的「槽位 → 节点」映射，不重启引擎（下一次出口注册生效）；
+        只有首次启用、停用，或 UDP 握手中继从无到有/从有到无时，引擎才会重启一次。
       </p>
     </div>
   )

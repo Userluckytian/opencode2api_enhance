@@ -413,11 +413,17 @@ func nodePoolApplyHandler(m *manager.Manager) http.HandlerFunc {
 			writeErrResp(w, http.StatusBadRequest, "请求体需含 selected")
 			return
 		}
-		if err := m.ApplyNodePool(req.Selected); err != nil {
+		hot, err := m.ApplyNodePool(req.Selected)
+		if err != nil {
 			writeErrResp(w, http.StatusInternalServerError, err.Error())
 			return
 		}
-		writeJSONResp(w, m.NodePoolStatusOf())
+		writeJSONResp(w, map[string]any{
+			"status": "ok",
+			// hot=true：只热重载了 mihomo 槽位映射，引擎没有重启（下一次注册生效）
+			"hot":       hot,
+			"node_pool": m.NodePoolStatusOf(),
+		})
 	}
 }
 

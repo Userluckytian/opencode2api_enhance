@@ -6,9 +6,16 @@ package manager
 // 业务出口；业务出口仍由「设置 → 出口代理」决定。
 
 import (
+	"bytes"
+	"crypto/rand"
+	"encoding/hex"
+	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"net"
+	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -18,11 +25,30 @@ import (
 	"time"
 )
 
+// newFarmSecret 生成 mihomo controller 的随机 secret（仅本机回环可达，
+// 仍然加一道门：同机其它进程不该能改节点池的出口映射）。
+func newFarmSecret() string {
+	var b [8]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		return "oc-nodefarm"
+	}
+	return hex.EncodeToString(b[:])
+}
+
 const (
 	// 25001 起：24001-24016 已被 siftq 等插件的 egress 池占用，
 	// 23001/22001/21001 也各有主，25001 段当前空闲。
 	nodeFarmDefaultPortBase = 25001
 	nodeFarmMaxNodes        = 32
+	// nodeFarmSlots 固定注册槽位数（引擎生命周期内端口集合不变）。
+	//
+	// 引擎只在启动时读 warp.registration_proxies / socks_udp，之后注册器列表
+	// 就固定了。若按「选中节点数」分配端口，增删一个节点就要重启引擎。
+	// 固定 8 个槽位后，增删节点只改「槽位 → 节点」映射，通过 mihomo 的
+	// controller 热重载（PUT /configs）生效，引擎完全不用动。
+	nodeFarmSlots = 8
+	// nodeFarmCtlOffset controller 端口相对基址的偏移（26001）。
+	nodeFarmCtlOffset = 1000
 )
 
 type nodeFarm struct {
@@ -30,11 +56,14 @@ type nodeFarm struct {
 	cmd        *exec.Cmd
 	pid        int
 	ports      []int
-	nodes      []PoolNode // 与 ports 一一对应（生成配置时的那份，避免重新读取时错位）
+	nodes      []PoolNode // 与 ports 一一对应（槽位映射后的节点，避免读取时错位）
 	configPath string
 	logPath    string
 	lastErr    string
 	running    bool
+	// ctlPort / secret 是 mihomo external-controller，用于热重载配置。
+	ctlPort int
+	secret  string
 	// gen 每次 Start/Stop 递增；监护协程据此判断自己是否已被取代，
 	// 避免旧进程退出后把新农场再重启一次。
 	gen        int
@@ -47,6 +76,7 @@ type NodeFarmInfo struct {
 	Running   bool   `json:"running"`
 	PID       int    `json:"pid"`
 	Ports     []int  `json:"ports"`
+	Slots     int    `json:"slots"`
 	LastError string `json:"last_error,omitempty"`
 }
 
@@ -65,7 +95,7 @@ func (m *Manager) NodeFarmInfo() NodeFarmInfo {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	ports := append([]int(nil), f.ports...)
-	return NodeFarmInfo{Running: f.running, PID: f.pid, Ports: ports, LastError: f.lastErr}
+	return NodeFarmInfo{Running: f.running, PID: f.pid, Ports: ports, Slots: len(ports), LastError: f.lastErr}
 }
 
 // mihomoBin 解析 mihomo 路径：显式配置 → bin 目录 → third_party 目录。
@@ -107,14 +137,62 @@ func pickPort(base int, used map[int]bool) (int, error) {
 	return 0, fmt.Errorf("从 %d 起找不到空闲端口", base)
 }
 
-// buildFarmConfig 生成 mihomo 配置：proxies 原样拼入，listeners 每节点一个端口。
-func buildFarmConfig(cache nodePoolCache, nodes []PoolNode, ports []int) string {
+// slotNodes 把选中节点摊到固定槽位上：去重、第一个 UDP 节点优先占 0 号槽，
+// 其余按顺序循环填充。返回长度恒为 slots，与 ports 一一对应。
+//
+// 0 号槽固定作为 warp.socks_udp 的中继端口：引擎只在启动时读这个字段，
+// 端口不变就不需要重启；把 UDP 节点钉在 0 号槽，增删其它节点都不会让中继失效。
+func slotNodes(nodes []PoolNode, slots int) []PoolNode {
+	if slots <= 0 || len(nodes) == 0 {
+		return nil
+	}
+	uniq := make([]PoolNode, 0, len(nodes))
+	seen := map[string]bool{}
+	udpIdx := -1
+	for _, n := range nodes {
+		if seen[n.Fingerprint] {
+			continue
+		}
+		seen[n.Fingerprint] = true
+		if udpIdx < 0 && n.UDP {
+			udpIdx = len(uniq)
+		}
+		uniq = append(uniq, n)
+	}
+	if udpIdx > 0 {
+		first := uniq[udpIdx]
+		copy(uniq[1:udpIdx+1], uniq[:udpIdx])
+		uniq[0] = first
+	}
+	out := make([]PoolNode, slots)
+	for i := range out {
+		out[i] = uniq[i%len(uniq)]
+	}
+	return out
+}
+
+// buildFarmConfig 生成 mihomo 配置：proxies 去重后原样拼入，每个槽位一个监听。
+//
+// external-controller + secret 用于热重载（PUT /configs?force=true）：
+// 增删节点只改槽位映射，不重启引擎也不需要重启 mihomo 进程。
+func buildFarmConfig(cache nodePoolCache, slots []PoolNode, ports []int, ctlPort int, secret string) string {
 	var b strings.Builder
 	b.WriteString("# 由 opencode2api 节点池自动生成，仅用于 WARP 注册\n")
 	b.WriteString("allow-lan: false\nmode: rule\nlog-level: warning\nipv6: false\n")
+	if ctlPort > 0 {
+		fmt.Fprintf(&b, "external-controller: 127.0.0.1:%d\n", ctlPort)
+		if secret != "" {
+			fmt.Fprintf(&b, "secret: %s\n", yamlQuoteName(secret))
+		}
+	}
 	b.WriteString("dns:\n  enable: false\n")
 	b.WriteString("proxies:\n")
-	for _, n := range nodes {
+	written := map[string]bool{}
+	for _, n := range slots {
+		if written[n.Fingerprint] {
+			continue
+		}
+		written[n.Fingerprint] = true
 		if block := strings.TrimSpace(cache.Blocks[n.Fingerprint]); block != "" {
 			b.WriteString(block)
 			if !strings.HasSuffix(block, "\n") {
@@ -123,7 +201,10 @@ func buildFarmConfig(cache nodePoolCache, nodes []PoolNode, ports []int) string 
 		}
 	}
 	b.WriteString("listeners:\n")
-	for i, n := range nodes {
+	for i, n := range slots {
+		if i >= len(ports) {
+			break
+		}
 		// udp: true 是 WARP 握手中继的前提：引擎的 warp.socks_udp 通过
 		// SOCKS5 UDP ASSOCIATE 把 WireGuard 数据包交给这条监听；
 		// mixed 监听默认不开 UDP，漏了就只对 HTTPS 注册生效。
@@ -162,8 +243,10 @@ func (m *Manager) StartNodeFarm() error {
 	// pickPort 会一路跳到新端口，导致每次应用端口基址都漂移。
 	m.StopNodeFarm()
 	used := map[int]bool{}
-	ports := make([]int, 0, len(nodes))
-	for range nodes {
+	// 固定槽位：端口集合在引擎生命周期内不变（引擎只在启动时读注册列表）。
+	mapped := slotNodes(nodes, nodeFarmSlots)
+	ports := make([]int, 0, len(mapped))
+	for range mapped {
 		p, perr := pickPort(base, used)
 		if perr != nil {
 			return perr
@@ -171,13 +254,18 @@ func (m *Manager) StartNodeFarm() error {
 		used[p] = true
 		ports = append(ports, p)
 	}
+	// controller 端口：拿不到只是失去「不重启 mihomo 的热重载」，
+	// 注册本身不受影响（ReloadNodeFarm 会退化成重启农场进程）。
+	ctlPort, _ := pickPort(base+nodeFarmCtlOffset, used)
+	used[ctlPort] = true
+	secret := newFarmSecret()
 
 	dir := m.nodePoolDir()
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return err
 	}
 	configPath := filepath.Join(dir, "farm.yaml")
-	if err := os.WriteFile(configPath, []byte(buildFarmConfig(cache, nodes, ports)), 0o600); err != nil {
+	if err := os.WriteFile(configPath, []byte(buildFarmConfig(cache, mapped, ports, ctlPort, secret)), 0o600); err != nil {
 		return err
 	}
 
@@ -207,8 +295,10 @@ func (m *Manager) StartNodeFarm() error {
 	f.cmd = cmd
 	f.pid = cmd.Process.Pid
 	f.ports = ports
-	f.nodes = append([]PoolNode(nil), nodes...)
+	f.nodes = mapped
 	f.configPath = configPath
+	f.ctlPort = ctlPort
+	f.secret = secret
 	f.logPath = logPath
 	f.done = done
 	f.running = true
@@ -225,9 +315,21 @@ func (m *Manager) StartNodeFarm() error {
 		time.Sleep(200 * time.Millisecond)
 	}
 	if !ready {
+		// 配置错误（例如订阅节点缺 uuid/password）会让 mihomo 启动即退出。
+		// 这里必须把失败传出去：否则 ApplyNodePool 会写一组指向死端口的
+		// 注册配置并重启引擎，用户看到「已应用」但引擎一个出口都注册不上。
+		msg := "mihomo 端口未就绪（详见 node-pool/farm.log）"
 		f.mu.Lock()
-		f.lastErr = "mihomo 端口未就绪（详见 node-pool/farm.log）"
+		f.lastErr = msg
+		f.running = false
+		f.pid = 0
+		f.gen++ // 让即将启动的监护协程失效
 		f.mu.Unlock()
+		if cmd.Process != nil {
+			_ = cmd.Process.Kill()
+		}
+		close(done)
+		return fmt.Errorf("%s", msg)
 	}
 
 	// 进程退出监护：非主动停止则按退避重起。
@@ -273,6 +375,90 @@ func (m *Manager) StartNodeFarm() error {
 		}
 	}(gen, done)
 	return nil
+}
+
+// ReloadNodeFarm 只改「槽位 → 节点」映射：重写 farm.yaml 并让 mihomo 热重载。
+//
+// 端口集合与 socks_udp 都不变，所以引擎不需要重启——这是「补充/替换节点」
+// 不再断服务的核心。controller 不可用或重载失败时退化为重启 mihomo 进程，
+// 端口集合仍然不变，引擎依旧不用动。
+func (m *Manager) ReloadNodeFarm(nodes []PoolNode) error {
+	if len(nodes) == 0 {
+		return fmt.Errorf("没有选中任何节点")
+	}
+	f := m.farm()
+	f.mu.Lock()
+	running := f.running
+	ports := append([]int(nil), f.ports...)
+	configPath, ctlPort, secret := f.configPath, f.ctlPort, f.secret
+	f.mu.Unlock()
+	if !running || len(ports) == 0 {
+		return fmt.Errorf("农场未运行")
+	}
+	if len(ports) != nodeFarmSlots {
+		// 2.0.14 及更早的农场按节点数分配端口；升级后第一次需要重建成固定槽位。
+		return fmt.Errorf("农场槽位未固定（%d 个端口），需要重建农场", len(ports))
+	}
+	mapped := slotNodes(nodes, len(ports))
+	cache := m.LoadNodePoolCache()
+	if err := os.WriteFile(configPath, []byte(buildFarmConfig(cache, mapped, ports, ctlPort, secret)), 0o600); err != nil {
+		return err
+	}
+	if ctlPort > 0 {
+		if err := mihomoReload(ctlPort, secret, configPath); err == nil {
+			f.mu.Lock()
+			f.nodes = mapped
+			f.mu.Unlock()
+			log.Printf("node farm hot-reloaded: %d nodes -> %d slots (engine untouched)", len(nodes), len(ports))
+			return nil
+		} else {
+			log.Printf("node farm hot reload failed (%v); restarting mihomo with the same ports", err)
+		}
+	}
+	// 退化：重启 mihomo 进程（端口集合不变，引擎仍然不用重启）。
+	return m.StartNodeFarm()
+}
+
+// mihomoReload 调 mihomo 的 external-controller 重载配置。
+//
+// PUT /configs?force=true 会按 path 重新读取配置文件并重建 listeners；
+// force 让它在端口被自己占用时也能重绑（这正是我们要的）。
+func mihomoReload(port int, secret, configPath string) error {
+	body, _ := json.Marshal(map[string]string{"path": configPath})
+	req, err := http.NewRequest(http.MethodPut,
+		fmt.Sprintf("http://127.0.0.1:%d/configs?force=true", port), bytes.NewReader(body))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	if secret != "" {
+		req.Header.Set("Authorization", "Bearer "+secret)
+	}
+	client := &http.Client{Timeout: 8 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = resp.Body.Close() }()
+	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
+	if resp.StatusCode/100 != 2 {
+		return fmt.Errorf("mihomo reload: %s %s", resp.Status, strings.TrimSpace(string(raw)))
+	}
+	return nil
+}
+
+// restartEngineAsync 异步重启引擎（节点池配置变化后用）。
+// 引擎被显式关闭时不重启：只写配置，下次用户自己启动时生效。
+func (m *Manager) restartEngineAsync() {
+	if !engineEnabled(m.loadConfig()) {
+		log.Printf("node pool: engine disabled by config; skip restart")
+		return
+	}
+	go func() {
+		if err := m.RestartFreeTierEngine(NewRealRunner()); err != nil {
+			log.Printf("restart engine after node pool sync failed: %v", err)
+		}
+	}()
 }
 
 // StopNodeFarm 停止农场（幂等）。返回前最多等 3s 让旧进程退出，
@@ -356,23 +542,36 @@ func (m *Manager) writeEngineRegistration(ports []int) (string, error) {
 	return socksUDP, nil
 }
 
-// syncEngineRegistration 写注册代理 + SOCKS-UDP 中继，并重启引擎（异步）。
-func (m *Manager) syncEngineRegistration(ports []int) error {
-	if socks, err := m.writeEngineRegistration(ports); err != nil {
-		return err
-	} else if socks != "" {
+// syncRegistrationAfterApply 把农场端口写进引擎配置，并且只在「引擎能看到的
+// 配置真的变了」时重启引擎：
+//
+//   - 端口集合没变（固定 8 槽位）→ 只改了 mihomo 的槽位映射，引擎不用动；
+//   - 空 → 有（首次启用）、或 socks_udp 空↔有 → 引擎只在启动时读这两个字段，
+//     必须重启一次。
+func (m *Manager) syncRegistrationAfterApply() (hot bool, err error) {
+	info := m.NodeFarmInfo()
+	prevList, _ := m.ConfigGet("engine_warp_registration_proxies")
+	prevSocks, _ := m.ConfigGet("engine_warp_socks_udp")
+	socks, err := m.writeEngineRegistration(info.Ports)
+	if err != nil {
+		return false, err
+	}
+	if socks != "" && socks != prevSocks {
 		log.Printf("node pool: WARP handshake relay %s", socks)
 	}
-	go func() {
-		if err := m.RestartFreeTierEngine(NewRealRunner()); err != nil {
-			log.Printf("restart engine after node pool sync failed: %v", err)
-		}
-	}()
-	return nil
+	newList, _ := m.ConfigGet("engine_warp_registration_proxies")
+	if prevList == newList && prevSocks == socks {
+		log.Printf("node pool: engine registration unchanged (%d slots); no engine restart", len(info.Ports))
+		return true, nil
+	}
+	m.restartEngineAsync()
+	return false, nil
 }
 
-// ApplyNodePool 保存选中项、启动农场、同步到引擎。
-func (m *Manager) ApplyNodePool(selected []string) error {
+// ApplyNodePool 保存选中项、启动/热重载农场、同步到引擎。
+//
+// hot=true 表示没有重启引擎：增删节点只换槽位映射（下一次出口注册生效）。
+func (m *Manager) ApplyNodePool(selected []string) (hot bool, err error) {
 	clean := make([]string, 0, len(selected))
 	seen := map[string]bool{}
 	for _, s := range selected {
@@ -384,7 +583,7 @@ func (m *Manager) ApplyNodePool(selected []string) error {
 		clean = append(clean, s)
 	}
 	if err := m.ConfigSet("node_pool_selected", strings.Join(clean, "\n")); err != nil {
-		return err
+		return false, err
 	}
 	if b := "false"; len(clean) > 0 {
 		_ = m.ConfigSet("node_pool_enabled", "true")
@@ -392,16 +591,25 @@ func (m *Manager) ApplyNodePool(selected []string) error {
 		_ = m.ConfigSet("node_pool_enabled", b)
 	}
 	if len(clean) == 0 {
-		return m.DisableNodePool()
+		return false, m.DisableNodePool()
 	}
-	if err := m.StartNodeFarm(); err != nil {
-		return err
-	}
+	// 农场已按固定槽位在跑：先热重载映射（引擎完全不动）；失败再重建农场。
 	info := m.NodeFarmInfo()
-	if len(info.Ports) == 0 {
-		return fmt.Errorf("农场未就续: %s", info.LastError)
+	if info.Running && len(info.Ports) == nodeFarmSlots {
+		if rerr := m.ReloadNodeFarm(m.SelectedNodes()); rerr != nil {
+			log.Printf("node pool: hot reload failed (%v); rebuilding farm", rerr)
+			if serr := m.StartNodeFarm(); serr != nil {
+				return false, serr
+			}
+		}
+	} else if serr := m.StartNodeFarm(); serr != nil {
+		return false, serr
 	}
-	return m.syncEngineRegistration(info.Ports)
+	info = m.NodeFarmInfo()
+	if len(info.Ports) == 0 {
+		return false, fmt.Errorf("农场未就绪: %s", info.LastError)
+	}
+	return m.syncRegistrationAfterApply()
 }
 
 // AutoStartNodePool 启动时按配置恢复农场（仅当启用且已选节点）。
@@ -446,6 +654,14 @@ func (m *Manager) refreshNodePoolIfDue() {
 	}
 	if _, _, err := m.ImportNodePool(cfg.NodePoolSubscriptionURL, ""); err != nil {
 		log.Printf("node pool refresh failed: %v", err)
+		return
+	}
+	// 订阅刷新可能改了节点参数（server / 密码 / udp）：农场在跑就热重载一次，
+	// 让新参数在下一轮注册生效 —— 不重启引擎。
+	if info := m.NodeFarmInfo(); info.Running && len(info.Ports) == nodeFarmSlots {
+		if err := m.ReloadNodeFarm(m.SelectedNodes()); err != nil {
+			log.Printf("node farm reload after subscription refresh failed: %v", err)
+		}
 	}
 }
 
@@ -459,11 +675,7 @@ func (m *Manager) DisableNodePool() error {
 	if err := m.ConfigSet("engine_warp_socks_udp", ""); err != nil {
 		return err
 	}
-	go func() {
-		if err := m.RestartFreeTierEngine(NewRealRunner()); err != nil {
-			log.Printf("restart engine after node pool disable failed: %v", err)
-		}
-	}()
+	m.restartEngineAsync()
 	return nil
 }
 
@@ -487,6 +699,7 @@ func (m *Manager) NodePoolStatusOf() NodePoolStatus {
 		NodeCount:   len(cache.Nodes),
 		SelectedLen: len(sel),
 		HiddenCount: len(cache.Hidden),
+		Slots:       info.Slots,
 		SocksUDP:    cfg.EngineWarpSocksUDP,
 		LastError:   info.LastError,
 		UpdatedAt:   cache.FetchedAt,
@@ -500,7 +713,13 @@ func (m *Manager) NodePoolStatusOf() NodePoolStatus {
 	if len(info.Ports) > 0 {
 		st.SyncedTo = "engine_warp_registration_proxies"
 	}
-	// 中继不可用的两种原因直接告诉用户，避免「导了节点还是起不来」的困惑。
+	var warns []string
+	// 端口漂移：农场崩溃重启后若端口被别的进程占走，会换一组端口，而引擎
+	// 只在启动时读注册表 —— 不提示的话注册会静默走死端口。
+	if st.Running && len(info.Ports) > 0 && registrationPortDrift(cfg.EngineWarpRegistrationProxies, info.Ports) {
+		warns = append(warns, "农场端口与引擎注册表不一致（端口漂移）：重启引擎或重新「应用」一次")
+	}
+	// 中继不可用的原因直接告诉用户，避免「导了节点还是起不来」的困惑。
 	if st.Enabled {
 		selected := m.SelectedNodes()
 		hasUDP := false
@@ -512,16 +731,48 @@ func (m *Manager) NodePoolStatusOf() NodePoolStatus {
 		}
 		switch {
 		case strings.TrimSpace(cfg.EngineWarpSourceIPv6) != "":
-			st.Warning = "已配置源 IPv6 前缀：引擎要求它与 SOCKS-UDP 互斥，已跳过握手中继"
+			warns = append(warns, "已配置源 IPv6 前缀：引擎要求它与 SOCKS-UDP 互斥，已跳过握手中继")
 		case !m.engineSupportsRegistrationProxies():
-			st.Warning = "当前引擎不支持注册代理轮换（warp.registration_proxies）：只启用 SOCKS-UDP 中继，可用出口会比所选节点少"
+			warns = append(warns, "当前引擎不支持注册代理轮换（warp.registration_proxies）：只启用 SOCKS-UDP 中继，可用出口会比所选节点少")
 		case len(selected) > 0 && !hasUDP:
-			st.Warning = "所选节点都不支持 UDP：握手中继不可用，WARP 握手仍会直连并可能失败"
+			warns = append(warns, "所选节点都不支持 UDP：握手中继不可用，WARP 握手仍会直连并可能失败")
 		case st.SocksUDP == "" && hasUDP:
-			st.Warning = "尚未写入握手中继，点一次「应用并重启引擎」生效"
+			warns = append(warns, "尚未写入握手中继，点一次「应用」生效")
 		}
 	}
+	st.Warning = strings.Join(warns, "；")
 	return st
+}
+
+// registrationPortDrift 判断引擎注册表里的端口集合与当前农场端口是否一致。
+// 空注册表（未启用/引擎不支持）不算漂移。
+func registrationPortDrift(proxies []string, ports []int) bool {
+	cur := map[int]bool{}
+	for _, line := range proxies {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		u, err := url.Parse(line)
+		if err != nil {
+			continue
+		}
+		if p, perr := strconv.Atoi(u.Port()); perr == nil {
+			cur[p] = true
+		}
+	}
+	if len(cur) == 0 {
+		return false
+	}
+	if len(cur) != len(ports) {
+		return true
+	}
+	for _, p := range ports {
+		if !cur[p] {
+			return true
+		}
+	}
+	return false
 }
 
 // nodePoolOn 节点池开关（未配置默认关闭）。
