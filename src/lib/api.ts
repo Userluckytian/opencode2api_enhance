@@ -538,6 +538,17 @@ export type MetricSuggestions = {
 }
 
 
+/** 一个注册代理（节点池槽位）的累计注册结果 */
+export type WarpRegistrar = {
+  index: number
+  proxy: string
+  attempts: number
+  successes: number
+  failures: number
+  last_error?: string
+  last_at?: string
+}
+
 /** 免费层引擎（40080）状态 */
 export type FreeTierEngineStatus = {
   /** stopped | starting | ready | failed */
@@ -564,6 +575,8 @@ export type FreeTierEngineStatus = {
   warp_cooling: number
   /** 管理器正在重启引擎（stop→start→等健康）：驱动「重启中」并禁用重启按钮 */
   restarting: boolean
+  /** 每个注册代理（= 节点池槽位）的累计注册成败；2.0.16 引擎补丁提供 */
+  warp_registrars?: WarpRegistrar[]
   restart_started_at?: string
   /** WARP 池空时的自动降级状态 */
   warp_fallback: WarpFallbackStatus

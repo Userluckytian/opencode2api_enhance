@@ -1,0 +1,195 @@
+diff --git a/internal/gateway/health.go b/internal/gateway/health.go
+index 98e0667..cab8948 100644
+--- a/internal/gateway/health.go
++++ b/internal/gateway/health.go
+@@ -11,6 +11,7 @@ import (
+ 	modelcatalog "opencode2api/internal/models"
+ 	"opencode2api/internal/oauth"
+ 	wire "opencode2api/internal/protocol"
++	"opencode2api/internal/warp"
+ )
+ 
+ type healthResponse struct {
+@@ -59,6 +60,9 @@ type healthWarp struct {
+ 	Active  int    `json:"active"`
+ 	Standby int    `json:"standby"`
+ 	Cooling int    `json:"cooling"`
++	// Registrars attributes registrations to warp.registration_proxies entries
++	// so the manager can show per-node success/failure.
++	Registrars []warp.RegistrarStat `json:"registrars,omitempty"`
+ }
+ 
+ // handleHealth reports readiness. It answers 503 while the model catalog is
+@@ -84,13 +88,14 @@ func (g *Gateway) handleHealth(w http.ResponseWriter, _ *http.Request) {
+ 		snapshot := g.warp.Snapshot()
+ 		warpActive = snapshot.Active
+ 		warpStatus = &healthWarp{
+-			Status:  "unavailable",
+-			Stack:   snapshot.Stack,
+-			Size:    snapshot.Size,
+-			Preload: snapshot.Preload,
+-			Active:  snapshot.Active,
+-			Standby: snapshot.Standby,
+-			Cooling: snapshot.Cooling,
++			Status:     "unavailable",
++			Stack:      snapshot.Stack,
++			Size:       snapshot.Size,
++			Preload:    snapshot.Preload,
++			Active:     snapshot.Active,
++			Standby:    snapshot.Standby,
++			Cooling:    snapshot.Cooling,
++			Registrars: snapshot.Registrars,
+ 		}
+ 		if snapshot.Active > 0 {
+ 			warpStatus.Status = "ready"
+diff --git a/internal/warp/pool.go b/internal/warp/pool.go
+index 0dc92b2..99fd8bf 100644
+--- a/internal/warp/pool.go
++++ b/internal/warp/pool.go
+@@ -180,6 +180,10 @@ type Pool struct {
+ 	// relay is the shared SOCKS5 UDP circuit breaker; nil when the outer UDP
+ 	// goes direct.
+ 	relay *relayGuard
++	// registrars is the fixed rotation list built at construction; Snapshot
++	// reports their cumulative counters so the panel can attribute
++	// registrations to individual proxy slots.
++	registrars []*registrar
+ 
+ 	mu            sync.Mutex
+ 	active        []*exit
+@@ -225,6 +229,21 @@ type Snapshot struct {
+ 	Standby int
+ 	Cooling int
+ 	Egress  []string
++	// Registrars mirrors warp.registration_proxies: index i is the i-th proxy,
++	// with cumulative registration outcomes.
++	Registrars []RegistrarStat
++}
++
++// RegistrarStat is one registration proxy's cumulative outcome counters.
++// Index matches warp.registration_proxies order (0-based).
++type RegistrarStat struct {
++	Index     int    `json:"index"`
++	Proxy     string `json:"proxy"`
++	Attempts  int    `json:"attempts"`
++	Successes int    `json:"successes"`
++	Failures  int    `json:"failures"`
++	LastError string `json:"last_error,omitempty"`
++	LastAt    string `json:"last_at,omitempty"`
+ }
+ 
+ // Options configure a WARP pool.
+@@ -325,7 +344,9 @@ func NewWithOptions(ctx context.Context, log *slog.Logger, opts Options) (*Pool,
+ 				return nil, fmt.Errorf("WARP socks_udp: %w", err)
+ 			}
+ 		}
+-		reg, err := nextRegistrar().register(ctx)
++		registrar := nextRegistrar()
++		reg, err := registrar.register(ctx)
++		registrar.record(err)
+ 		if err != nil {
+ 			if guard != nil {
+ 				guard.abandon()
+@@ -356,6 +377,7 @@ func NewWithOptions(ctx context.Context, log *slog.Logger, opts Options) (*Pool,
+ 	}
+ 	pool.stack = normalized
+ 	pool.relay = guard
++	pool.registrars = registrars
+ 	return pool, nil
+ }
+ 
+@@ -818,6 +840,22 @@ func (p *Pool) Snapshot() Snapshot {
+ 			snapshot.Egress = append(snapshot.Egress, active.egress.String())
+ 		}
+ 	}
++	for i, r := range p.registrars {
++		stat := RegistrarStat{
++			Index:     i,
++			Proxy:     r.proxy,
++			Attempts:  int(r.attempts.Load()),
++			Successes: int(r.successes.Load()),
++			Failures:  int(r.failures.Load()),
++		}
++		r.errMu.Lock()
++		stat.LastError = r.lastErr
++		if !r.lastAt.IsZero() {
++			stat.LastAt = r.lastAt.UTC().Format(time.RFC3339)
++		}
++		r.errMu.Unlock()
++		snapshot.Registrars = append(snapshot.Registrars, stat)
++	}
+ 	return snapshot
+ }
+ 
+diff --git a/internal/warp/registrar.go b/internal/warp/registrar.go
+index a44036c..379f17f 100644
+--- a/internal/warp/registrar.go
++++ b/internal/warp/registrar.go
+@@ -17,6 +17,7 @@ import (
+ 	"strconv"
+ 	"strings"
+ 	"sync"
++	"sync/atomic"
+ 	"syscall"
+ 	"time"
+ )
+@@ -92,10 +93,42 @@ type registrar struct {
+ 	direct *http.Client
+ 	log    logger
+ 
++	// proxy labels the registration source ("direct" when none). The panel
++	// attributes WARP exits to nodes through this string.
++	proxy string
++	// counters back the per-node status column: attempts / successes / failures
++	// and the last failure reason. They are cumulative for the process lifetime.
++	attempts  atomic.Uint64
++	successes atomic.Uint64
++	failures  atomic.Uint64
++	errMu     sync.Mutex
++	lastErr   string
++	lastAt    time.Time
++
+ 	mu          sync.Mutex
+ 	blockedTill time.Time
+ }
+ 
++// record notes one registration attempt. Errors keep their message and time so
++// the panel can say why a node failed instead of a bare red dot.
++func (r *registrar) record(err error) {
++	if r == nil {
++		return
++	}
++	r.attempts.Add(1)
++	r.errMu.Lock()
++	r.lastAt = time.Now()
++	if err != nil {
++		r.lastErr = err.Error()
++	}
++	r.errMu.Unlock()
++	if err != nil {
++		r.failures.Add(1)
++	} else {
++		r.successes.Add(1)
++	}
++}
++
+ func newRegistrar(log logger, proxy *url.URL, tun bool) *registrar {
+ 	// Registration is plain HTTPS, so a TUN device that owns the default route
+ 	// captures it just like it captures the WireGuard UDP. Pinning the dialer
+@@ -120,9 +153,14 @@ func newRegistrar(log logger, proxy *url.URL, tun bool) *registrar {
+ 		IdleConnTimeout:     30 * time.Second,
+ 		TLSHandshakeTimeout: 10 * time.Second,
+ 	}
++	label := "direct"
++	if proxy != nil {
++		label = proxy.String()
++	}
+ 	r := &registrar{
+-		base: defaultAPIBase,
+-		log:  log,
++		base:  defaultAPIBase,
++		log:   log,
++		proxy: label,
+ 	}
+ 	if proxy != nil {
+ 		// The proxy is a local or LAN listener, so the proxied client must not

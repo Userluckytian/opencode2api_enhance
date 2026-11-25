@@ -48,15 +48,25 @@ All rights reserved（明确未授予复制/修改/分发/使用），且配置�
    此前本节误记该字段在上游里；实际它来自下面的本地补丁。正式包引擎因此
    会拒绝该字段（DisallowUnknownFields），管理器曾因此写出坏配置。
 
-3b) 本地补丁（构建时由 CI / 脚本应用，随源码包一起分发）
-   文件    : patches/registration-proxies.patch
+3b) 本地补丁（构建时由 CI / 脚本按文件名顺序应用，随源码包一起分发）
+   文件 1  : patches/registration-proxies.patch
    改动    : internal/config/config.go（WarpConfig 新字段 + Normalize 校验）
              internal/gateway/runtime.go（把列表转成注册代理 URL）
              internal/warp/pool.go（多个 registrar 轮换注册出口）
    规模    : 3 文件，+73 行
    作用    : 每次注册换一个源代理，让 Cloudflare 下发不同的 /64，
              从而在不改数据面（仍走 socks_udp/直连）的前提下拿到多个出口。
-   适用    : 应用后 `git apply` 再编译；CI 会把补丁提交进 engine-src，
+
+   文件 2  : patches/registrar-stats.patch
+   改动    : internal/warp/registrar.go（每个 registrar 记 attempts/successes/
+             failures/last_error/last_at）
+             internal/warp/pool.go（RegistrarStat 类型，Snapshot 暴露）
+             internal/gateway/health.go（/healthz 的 warp.registrars 数组）
+   规模    : 3 文件，+91 行
+   作用    : 面板可以按「注册代理 = 节点池槽位」显示每个节点的注册中/成功/失败，
+             而不是只有一个池子总数。
+
+   适用    : 两个补丁按名称顺序应用后再编译；CI 会把补丁提交进 engine-src，
              因此 git archive 导出的源码与二进制一致（GPL-3.0 要求）。
 
 4) 构建命令（CI 与本仓库脚本 scripts/fetch-free-tier-engine.ps1 一致）

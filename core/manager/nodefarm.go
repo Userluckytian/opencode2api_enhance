@@ -712,8 +712,25 @@ func (m *Manager) NodePoolStatusOf() NodePoolStatus {
 	}
 	if len(info.Ports) > 0 {
 		st.SyncedTo = "engine_warp_registration_proxies"
+		// 槽位 → 节点指纹：与引擎 warp.registrars 的 index 一一对应。
+		slots := m.farmNodes()
+		st.SlotsNodes = make([]string, 0, len(slots))
+		for _, n := range slots {
+			st.SlotsNodes = append(st.SlotsNodes, n.Fingerprint)
+		}
 	}
 	var warns []string
+	// 槽位有限：超出部分的节点不会参与注册轮换，必须说清楚，否则用户会以为
+	// 选中的 47 个节点都在用。
+	if st.Enabled && len(info.Ports) > 0 && len(sel) > len(info.Ports) {
+		unique := map[string]bool{}
+		for _, n := range m.farmNodes() {
+			unique[n.Fingerprint] = true
+		}
+		warns = append(warns, fmt.Sprintf(
+			"已选 %d 个节点，注册轮换固定 %d 个槽位，实际只用到前 %d 个（其余为备用）",
+			len(sel), len(info.Ports), len(unique)))
+	}
 	// 端口漂移：农场崩溃重启后若端口被别的进程占走，会换一组端口，而引擎
 	// 只在启动时读注册表 —— 不提示的话注册会静默走死端口。
 	if st.Running && len(info.Ports) > 0 && registrationPortDrift(cfg.EngineWarpRegistrationProxies, info.Ports) {

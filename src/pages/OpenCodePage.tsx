@@ -463,6 +463,7 @@ export default function OpenCodePage({ toast }: { toast: (msg: string, ok?: bool
           // 应用会触发引擎重启：立刻把本页切到「重启中」，顶部按钮同步禁用。
           onEngineRestarting={() => setRestartingAt(Date.now())}
           engineRestarting={engineRestarting}
+          engineStatus={status}
         />
       </div>
 

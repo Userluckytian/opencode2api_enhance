@@ -1,5 +1,18 @@
 # Changelog
 
+## v2.0.16（2026-11-25）
+
+### 变更
+
+- **节点池每行新增「注册状态」列**：注册中 / 成功 N / 失败 N（悬停显示最近一次错误）。数据来自新增的引擎补丁 `patches/registrar-stats.patch`：每个注册代理记 attempts/successes/failures/last_error/last_at，并通过 `/healthz` 的 `warp.registrars` 暴露；管理器按「槽位 → 节点」聚合回每个节点。实测（3 个节点、8 槽位、真 Cloudflare）：`成功 1 / 成功 1 / 失败 1（create WARP device: Cloudflare registration paused for 1m0s: error code: 1015）`。
+- 应用按钮文案改为「应用节点（注册 WARP 出口）」；选中的节点超过 8 个时，面板提示「实际只用到前 8 个（其余为备用）」——槽位数就是引擎一次能并行使用的注册源数量。
+- CI / 本地脚本改为按文件名顺序应用 `patches/*.patch`（当前 2 个），并在编译前断言两个补丁都落到源码上（`RegistrationProxies`、`RegistrarStat`），产物里同时自检 `registration_proxies` 与 `registrars`。
+
+### 说明
+
+- 应用只改「槽位 → 节点」映射；新映射在**下一次出口注册**时生效（引擎不会为换源强制重注册）。想立刻换一批出口，可把「出口池大小」+1 再改回，或重启一次引擎。
+- 2.0.15 的热加保持不变：增删节点不重启引擎。
+
 ## v2.0.15（2026-11-25）
 
 ### 变更

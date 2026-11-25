@@ -62,6 +62,9 @@ type FreeTierEngineStatus struct {
 	// 也让节点池「应用」触发的重启和工具栏按钮共用同一个状态源。
 	Restarting       bool   `json:"restarting"`
 	RestartStartedAt string `json:"restart_started_at,omitempty"`
+	// WarpRegistrars 每个注册代理的累计成败（引擎 registrar-stats 补丁暴露）。
+	// index 与 warp.registration_proxies 顺序一致，也就是节点池槽位顺序。
+	WarpRegistrars []WarpRegistrar `json:"warp_registrars,omitempty"`
 	// WarpFallback WARP 池空时的自动降级状态（见 freetier_warp_fallback.go）。
 	WarpFallback WarpFallbackStatus `json:"warp_fallback"`
 	// BinPath / BinExists 引擎二进制位置与是否已安装。
@@ -69,6 +72,17 @@ type FreeTierEngineStatus struct {
 	BinExists bool   `json:"bin_exists"`
 	// Error 最近一次失败原因。
 	Error string `json:"error,omitempty"`
+}
+
+// WarpRegistrar 一个注册代理（节点池槽位）的累计注册结果。
+type WarpRegistrar struct {
+	Index     int    `json:"index"`
+	Proxy     string `json:"proxy"`
+	Attempts  int    `json:"attempts"`
+	Successes int    `json:"successes"`
+	Failures  int    `json:"failures"`
+	LastError string `json:"last_error,omitempty"`
+	LastAt    string `json:"last_at,omitempty"`
 }
 
 // freeTierEngine 引擎托管状态。
@@ -614,13 +628,14 @@ func (m *Manager) FreeTierEngineStatus() FreeTierEngineStatus {
 			Exposed int `json:"exposed"`
 		} `json:"models"`
 		Warp *struct {
-			Status  string `json:"status"`
-			Stack   string `json:"stack"`
-			Size    int    `json:"size"`
-			Preload int    `json:"preload"`
-			Standby int    `json:"standby"`
-			Active  int    `json:"active"`
-			Cooling int    `json:"cooling"`
+			Status     string          `json:"status"`
+			Stack      string          `json:"stack"`
+			Size       int             `json:"size"`
+			Preload    int             `json:"preload"`
+			Standby    int             `json:"standby"`
+			Active     int             `json:"active"`
+			Cooling    int             `json:"cooling"`
+			Registrars []WarpRegistrar `json:"registrars"`
 		} `json:"warp"`
 	}
 	if json.Unmarshal(body, &hz) == nil {
@@ -635,6 +650,7 @@ func (m *Manager) FreeTierEngineStatus() FreeTierEngineStatus {
 			st.WarpStandby = hz.Warp.Standby
 			st.WarpActive = hz.Warp.Active
 			st.WarpCooling = hz.Warp.Cooling
+			st.WarpRegistrars = hz.Warp.Registrars
 			e.mu.Lock()
 			e.warpCooling = hz.Warp.Cooling
 			e.mu.Unlock()

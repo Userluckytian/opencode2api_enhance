@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from 'react'
 import { Trash2 } from 'lucide-react'
+import type { FreeTierEngineStatus } from '../lib/api'
 
 // WARP 注册节点池：订阅 → 本地端口 → engine_warp_registration_proxies。
 // 只服务 OpenCode 免费层注册；设置里的「出口代理」不受影响。
@@ -27,6 +28,8 @@ type PoolStatus = {
   hidden_count?: number
   /** 固定注册槽位数（0 = 农场未按固定槽位运行） */
   slots?: number
+  /** 槽位 i 对应的节点指纹（与引擎 warp.registrars 的 index 对齐） */
+  slots_nodes?: string[]
   mihomo_path: string
   socks_udp?: string
   warning?: string
@@ -63,12 +66,15 @@ export default function NodePoolCard({
   toast,
   onEngineRestarting,
   engineRestarting,
+  engineStatus,
 }: {
   toast: (msg: string, ok?: boolean) => void
   /** 应用成功会触发引擎重启：通知父页面立刻切到「重启中」 */
   onEngineRestarting?: () => void
   /** 父页面判定的重启态（本卡片据此禁用按钮并显示进度） */
   engineRestarting?: boolean
+  /** 引擎状态：提供每槽位（= 每节点）的注册成败 */
+  engineStatus?: FreeTierEngineStatus | null
 }) {
   const [st, setSt] = useState<PoolStatus | null>(null)
   const [url, setUrl] = useState('')
@@ -178,6 +184,50 @@ export default function NodePoolCard({
     } finally {
       setBusy(null)
     }
+  }
+
+  // 节点注册状态：把引擎的 per-registrar 统计按「槽位 → 节点指纹」聚合回来。
+  // 槽位固定 8 个，选中超过 8 个时只有前 8 个进入轮换，其余显示「备用」。
+  const regOf = (fp: string) => {
+    const idxs = (st?.slots_nodes ?? [])
+      .map((x, i) => (x === fp ? i : -1))
+      .filter((i) => i >= 0)
+    if (idxs.length === 0) {
+      return {
+        label: '备用',
+        cls: 'bg-zinc-100 text-zinc-500',
+        title: '未进入注册槽位（固定 8 个槽位，按列表顺序取前 8 个节点）',
+      }
+    }
+    let attempts = 0
+    let successes = 0
+    let failures = 0
+    let lastErr = ''
+    for (const i of idxs) {
+      const r = (engineStatus?.warp_registrars ?? []).find((x) => x.index === i)
+      if (!r) continue
+      attempts += r.attempts
+      successes += r.successes
+      failures += r.failures
+      if (r.last_error) lastErr = r.last_error
+    }
+    const starting = Boolean(engineStatus?.restarting) || engineStatus?.state === 'starting'
+    if (attempts === 0) {
+      return starting
+        ? { label: '注册中…', cls: 'bg-amber-50 text-amber-700', title: '引擎正在注册 WARP 出口' }
+        : { label: '待注册', cls: 'bg-zinc-100 text-zinc-600', title: '槽位已就绪，下一次出口注册会走这个节点' }
+    }
+    if (failures > 0 && successes === 0) {
+      return { label: `失败 ${failures}`, cls: 'bg-red-50 text-red-600', title: lastErr || '注册失败' }
+    }
+    if (successes > 0 && failures > 0) {
+      return {
+        label: `成功 ${successes} / 失败 ${failures}`,
+        cls: 'bg-amber-50 text-amber-800',
+        title: lastErr,
+      }
+    }
+    return { label: `成功 ${successes}`, cls: 'bg-emerald-50 text-emerald-700', title: '' }
   }
 
   const toggle = (fp: string) => {
@@ -343,7 +393,9 @@ export default function NodePoolCard({
             </div>
           ) : null}
           <div className="max-h-64 overflow-auto rounded-lg border border-zinc-200 divide-y divide-zinc-100">
-            {st.nodes.map((n) => (
+            {st.nodes.map((n) => {
+              const reg = regOf(n.fingerprint)
+              return (
               <div
                 key={n.fingerprint}
                 className="flex items-center gap-3 px-3 py-2 text-[12px] hover:bg-zinc-50"
@@ -369,6 +421,10 @@ export default function NodePoolCard({
                 >
                   UDP {n.udp ? '✓' : '✗'}
                 </span>
+                {/* 注册状态列：数据来自引擎的 per-registrar 统计（2.0.16 补丁） */}
+                <span className={`px-1.5 py-0.5 rounded whitespace-nowrap ${reg.cls}`} title={reg.title}>
+                  {reg.label}
+                </span>
                 <button
                   onClick={() => void removeNodes([n.fingerprint])}
                   disabled={busy !== null || engineRestarting}
@@ -378,7 +434,8 @@ export default function NodePoolCard({
                   <Trash2 size={13} />
                 </button>
               </div>
-            ))}
+              )
+            })}
           </div>
           {st.ports.length > 0 ? (
             <div className="text-[11px] text-zinc-500 font-mono break-all">
@@ -423,7 +480,7 @@ export default function NodePoolCard({
             ? '应用中…'
             : engineRestarting
               ? '引擎重启中…'
-              : '应用并重启引擎'}
+              : '应用节点（注册 WARP 出口）'}
         </button>
         <button
           onClick={() => void disable()}
