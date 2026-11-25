@@ -66,23 +66,33 @@ $OutBin = [System.IO.Path]::GetFullPath((Join-Path $Root $OutBin))
 $outDir = Split-Path -Parent $OutBin
 if (-not (Test-Path $outDir)) { New-Item -ItemType Directory -Force -Path $outDir | Out-Null }
 
-# ---- 1. 取源码（固定 commit，克隆到临时目录）----
-# 不放仓库内：bin/ 之外的 engine-src 会污染 git 状态，临时目录用完即删。
+# ---- 1. 取源码（优先用仓库内快照，失败才回退 clone）----
+# 外部分叉 wbi35772/opencode2api-win 已两次 404，发布链路不能再依赖它：
+# 源码快照 third_party\opencode2api-win\src\opencode2api-win-1a208ac.tar.gz
+# 随仓库走，解包后再套 patches\ 下的补丁。
 # -SkipClone 时复用 <TEMP>\opencode2api-win-engine-src（离线重试方便）。
 $tmp = Join-Path ([System.IO.Path]::GetTempPath()) "opencode2api-win-engine-src"
 $src = $tmp
+$srcTgz = Join-Path $Root "third_party\opencode2api-win\src\opencode2api-win-1a208ac.tar.gz"
 if (-not $SkipClone) {
     if (Test-Path $src) { Remove-Item -Recurse -Force $src }
-    Write-Host "[1/3] git clone --no-checkout ..."
-    & git clone --no-checkout $Repo $src
-    if ($LASTEXITCODE -ne 0) { throw "git clone 失败（exit $LASTEXITCODE）：检查网络 / 仓库地址 $Repo" }
-    Push-Location $src
-    & git checkout $Commit
-    if ($LASTEXITCODE -ne 0) {
+    if (Test-Path $srcTgz) {
+        Write-Host "[1/3] 解包仓库内源码快照 ..."
+        New-Item -ItemType Directory -Path $src | Out-Null
+        & tar -xzf $srcTgz -C $src
+        if ($LASTEXITCODE -ne 0) { throw "解包失败：$srcTgz" }
+    } else {
+        Write-Host "[1/3] 快照缺失，回退 git clone --no-checkout ..."
+        & git clone --no-checkout $Repo $src
+        if ($LASTEXITCODE -ne 0) { throw "git clone 失败（exit $LASTEXITCODE）：检查网络 / 仓库地址 $Repo" }
+        Push-Location $src
+        & git checkout $Commit
+        if ($LASTEXITCODE -ne 0) {
+            Pop-Location
+            throw "git checkout $Commit 失败：该提交在上游可能已不可见，请更新 SOURCE.txt 与 -Commit"
+        }
         Pop-Location
-        throw "git checkout $Commit 失败：该提交在上游可能已不可见，请更新 SOURCE.txt 与 -Commit"
     }
-    Pop-Location
 } elseif (-not (Test-Path (Join-Path $src "go.mod"))) {
     throw ("-SkipClone 但临时源码目录不存在或不完整：{0}；请先不带 -SkipClone 运行一次" -f $src)
 }
