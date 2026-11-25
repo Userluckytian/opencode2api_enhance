@@ -57,6 +57,21 @@ fn manager_port(kind: EnvKind) -> u16 {
     pick_free_port(slot_base(kind), 32)
 }
 
+/// 等待 core 管理端口可连接（开发模式下窗口直接加载 core 的 SPA，先等它就绪避免白屏）。
+fn wait_core_ready(port: u16, timeout: std::time::Duration) {
+    let deadline = std::time::Instant::now() + timeout;
+    let addr: std::net::SocketAddr = match format!("127.0.0.1:{port}").parse() {
+        Ok(a) => a,
+        Err(_) => return,
+    };
+    while std::time::Instant::now() < deadline {
+        if std::net::TcpStream::connect_timeout(&addr, std::time::Duration::from_millis(300)).is_ok() {
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(200));
+    }
+}
+
 /// 从 start 起扫描 budget 个端口，返回第一个当前空闲（无监听）的端口。
 /// 用于避开同机其它环境已占用的管理器端口。
 fn pick_free_port(start: u16, budget: u16) -> u16 {
@@ -199,6 +214,10 @@ pub fn run() {
         run_headless(effective_port, core_child, core_job);
         return;
     }
+
+    // 开发/调试：devUrl 指向 core 自身端口（不再走 vite 1420），
+    // core 绑定需要一点时间，先等它就绪再建窗口，避免首屏白屏。
+    wait_core_ready(effective_port, std::time::Duration::from_secs(20));
 
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())

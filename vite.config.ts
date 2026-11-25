@@ -17,6 +17,9 @@ export default defineConfig({
     // Tauri devUrl 必须与此端口一致；固定端口避免 5173 被占用时 Vite 静默切到其它端口。
     port: 1420,
     strictPort: true,
+    // 必须绑 IPv4：WebView2 的 localhost 解析优先 127.0.0.1，
+    // 只监听 ::1 时 Tauri 窗口会白屏（浏览器却能打开）。
+    host: '127.0.0.1',
     // headless 开发：浏览器访问 vite dev server 时 /api 转发到本地管理服务
     proxy: {
       '/api': {
