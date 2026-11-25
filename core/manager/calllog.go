@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -122,6 +123,21 @@ func (m *Manager) ProviderServiceCallLogPath() string {
 	return filepath.Join(m.paths.RuntimeDir, providerServiceDirBase, "call_log.jsonl")
 }
 
+// EngineCallLogClearedOffsetPath 记录「清空日志」时引擎 stdout 的已读偏移。
+// 引擎在写该文件，不能截断，只能用偏移隐藏清空前的内容。
+func (m *Manager) EngineCallLogClearedOffsetPath() string {
+	return filepath.Join(m.paths.FreeTierEngineDir(), "stdout.log.cleared-offset")
+}
+
+func (m *Manager) engineLogClearedOffset() int64 {
+	raw, err := os.ReadFile(m.EngineCallLogClearedOffsetPath())
+	if err != nil {
+		return 0
+	}
+	n, _ := strconv.ParseInt(strings.TrimSpace(string(raw)), 10, 64)
+	return n
+}
+
 // ReadCallLog 读取并合并调用日志（供应商服务 JSONL + OpenCode 引擎 stdout 事件）。
 // max<=0 = 全部历史；max>0 = 只取最近 max 条。
 // 缺失/损坏 → 空数组。两个来源按时间升序合并，前端按 vendor 维度筛选。
@@ -158,7 +174,7 @@ func (m *Manager) ReadCallLog(max int) []CallLogRecord {
 	go func() {
 		defer wg.Done()
 		defer func() { <-sem }()
-		parts[len(files)] = readEngineCallLog(m.EngineStdoutLogPath(), tail)
+		parts[len(files)] = readEngineCallLog(m.EngineStdoutLogPath(), tail, m.engineLogClearedOffset())
 	}()
 	wg.Wait()
 
@@ -326,6 +342,11 @@ func (m *Manager) ClearCallLog() error {
 		}
 	} else if err := removeLogFileRetry(m.ProviderServiceCallLogPath()); err != nil {
 		errs = append(errs, "供应商服务: "+err.Error())
+	}
+	// OpenCode 引擎的调用记录在 stdout.log：引擎在写，不能截断，
+	// 记下当前大小作为新的读取起点，清空后的页面看不到旧记录。
+	if st, err := os.Stat(m.EngineStdoutLogPath()); err == nil {
+		_ = os.WriteFile(m.EngineCallLogClearedOffsetPath(), []byte(strconv.FormatInt(st.Size(), 10)), 0o644)
 	}
 	if len(errs) > 0 {
 		return fmt.Errorf("清空日志失败: %s", strings.Join(errs, "；"))

@@ -22,6 +22,7 @@ import (
 	"bufio"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -77,22 +78,35 @@ func (m *Manager) EngineStdoutLogPath() string {
 
 // readEngineCallLog 从引擎 stdout 末尾解析调用事件，转成统一记录。
 //
-// max<=0 = 全部；max>0 = 只取最近 max 条。文件缺失/行损坏一律跳过，不报错
-// （引擎未启动时该文件可能不存在）。
-func readEngineCallLog(path string, max int) []CallLogRecord {
+// max<=0 = 全部；max>0 = 只取最近 max 条。skip>0 时从该字节偏移开始读
+// （用于「清空日志」：只隐藏清空前的内容，不打断引擎句柄）。
+// 文件缺失/行损坏一律跳过，不报错（引擎未启动时该文件可能不存在）。
+func readEngineCallLog(path string, max int, skip int64) []CallLogRecord {
 	f, err := os.Open(path)
 	if err != nil {
 		return nil
 	}
 	defer func() { _ = f.Close() }()
+	if skip > 0 {
+		// 文件被截断/轮转（引擎重装或手工清理）后偏移会越过文件尾，
+		// 继续从 skip 读就永远读不到记录 —— 退回从头读。
+		if st, err := f.Stat(); err == nil && st.Size() < skip {
+			skip = 0
+		}
+	}
+	if skip > 0 {
+		if _, err := f.Seek(skip, io.SeekStart); err != nil {
+			return nil
+		}
+	}
 
 	// 逐行扫描（不整文件读入：引擎长跑后 stdout 可以很大）。
-	// 为限制内存，只保留最后 max 条（max<=0 时也设一个内部上限，避免爆内存）。
+	// max<=0 时不再硬编码 5000 条上限，改为 20 万条软上限防 OOM（面板显示真实总数）。
 	keep := max
 	if keep <= 0 {
-		keep = 5000
+		keep = 200000
 	}
-	ring := make([]CallLogRecord, 0, keep)
+	records := make([]CallLogRecord, 0, 1024)
 	sc := bufio.NewScanner(f)
 	// 引擎单行最长可能几 KB（含 legs 链），放宽缓冲。
 	sc.Buffer(make([]byte, 64*1024), 1024*1024)
@@ -108,18 +122,17 @@ func readEngineCallLog(path string, max int) []CallLogRecord {
 		if raw.Event != "request_routed" {
 			continue
 		}
-		rec := engineRecordFromLine(raw)
-		if len(ring) < keep {
-			ring = append(ring, rec)
-		} else {
-			copy(ring, ring[1:])
-			ring[len(ring)-1] = rec
+		records = append(records, engineRecordFromLine(raw))
+		if len(records) >= keep+keep/8 {
+			// 摊还 O(1) 地丢掉最旧的记录，把内存压在 keep 附近；
+			// 不能等扫描完再切（那会先把整个文件堆进内存）。
+			records = append(records[:0], records[len(records)-keep:]...)
 		}
 	}
-	if err := sc.Err(); err != nil {
-		return ring
+	if len(records) > keep {
+		records = records[len(records)-keep:]
 	}
-	return ring
+	return records
 }
 
 // parseEngineLegs 解析引擎的 legs 字段：`<key>:<status>:<ms>`，空格分隔。
