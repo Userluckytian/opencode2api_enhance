@@ -608,12 +608,15 @@ func nodePoolHealthSec(cfg Config) int {
 	return *cfg.NodePoolHealthSec
 }
 
+// effectiveSocksUDP 决定下发给引擎的 warp.socks_udp。
+//
+// 手动值永远优先：注册源（节点池）和握手 UDP 中继是两件事——实测过
+// 「节点 TCP 能注册、UDP 转发不通」的订阅；这时应保留节点池做注册轮换，
+// 同时把握手交给能用的本地代理（如 Clash 的 socks5）。
+// 手动留空时才用农场槽位 0（或停用后的残留值）。
 func effectiveSocksUDP(cfg Config, nodePoolOn bool) string {
-	manual := strings.TrimSpace(cfg.EngineWarpSocksUDPManual)
-	if nodePoolOn {
-		return cfg.EngineWarpSocksUDP
-	}
-	if manual != "" {
+	_ = nodePoolOn // 保留参数：调用点语义清晰，将来若要按模式切换再启用
+	if manual := strings.TrimSpace(cfg.EngineWarpSocksUDPManual); manual != "" {
 		return manual
 	}
 	return cfg.EngineWarpSocksUDP

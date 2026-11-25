@@ -170,20 +170,20 @@ export default function WarpPoolCard({
       <div className="mt-3">
         <label className="space-y-1 block">
           <span className="text-[12px] text-zinc-600">
-            UDP 中继（socks5://host:port，留空 = 直连）
-            {poolManaged ? ' · 由节点池管理' : ''}
+            UDP 中继（socks5://host:port，留空 = 用节点池槽位 0 / 直连）
+            {poolManaged ? ' · 节点池管理注册源' : ''}
           </span>
           <input
             type="text"
             placeholder="socks5://127.0.0.1:7890"
-            value={poolManaged ? (status?.warp_socks_udp ?? '') : relay}
-            disabled={poolManaged}
+            value={relay}
             onChange={(e) => setRelay(e.target.value)}
             className="w-full px-3 py-2 rounded-lg border border-zinc-200 text-[13px] font-mono disabled:bg-zinc-50 disabled:text-zinc-500"
           />
         </label>
         <div className="mt-1 text-[11px] text-zinc-500">
-          本机没有公网 IPv6 时，WireGuard 握手必须经 SOCKS5 UDP 转发；填你本地代理的 socks5 端口即可。
+          本机没有公网 IPv6 时，WireGuard 握手必须经 SOCKS5 UDP 转发。手动值与节点池无关：
+          填了就用它（推荐填本地 Clash 的 socks5），留空才用节点池槽位 0。
           当前生效：<span className="font-mono">{status?.warp_socks_udp || '直连'}</span>
           {!poolManaged && relay.trim() !== savedRelay ? '（未保存）' : ''}
           {!poolManaged && relay.trim() === savedRelay && relay.trim() !== (status?.warp_socks_udp ?? '') && relay.trim()
