@@ -150,7 +150,7 @@ func (m *Manager) updateManifest(ctx context.Context, target, arch string) ([]by
 	}
 	m.updateManifestMu.Unlock()
 
-	raw, source, err := fetchFirstReachable(ctx, updateManifestCandidates())
+	raw, source, err := fetchManifest(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -168,7 +168,19 @@ func (m *Manager) updateManifest(ctx context.Context, target, arch string) ([]by
 	return body, nil
 }
 
-// updateManifestCandidates 清单地址的候选：GitHub 直连 + 各镜像，直连排最后兜底。
+// fetchManifest 取 latest.json：**优先 GitHub 直连**，失败才退回镜像。
+//
+// 为什么不优先走镜像：镜像会缓存清单（实测发布 2.0.12 后仍返回 2.0.11），
+// 而清单只有几 KB，直连代价很小。镜像只用来改写**安装包**地址。
+func fetchManifest(ctx context.Context) ([]byte, string, error) {
+	if body, err := httpGetLimited(ctx, updateManifestURL, 1<<20); err == nil && json.Valid(body) {
+		return body, updateManifestURL, nil
+	}
+	// 直连拿不到（被墙/超时）：退回镜像，但宁可失败也不让壳拿到过期清单。
+	return fetchFirstReachable(ctx, updateManifestCandidates())
+}
+
+// updateManifestCandidates 清单地址的候选：各镜像 + GitHub 直连兜底。
 func updateManifestCandidates() []string {
 	out := make([]string, 0, len(updateMirrorTable)+1)
 	for _, mirror := range updateMirrorTable {

@@ -322,7 +322,13 @@ func (m *Manager) writeEngineRegistration(ports []int) (string, error) {
 	for _, p := range ports {
 		list = append(list, "http://127.0.0.1:"+strconv.Itoa(p))
 	}
-	if err := m.ConfigSet("engine_warp_registration_proxies", strings.Join(list, "\n")); err != nil {
+	// 引擎不支持 registration_proxies 时**必须**写空：正式版引擎用
+	// DisallowUnknownFields，残留这个键会让它启动即退出（见 enginecaps.go）。
+	if m.engineSupportsRegistrationProxies() {
+		if err := m.ConfigSet("engine_warp_registration_proxies", strings.Join(list, "\n")); err != nil {
+			return "", err
+		}
+	} else if err := m.ConfigSet("engine_warp_registration_proxies", ""); err != nil {
 		return "", err
 	}
 
@@ -506,6 +512,8 @@ func (m *Manager) NodePoolStatusOf() NodePoolStatus {
 		switch {
 		case strings.TrimSpace(cfg.EngineWarpSourceIPv6) != "":
 			st.Warning = "已配置源 IPv6 前缀：引擎要求它与 SOCKS-UDP 互斥，已跳过握手中继"
+		case !m.engineSupportsRegistrationProxies():
+			st.Warning = "当前引擎不支持注册代理轮换（warp.registration_proxies）：只启用 SOCKS-UDP 中继，可用出口会比所选节点少"
 		case len(selected) > 0 && !hasUDP:
 			st.Warning = "所选节点都不支持 UDP：握手中继不可用，WARP 握手仍会直连并可能失败"
 		case st.SocksUDP == "" && hasUDP:

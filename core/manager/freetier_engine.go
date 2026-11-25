@@ -275,6 +275,13 @@ func (m *Manager) buildEngineConfigBytes() ([]byte, error) {
 	if len(proxies) == 0 {
 		proxies = []string{"direct"}
 	}
+	// 引擎不支持 registration_proxies 时必须丢掉这个键：正式版引擎用
+	// DisallowUnknownFields 解析，多一个字段就整份配置加载失败
+	// （OpenCode 直接起不来）。详见 enginecaps.go。
+	registrationProxies := cfg.EngineWarpRegistrationProxies
+	if len(registrationProxies) > 0 && !m.engineSupportsRegistrationProxies() {
+		registrationProxies = nil
+	}
 
 	ec := engineConfig{
 		Listen:     fmt.Sprintf("127.0.0.1:%d", port),
@@ -306,7 +313,7 @@ func (m *Manager) buildEngineConfigBytes() ([]byte, error) {
 			PoolSize:            poolSize,
 			Stack:               engineWarpStack(cfg),
 			SourceIPv6:          cfg.EngineWarpSourceIPv6,
-			RegistrationProxies: cfg.EngineWarpRegistrationProxies,
+			RegistrationProxies: registrationProxies,
 			SocksUDP:            cfg.EngineWarpSocksUDP,
 		},
 		Proxies:   proxies,
@@ -554,12 +561,12 @@ func (m *Manager) FreeTierEngineStatus() FreeTierEngineStatus {
 	cfg := m.loadConfig()
 	port := m.managerGatewayPort()
 	st := FreeTierEngineStatus{
-		State:       state,
-		Address:     fmt.Sprintf("http://127.0.0.1:%d/v1", port),
-		Port:        port,
-		PID:         pid,
-		APIKey:      effectiveGatewayKey(cfg),
-		BinPath:     m.EngineBinPath(),
+		State:        state,
+		Address:      fmt.Sprintf("http://127.0.0.1:%d/v1", port),
+		Port:         port,
+		PID:          pid,
+		APIKey:       effectiveGatewayKey(cfg),
+		BinPath:      m.EngineBinPath(),
 		Error:        lastErr,
 		WarpCooling:  e.warpCooling,
 		WarpFallback: m.WarpFallbackStatusOf(),
