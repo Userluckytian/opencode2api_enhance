@@ -48,7 +48,7 @@ UI 参照 Windsurf Account Manager 的浅色官网风格：无边框窗口 + 自
 
 ## 功能
 
-- **OpenCode 免费层（40080）**：托管 opencode2api 引擎（独立子进程 + 看门狗），面板含 WARP 出口池（活跃/冷却计数、一键重试）、WARP 注册节点池（导入 Clash 订阅 → 本地端口）、免费模型清单、接入信息（地址 + API Key 一键复制）、启停 / 重启（异步模式避免前端转圈 95 秒）。v2.0.9 起免费层只有匿名通道，不再需要 zen / go key
+- **OpenCode 免费层（40080）**：托管 opencode2api 引擎（独立子进程 + 看门狗），面板含 WARP 出口池（活跃/冷却计数、一键重试）、WARP 注册节点池（导入 Clash 订阅 → 本地端口，兼容 block / flow 两种 YAML 风格）、免费模型清单、接入信息（地址 + API Key 一键复制）、启停 / 重启（异步模式避免前端转圈 95 秒）。v2.0.9 起免费层只有匿名通道，不再需要 zen / go key。**本机没有公网 IPv6 时**：节点池会自动挑第一个 UDP 节点做 WARP 握手中继（`warp.socks_udp`），否则握手包发不出去
 - **自定义模型源（30080）**：自带 API Key 接入第三方供应商（**OpenAI 兼容 / Anthropic / OpenAI Responses / Gemini** 四协议，多源并存），多 Key 池支持**轮询 / 错误转移**——429 自动冷却、401/403 自动禁用换 Key；保存即热生效、模型清单磁盘缓存；模型带 `源ID/` 前缀进入统一 `/v1/models`，详见 [指南](docs/CUSTOM-MODELS.md)
 - **插件供应商**：`provider.json` 契约 + 子进程托管，统一启停、配置、日志与模型刷新，详见 [插件能力](docs/PLUGIN-CAPABILITIES.md)
 - **调用日志**：供应商 JSONL 与引擎 stdout 事件合并，按天 / 供应商 / 关键词筛选；逐条显示 WARP / 匿名通道徽标、上游真实 model、错误大类

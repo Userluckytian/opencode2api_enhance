@@ -20,10 +20,12 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"runtime"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/6Kmfi6HP/opencode2api/core/manager"
@@ -152,11 +154,26 @@ func main() {
 	go providerSvc.Watchdog(manager.NewRealRunner())
 	defer providerSvc.Close()
 
+	// 节点池：订阅节点 → 本地端口 → 引擎注册代理列表（只服务 OpenCode 免费层）。
+	// 必须在引擎之前完成：引擎启动时就读 registration_proxies / socks_udp，
+	// 晚写会让它拿到上一轮（可能已失效）的端口。农场启动通常 1~3s；
+	// 超时也继续起引擎，避免节点池异常把免费层一起拖死。
+	nodePoolReady := make(chan struct{})
+	go func() {
+		managerInst.AutoStartNodePool()
+		close(nodePoolReady)
+	}()
+
 	// 免费层引擎（40080）：外部程序，托管启停 + 看门狗。
 	// 必须在后台启动：WARP 开启时引擎要等首次出口注册（上游最长 90s）才监听，
 	// 同步等待会把管理面板（40000）的监听一起拖后，面板表现为"打不开"。
 	engineRunner := manager.NewRealRunner()
 	go func() {
+		select {
+		case <-nodePoolReady:
+		case <-time.After(15 * time.Second):
+			slog.Warn("node pool autostart timed out; starting engine with the current config")
+		}
 		if err := managerInst.StartFreeTierEngine(engineRunner); err != nil {
 			slog.Warn("free-tier engine unavailable", "error", err, "hint", "把 opencode2api-win 放到 bin/ 目录")
 		} else {
@@ -165,13 +182,20 @@ func main() {
 	}()
 	go managerInst.WatchdogFreeTierEngine(engineRunner)
 
-	// 节点池：订阅节点 → 本地端口 → 引擎注册代理列表（只服务 OpenCode 免费层）。
-	// 后台恢复，不阻塞 40000 监听。
-	go managerInst.AutoStartNodePool()
-
 	// 更新清单镜像加速：桌面壳的 updater 先取 127.0.0.1:40099，再回退 GitHub。
 	// 端口被占或探测失败都不影响主服务（壳会走第二个 endpoint）。
 	managerInst.StartUpdateManifestServer()
+
+	// 优雅退出：Ctrl+C / SIGTERM（headless、裸 core 场景）先停节点农场，
+	// 否则 mihomo 会变成孤儿继续占着 25001+ 与节点连接。
+	// 桌面壳走 Job Object 收尾，不依赖这里。
+	go func() {
+		sigCh := make(chan os.Signal, 1)
+		signal.Notify(sigCh, os.Interrupt, syscall.SIGTERM)
+		<-sigCh
+		managerInst.StopNodeFarm()
+		os.Exit(0)
+	}()
 
 	// 调用指标采集：增量消费引擎 stdout，把 request_routed 落成分析用的指标行。
 	// 与看门狗一样常驻；指标是旁路，采不到只记 warn，不影响推理。

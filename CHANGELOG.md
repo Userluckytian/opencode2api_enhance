@@ -13,6 +13,16 @@
 - 每个平台只改写自己的 `{os}-{arch}` 条目，其它平台保持原地址。
 - 旧版本客户端不受影响：2.0.11 及以前的内置 endpoint 就是 GitHub 直连。
 
+### 节点池修复与补强
+
+- **兼容 Clash Verge 的 flow 风格订阅**：`- { name: …, type: …, server: …, port: … }` 单行写法此前会被整条丢弃（导入结果 0 个节点）；现在两种风格都能解析，引号内的逗号不会切断字段。
+- **WARP 握手中继**：本机没有可用公网 IPv6 时，WireGuard 握手包发不出去（`wsasendto: address not valid in its context`）。现在应用节点池时会把第一个 **UDP 节点**的本地端口写成 `engine_warp_socks_udp`（`socks5://127.0.0.1:<port>`），让引擎把外层 UDP 交给该节点的 SOCKS5 UDP ASSOCIATE；停用节点池时自动清空。配置了 `engine_warp_source_ipv6` 时跳过中继（引擎要求两者互斥）。
+- **节点农场 listeners 开启 `udp: true`**：否则 SOCKS5 UDP ASSOCIATE 不可用，中继形同虚设。
+- **hysteria2 / hysteria / tuic 视为 UDP 可用**：订阅通常不写 `udp: true`，此前「只勾选 UDP 可用」会把它们全部漏掉。
+- **默认端口基址 24001 → 25001**：24001–24016 已被 siftq 等插件的 egress 池占用，农场每次都要漂移到后面。
+- **启动顺序**：引擎改为等节点池就绪（最多 15s）后再启动，避免读到上一轮已失效的注册端口；Ctrl+C / SIGTERM 退出时先停农场，避免 mihomo 变孤儿占端口。
+- 面板新增「WARP 握手中继」与节点池告警（无 UDP 节点 / 与源 IPv6 冲突 / 未写入中继）。
+
 ## v2.0.11（2026-11-25）
 
 ### 变更
@@ -20,7 +30,7 @@
 - **免费层 WARP 不再自动降级**：池空只观测并上报，不再把 `engine_warp_enabled` 写成 `false`、不再自动重启引擎。免费层只剩匿名通道，关掉 WARP 等于关闭唯一出口（见 issue-log 2026-11-24 #1）。
 - **新增 `engine_warp_stack`**：`ipv6`（默认）/ `ipv4` / `dual`，引擎配置不再硬编码 ipv6（当前生产保持 ipv6）。
 - **WARP 注册代理轮换**：引擎新增 `warp.registration_proxies`，每次注册按列表轮换代理，减少重复 `/64`；管理端新增 `engine_warp_registration_proxies` 与 `engine_warp_socks_udp` 并透传。实测轮换后“重复 `/64` 率”由 2.16 降到 1.06 次/块。
-- **WARP 注册节点池（新）**：可导入 Clash 订阅（URL / 本地文件 / 粘贴），把选中节点用内置 mihomo 托管成本地 mixed 端口（默认 24001 起），再写入 `engine_warp_registration_proxies` 供引擎注册轮换。节点只用于注册，业务出口仍由「设置 → 出口代理」决定。入口在 OpenCode 页「WARP 注册节点池」卡片。
+- **WARP 注册节点池（新）**：可导入 Clash 订阅（URL / 本地文件 / 粘贴），把选中节点用内置 mihomo 托管成本地 mixed 端口（默认 25001 起），再写入 `engine_warp_registration_proxies` 供引擎注册轮换。节点只用于注册，业务出口仍由「设置 → 出口代理」决定。入口在 OpenCode 页「WARP 注册节点池」卡片。
 - **免费层出口池卡片回到 OpenCode 页**：池大小、源 IPv6 前缀、重置出口冷却从设置页迁回 OpenCode 页（设置页只保留出口代理）。
 - **调用日志「清空」改为偏移隐藏**：引擎 stdout 是追加写、不能截断，改为记录已读字节偏移；日志页读取上限从 5000 提到 20 万条（超出时按摊还方式丢弃最旧记录）。
 - **开发模式改为直连 core**：`npm run tauri:dev` 的 `devUrl` 指向 core 自己的端口（44100），不再依赖 Vite dev server；壳在开窗前等待该端口就绪，避免首屏白屏。

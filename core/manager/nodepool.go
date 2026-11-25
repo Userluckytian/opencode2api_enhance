@@ -56,9 +56,12 @@ type NodePoolStatus struct {
 	NodeCount   int        `json:"node_count"`
 	SelectedLen int        `json:"selected_count"`
 	MihomoPath  string     `json:"mihomo_path"`
-	LastError   string     `json:"last_error,omitempty"`
-	UpdatedAt   string     `json:"updated_at,omitempty"`
-	SyncedTo    string     `json:"synced_to,omitempty"`
+	// SocksUDP 当前写进引擎的握手中继（空 = 直连）。
+	SocksUDP  string `json:"socks_udp,omitempty"`
+	Warning   string `json:"warning,omitempty"`
+	LastError string `json:"last_error,omitempty"`
+	UpdatedAt string `json:"updated_at,omitempty"`
+	SyncedTo  string `json:"synced_to,omitempty"`
 }
 
 var (
@@ -176,6 +179,13 @@ func parseClashProxies(doc string) ([]PoolNode, map[string]string, int) {
 		block := strings.Join(cur, "\n")
 		name, typ, server, port, udp := parseProxyBlock(block)
 		if name == "" || typ == "" {
+			// Clash Verge 等工具常把节点写成单行 flow 风格：
+			//   - { name: 'xxx', type: trojan, server: 1.2.3.4, port: 443, udp: true }
+			if n, t, srv, p, u, ok := parseFlowProxy(strings.TrimSpace(block)); ok {
+				name, typ, server, port, udp = n, t, srv, p, u
+			}
+		}
+		if name == "" || typ == "" {
 			bad++
 			cur = cur[:0]
 			return
@@ -231,7 +241,90 @@ func parseProxyBlock(block string) (name, typ, server string, port int, udp bool
 	if m := reUDP.FindStringSubmatch(block); len(m) > 1 {
 		udp = strings.EqualFold(m[1], "true")
 	}
+	// hysteria/hysteria2/tuic 本身就是 UDP 型，订阅里通常不写 udp: true。
+	// 不补这一条，「只勾选 UDP 可用」会把这些节点全部漏掉。
+	if udpByProtocol(typ) {
+		udp = true
+	}
 	return
+}
+
+// udpByProtocol 判断协议是否天然支持 UDP（无需配置显式声明）。
+func udpByProtocol(typ string) bool {
+	switch strings.ToLower(typ) {
+	case "hysteria", "hysteria2", "tuic":
+		return true
+	}
+	return false
+}
+
+// reFlowEntry 匹配单行 flow 风格节点：`- { name: ..., type: ... }`。
+var reFlowEntry = regexp.MustCompile(`^\s*-\s*\{(.*)\}\s*$`)
+
+// parseFlowProxy 解析 `- { k: v, k2: v2 }` 形式的节点。
+//
+// Clash Verge 把远程订阅转成 flow 风格后很常见；block 风格的正则匹配不到，
+// 不兼容会导致「导入成功 0 个节点」。
+func parseFlowProxy(line string) (name, typ, server string, port int, udp bool, ok bool) {
+	m := reFlowEntry.FindStringSubmatch(strings.TrimSpace(line))
+	if m == nil {
+		return
+	}
+	for _, field := range splitFlowFields(m[1]) {
+		key, value, found := strings.Cut(field, ":")
+		if !found {
+			continue
+		}
+		key = strings.TrimSpace(key)
+		value = strings.Trim(strings.TrimSpace(value), `"'`)
+		switch key {
+		case "name":
+			name = value
+		case "type":
+			typ = strings.ToLower(value)
+		case "server":
+			server = value
+		case "port":
+			port, _ = strconv.Atoi(value)
+		case "udp":
+			udp = strings.EqualFold(value, "true")
+		}
+	}
+	if udpByProtocol(typ) {
+		udp = true
+	}
+	ok = name != "" && typ != ""
+	return
+}
+
+// splitFlowFields 按顶层逗号切分 flow 内容，跳过引号与 []/{} 内部。
+func splitFlowFields(s string) []string {
+	var out []string
+	depth := 0
+	var quote byte
+	start := 0
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		switch {
+		case quote != 0:
+			if c == quote {
+				quote = 0
+			}
+		case c == '\'' || c == '"':
+			quote = c
+		case c == '[' || c == '{':
+			depth++
+		case c == ']' || c == '}':
+			if depth > 0 {
+				depth--
+			}
+		case c == ',' && depth == 0:
+			out = append(out, s[start:i])
+			start = i + 1
+		}
+	}
+	out = append(out, s[start:])
+	return out
 }
 
 func proxyFingerprint(name, typ, server string, port int) string {

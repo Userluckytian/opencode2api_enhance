@@ -78,7 +78,7 @@ type Config struct {
 	NodePoolSubscriptionURL string `json:"node_pool_subscription_url,omitempty"`
 	// NodePoolMihomoPath mihomo 可执行文件路径；留空找 bin 目录。
 	NodePoolMihomoPath string `json:"node_pool_mihomo_path,omitempty"`
-	// NodePoolPortBase 节点本地端口起始值（默认 24001）。
+	// NodePoolPortBase 节点本地端口起始值（默认 25001）。
 	NodePoolPortBase int `json:"node_pool_port_base,omitempty"`
 	// NodePoolSelected 选中的节点指纹（换行分隔）。
 	NodePoolSelected []string `json:"node_pool_selected,omitempty"`
@@ -139,7 +139,6 @@ type Config struct {
 	// 降级后不会自动切回：WARP 池空往往是环境性的（无 IPv6 / 出口被封），反复重试
 	// 只会反复烧出口。用户在面板点「重试 WARP」或重新开启 WARP 开关即可再试。
 	EngineWarpAutoFallback *bool `json:"engine_warp_auto_fallback,omitempty"`
-
 }
 
 func (m *Manager) configPath() string {
@@ -637,13 +636,13 @@ func engineChannelOrder(cfg Config) string {
 // ConfigView 是前端 /api/admin/config 的响应形态（密码脱敏）。
 // ConfigView 前端视图（v2.0.0 精简：免费层配置项已移除）。
 type ConfigView struct {
-	BaseURL         string `json:"base_url"`
-	DefaultPassword string `json:"default_password"`
-	HasPassword     bool   `json:"has_password"`
-	CallLogMax      int64  `json:"call_log_max"`
-	UiPollIntervalSec int  `json:"ui_poll_interval_sec"`
-	HasGatewayKey   bool   `json:"has_gateway_key"`
-	GatewayKey      string `json:"gateway_key"`
+	BaseURL           string `json:"base_url"`
+	DefaultPassword   string `json:"default_password"`
+	HasPassword       bool   `json:"has_password"`
+	CallLogMax        int64  `json:"call_log_max"`
+	UiPollIntervalSec int    `json:"ui_poll_interval_sec"`
+	HasGatewayKey     bool   `json:"has_gateway_key"`
+	GatewayKey        string `json:"gateway_key"`
 
 	// 服务端口
 	GatewayPort  uint16 `json:"gateway_port"`
@@ -693,10 +692,10 @@ func (m *Manager) ConfigViewOf() ConfigView {
 		HasGatewayKey:     cfg.GatewayKey != "",
 		GatewayKey:        maskSecret(cfg.GatewayKey),
 
-		GatewayPort:           cfg.GatewayPort,
-		ProviderPort:          cfg.ProviderPort,
-		GatewayPortEffective:  m.managerGatewayPort(),
-		ProviderPortEffective: m.managerProviderPort(),
+		GatewayPort:            cfg.GatewayPort,
+		ProviderPort:           cfg.ProviderPort,
+		GatewayPortEffective:   m.managerGatewayPort(),
+		ProviderPortEffective:  m.managerProviderPort(),
 		EngineEnabled:          engineEnabled(cfg),
 		EngineWarpEnabled:      engineWarpEnabled(cfg),
 		EngineWarpPoolSize:     cfg.EngineWarpPoolSize,
@@ -713,6 +712,7 @@ func (m *Manager) ConfigViewOf() ConfigView {
 		EngineFirstEventTimeoutSec:      cfg.EngineFirstEventTimeoutSec,
 	}
 }
+
 // defaultUiPollIntervalSec 界面轮询间隔默认值（秒，U3）。
 const defaultUiPollIntervalSec = 5
 

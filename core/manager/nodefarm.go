@@ -19,7 +19,9 @@ import (
 )
 
 const (
-	nodeFarmDefaultPortBase = 24001
+	// 25001 起：24001-24016 已被 siftq 等插件的 egress 池占用，
+	// 23001/22001/21001 也各有主，25001 段当前空闲。
+	nodeFarmDefaultPortBase = 25001
 	nodeFarmMaxNodes        = 32
 )
 
@@ -121,7 +123,10 @@ func buildFarmConfig(cache nodePoolCache, nodes []PoolNode, ports []int) string 
 	}
 	b.WriteString("listeners:\n")
 	for i, n := range nodes {
-		fmt.Fprintf(&b, "  - name: np-%02d\n    type: mixed\n    port: %d\n    listen: 127.0.0.1\n    proxy: %s\n",
+		// udp: true 是 WARP 握手中继的前提：引擎的 warp.socks_udp 通过
+		// SOCKS5 UDP ASSOCIATE 把 WireGuard 数据包交给这条监听；
+		// mixed 监听默认不开 UDP，漏了就只对 HTTPS 注册生效。
+		fmt.Fprintf(&b, "  - name: np-%02d\n    type: mixed\n    port: %d\n    listen: 127.0.0.1\n    udp: true\n    proxy: %s\n",
 			i+1, ports[i], yamlQuoteName(n.Name))
 	}
 	b.WriteString("rules:\n  - MATCH,DIRECT\n")
@@ -152,7 +157,7 @@ func (m *Manager) StartNodeFarm() error {
 	if base <= 0 {
 		base = nodeFarmDefaultPortBase
 	}
-	// 先停旧农场再选端口：旧进程不退出的话它还占着 24001+，
+	// 先停旧农场再选端口：旧进程不退出的话它还占着 25001+，
 	// pickPort 会一路跳到新端口，导致每次应用端口基址都漂移。
 	m.StopNodeFarm()
 	used := map[int]bool{}
@@ -292,14 +297,48 @@ func (m *Manager) StopNodeFarm() {
 	}
 }
 
-// syncEngineRegistration 把农场端口写进引擎注册代理列表并重启引擎（异步）。
-func (m *Manager) syncEngineRegistration(ports []int) error {
+// writeEngineRegistration 依据选中节点与分配端口，写引擎侧的两个旋钮：
+//
+//   - registration_proxies：注册请求轮换走这些节点（换取不同 /64）；
+//   - socks_udp：把 WireGuard 外层 UDP 交给第一个 UDP 节点的 SOCKS5
+//     UDP ASSOCIATE。本机没有可用的公网 IPv6 时，握手包发不出去
+//     （wsasendto: address not valid in its context），只能靠中继。
+//
+// 引擎要求 warp.socks_udp 与 warp.source_ipv6 互斥：配了源 IPv6 前缀时
+// 跳过中继（否则引擎启动即 LOAD_ERROR）。
+func (m *Manager) writeEngineRegistration(ports []int) (string, error) {
 	list := make([]string, 0, len(ports))
 	for _, p := range ports {
 		list = append(list, "http://127.0.0.1:"+strconv.Itoa(p))
 	}
 	if err := m.ConfigSet("engine_warp_registration_proxies", strings.Join(list, "\n")); err != nil {
+		return "", err
+	}
+
+	socksUDP := ""
+	if strings.TrimSpace(m.loadConfig().EngineWarpSourceIPv6) == "" {
+		for i, n := range m.SelectedNodes() {
+			if i >= len(ports) {
+				break
+			}
+			if n.UDP {
+				socksUDP = "socks5://127.0.0.1:" + strconv.Itoa(ports[i])
+				break
+			}
+		}
+	}
+	if err := m.ConfigSet("engine_warp_socks_udp", socksUDP); err != nil {
+		return "", err
+	}
+	return socksUDP, nil
+}
+
+// syncEngineRegistration 写注册代理 + SOCKS-UDP 中继，并重启引擎（异步）。
+func (m *Manager) syncEngineRegistration(ports []int) error {
+	if socks, err := m.writeEngineRegistration(ports); err != nil {
 		return err
+	} else if socks != "" {
+		log.Printf("node pool: WARP handshake relay %s", socks)
 	}
 	go func() {
 		if err := m.RestartFreeTierEngine(NewRealRunner()); err != nil {
@@ -357,11 +396,7 @@ func (m *Manager) AutoStartNodePool() {
 	if len(info.Ports) == 0 {
 		return
 	}
-	list := make([]string, 0, len(info.Ports))
-	for _, p := range info.Ports {
-		list = append(list, "http://127.0.0.1:"+strconv.Itoa(p))
-	}
-	if err := m.ConfigSet("engine_warp_registration_proxies", strings.Join(list, "\n")); err != nil {
+	if _, err := m.writeEngineRegistration(info.Ports); err != nil {
 		log.Printf("node pool sync failed: %v", err)
 	}
 }
@@ -391,11 +426,14 @@ func (m *Manager) refreshNodePoolIfDue() {
 	}
 }
 
-// DisableNodePool 停止农场并清空引擎注册代理列表（回退单代理）。
+// DisableNodePool 停止农场并清空引擎的注册代理与中继（回退直连）。
 func (m *Manager) DisableNodePool() error {
 	_ = m.ConfigSet("node_pool_enabled", "false")
 	m.StopNodeFarm()
 	if err := m.ConfigSet("engine_warp_registration_proxies", ""); err != nil {
+		return err
+	}
+	if err := m.ConfigSet("engine_warp_socks_udp", ""); err != nil {
 		return err
 	}
 	go func() {
@@ -425,6 +463,7 @@ func (m *Manager) NodePoolStatusOf() NodePoolStatus {
 		Selected:    sel,
 		NodeCount:   len(cache.Nodes),
 		SelectedLen: len(sel),
+		SocksUDP:    cfg.EngineWarpSocksUDP,
 		LastError:   info.LastError,
 		UpdatedAt:   cache.FetchedAt,
 	}
@@ -436,6 +475,25 @@ func (m *Manager) NodePoolStatusOf() NodePoolStatus {
 	}
 	if len(info.Ports) > 0 {
 		st.SyncedTo = "engine_warp_registration_proxies"
+	}
+	// 中继不可用的两种原因直接告诉用户，避免「导了节点还是起不来」的困惑。
+	if st.Enabled {
+		selected := m.SelectedNodes()
+		hasUDP := false
+		for _, n := range selected {
+			if n.UDP {
+				hasUDP = true
+				break
+			}
+		}
+		switch {
+		case strings.TrimSpace(cfg.EngineWarpSourceIPv6) != "":
+			st.Warning = "已配置源 IPv6 前缀：引擎要求它与 SOCKS-UDP 互斥，已跳过握手中继"
+		case len(selected) > 0 && !hasUDP:
+			st.Warning = "所选节点都不支持 UDP：握手中继不可用，WARP 握手仍会直连并可能失败"
+		case st.SocksUDP == "" && hasUDP:
+			st.Warning = "尚未写入握手中继，点一次「应用并重启引擎」生效"
+		}
 	}
 	return st
 }

@@ -23,6 +23,8 @@ type PoolStatus = {
   node_count: number
   selected_count: number
   mihomo_path: string
+  socks_udp?: string
+  warning?: string
   last_error?: string
   updated_at?: string
   synced_to?: string
@@ -313,10 +315,21 @@ export default function NodePoolCard({ toast }: { toast: (msg: string, ok?: bool
               已分配端口：{st.ports.map((p) => `127.0.0.1:${p}`).join('  ')}
             </div>
           ) : null}
+          {st.socks_udp ? (
+            <div className="text-[11px] text-teal-700 font-mono break-all">
+              WARP 握手中继：{st.socks_udp}（UDP 经该节点转发）
+            </div>
+          ) : null}
         </div>
       ) : (
         <div className="text-[12px] text-zinc-500">还没有导入节点。请填写订阅地址后点「导入 / 刷新」。</div>
       )}
+
+      {st?.warning ? (
+        <div className="text-[12px] text-amber-800 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2">
+          {st.warning}
+        </div>
+      ) : null}
 
       {st?.last_error ? (
         <div className="text-[12px] text-amber-700 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2">
