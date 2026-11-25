@@ -16,8 +16,11 @@
 #   - bin\opencode2api-win.exe   (free-tier engine, GPL-3.0 external binary, NOT
 #                          in git. Auto-fetched by scripts\fetch-free-tier-engine.ps1
 #                          when missing -- needs git + go >= 1.24 and network)
+#   - bin\mihomo.exe      (node-pool kernel, GPL-3.0, NOT in git. Auto-fetched by
+#                          scripts\fetch-mihomo.ps1; missing only disables node pool)
 #   - third_party\opencode2api-win\  (LICENSE / SOURCE.txt / README.md -- GPL
 #                          obligation: shipped next to the engine binary)
+#   - third_party\mihomo\ (LICENSE / SOURCE.txt -- same obligation for mihomo)
 #   - bin\dist\           (run: npm run build)
 #
 # Output layout (portable contract; Go core locates frontend via
@@ -28,8 +31,10 @@
 #   |-- portable.txt         # empty marker -> 48200 slot + isolated data dir
 #   |-- bin/
 #   |   |-- dist/            # latest frontend build (served by core)
-#   |   `-- opencode2api-win.exe  # released by the shell on first run
+#   |   |-- opencode2api-win.exe  # released by the shell on first run
+#   |   `-- mihomo.exe       # node-pool kernel (released only if embedded)
 #   `-- third_party/opencode2api-win/   # GPL-3.0 license + source notice
+#   `-- third_party/mihomo/             # GPL-3.0 license + source notice
 #
 # Isolation guarantees:
 #   - admin:  http://127.0.0.1:48200   (gateway 48280 / instances 48300+)
@@ -269,6 +274,27 @@ if (-not (Test-Path $engineBin)) {
     }
 } else {
     Write-Host "[1b/4] free-tier engine ok: bin\opencode2api-win.exe"
+}
+
+# ---- 1c. Ensure node-pool kernel (mihomo) exists ----
+# bin\mihomo.exe 是 WARP 注册节点池内核（GPL-3.0，固定版本见
+# third_party\mihomo\SOURCE.txt）。缺失只影响节点池，不阻断打包：
+# 有网络就自动下载并校验 SHA256，失败只告警（壳不会内嵌它）。
+$mihomoBin = Join-Path $Root "bin\mihomo.exe"
+if (-not (Test-Path $mihomoBin)) {
+    Write-Host "[1c/4] bin\mihomo.exe missing -> running scripts\fetch-mihomo.ps1 ..."
+    $fetchMihomo = Join-Path $Root "scripts\fetch-mihomo.ps1"
+    if (Test-Path $fetchMihomo) {
+        try {
+            & $fetchMihomo
+        } catch {
+            Write-Warning "fetch-mihomo.ps1 失败（节点池将不可用）：$($_.Exception.Message)"
+        }
+    } else {
+        Write-Warning "bin\mihomo.exe 缺失且找不到 scripts\fetch-mihomo.ps1（节点池将不可用）"
+    }
+} else {
+    Write-Host "[1c/4] node-pool kernel ok: bin\mihomo.exe"
 }
 
 # ---- 2. Build Rust shell (release; embeds latest core + free-tier engine) ----

@@ -1,44 +1,53 @@
 # third_party/mihomo
 
-节点池（WARP 注册源）使用的内核二进制。**发布包必须内置**，避免依赖用户机器上的 Clash。
+节点池（WARP 注册源）使用的内核二进制。**发布包内置**：CI 与本地脚本下载后放到
+`bin/mihomo[.exe]`，由桌面壳 `include_bytes!` 内嵌，首次启动释放到安装目录 `bin/`。
 
 ## 许可
 
 - mihomo（原 Clash.Meta）为 **GPL-3.0**。
-- 随安装包分发时必须同时提供：
-  - 本目录下的 `LICENSE`（mihomo 原始许可证）
-  - `SOURCE.txt`：上游仓库、tag/commit、构建命令、本地补丁说明（如无补丁写「无」）
+- 随安装包分发时同时提供：
+  - 本目录的 `LICENSE`（上游许可证原文）
+  - 本目录的 `SOURCE.txt`（上游仓库、固定版本、SHA256、获取方式）
+- `src-tauri/tauri.conf.json` 的 `bundle.resources` 已包含本目录，安装包内即带上述文件。
 - 发行说明中注明「本项目以独立进程方式使用 mihomo（mere aggregation）」。
 
 ## 目录约定
 
 ```
 third_party/mihomo/
-  LICENSE            # GPL-3.0 原文
-  SOURCE.txt         # 上游仓库 + tag + 构建方式
-  <platform>/mihomo  # 构建时放入，不提交 git（体积大）
+  LICENSE        # GPL-3.0 原文（随包分发）
+  SOURCE.txt     # 上游仓库 + 版本 + SHA256 + 获取方式（随包分发）
+  README.md      # 本文件
 ```
 
-## 构建/获取
+二进制不放在本目录（体积大、不入库），统一放 `bin/`：
 
-发布 CI 按平台执行（示例，版本号固定）：
+```
+bin/mihomo.exe   # Windows
+bin/mihomo       # Linux / macOS
+```
+
+## 获取
 
 ```powershell
-$tag = "v1.19.15"   # 固定 tag，不跟 latest
-# 下载对应平台 release 包，取出 mihomo 二进制后放到 bin/ 再打包
+powershell -ExecutionPolicy Bypass -File scripts\fetch-mihomo.ps1
+powershell ... -Force                        # 已存在也重新下载
+powershell ... -Platform linux -Arch amd64   # 交叉准备
 ```
 
-或从源码构建：
+脚本与 CI 一致：下载官方 release 资产 → 校验 SHA256 → 解压 → `bin/mihomo[.exe]`。
+版本与哈希以 `SOURCE.txt` 为准；升版本时同步改 `scripts/fetch-mihomo.ps1`、
+`SOURCE.txt` 与 CI 的 `Fetch mihomo` 步骤。
 
-```bash
-git clone --depth 1 --branch <tag> https://github.com/MetaCubeX/mihomo.git
-cd mihomo && go build -trimpath -ldflags "-s -w" -o mihomo ./  # 具体入口以该 tag 为准
-```
+缺失不阻断编译：`build.rs` 检测不到 `bin/mihomo[.exe]` 就不设 `embed_mihomo`，
+壳不内嵌，节点池提示「未找到 mihomo」，其余功能正常。
 
 ## 运行时查找顺序
 
 1. 配置 `node_pool_mihomo_path`
-2. `<安装目录>/bin/mihomo(.exe)`
+2. `<安装目录>/bin/mihomo(.exe)` ← 壳释放的位置
 3. `<dataDir>/node-pool/mihomo(.exe)`
 
-开发期可临时把任意 mihomo 兼容二进制拷成 `bin/mihomo.exe` 使用；发布包必须放官方构建。
+开发期可临时把任意 mihomo 兼容二进制拷成 `bin/mihomo.exe` 使用；发布包必须是
+`SOURCE.txt` 登记的那一份官方构建。

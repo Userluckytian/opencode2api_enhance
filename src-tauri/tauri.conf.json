@@ -57,7 +57,7 @@
     ],
     "category": "Utility",
     "shortDescription": "LLM 代理管理器（OpenCode 免费层 + 自定义供应商，桌面/headless WebUI）",
-    "longDescription": "基于 Tauri 2 的本地 LLM 代理管理器，三进程架构：40000 管理面板 + 40080 OpenCode 免费层引擎（opencode2api v1.4.7，GPL-3.0 独立进程）+ 50080 自定义/插件供应商服务。支持多供应商多 Key 轮询、调用日志与统计。桌面（Windows/Linux）与 headless WebUI 双模式。",
+    "longDescription": "基于 Tauri 2 的本地 LLM 代理管理器，三进程架构：40000 管理面板 + 40080 OpenCode 免费层引擎（opencode2api v1.5.1-win.1，GPL-3.0 独立进程）+ 30080 自定义/插件供应商服务。支持多供应商多 Key 轮询、WARP 注册节点池、调用日志与统计。桌面（Windows/Linux/macOS）与 headless WebUI 双模式。",
     "windows": {
       "nsis": {
         "installMode": "perMachine",
@@ -90,7 +90,8 @@
       "../dist/assets/": "bin/dist/assets/",
       "../dist/app-icon.png": "bin/dist/app-icon.png",
       "target/release/WebView2Loader.dll": "WebView2Loader.dll",
-      "../third_party/opencode2api-win/": "third_party/opencode2api-win/"
+      "../third_party/opencode2api-win/": "third_party/opencode2api-win/",
+      "../third_party/mihomo/": "third_party/mihomo/"
     }
   }
 }

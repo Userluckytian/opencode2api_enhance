@@ -22,6 +22,16 @@ pub const FREE_TIER_ENGINE: Option<&[u8]> = Some(include_bytes!("../../bin/openc
 #[cfg(not(embed_free_tier_engine))]
 pub const FREE_TIER_ENGINE: Option<&[u8]> = None;
 
+// 节点池内核 mihomo（GPL-3.0 独立进程）：存在才内嵌。
+// 只用于把订阅节点映射成本地端口供 WARP 注册，缺失时节点池不可用、其余功能正常。
+// 分发合规件见 third_party/mihomo/（LICENSE + SOURCE.txt，已进 bundle.resources）。
+#[cfg(all(embed_mihomo, embed_unix_bin))]
+pub const MIHOMO: Option<&[u8]> = Some(include_bytes!("../../bin/mihomo"));
+#[cfg(all(embed_mihomo, not(embed_unix_bin)))]
+pub const MIHOMO: Option<&[u8]> = Some(include_bytes!("../../bin/mihomo.exe"));
+#[cfg(not(embed_mihomo))]
+pub const MIHOMO: Option<&[u8]> = None;
+
 /// 当前平台下子程序的文件名（Windows 带 .exe，其余平台不带）
 fn platform_name(name: &str) -> String {
     if cfg!(windows) {
@@ -40,6 +50,10 @@ pub fn ensure_binaries(bin_dir: &Path) -> Result<bool> {
     // （允许用户手工放一份引擎而无需重新编译主程序）。
     if let Some(data) = FREE_TIER_ENGINE {
         wrote |= ensure_file(bin_dir, &platform_name("opencode2api-win"), data)?;
+    }
+    // 节点池内核同理：未内嵌时不动用户手工放入的 mihomo。
+    if let Some(data) = MIHOMO {
+        wrote |= ensure_file(bin_dir, &platform_name("mihomo"), data)?;
     }
     Ok(wrote)
 }

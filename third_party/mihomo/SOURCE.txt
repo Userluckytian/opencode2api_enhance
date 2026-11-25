@@ -1,0 +1,44 @@
+mihomo —— WARP 注册节点池内核
+================================
+
+用途
+----
+把 Clash 订阅里的节点映射成本地 mixed 端口（24001 起），只作为 WARP **注册**
+的源代理（写入引擎 config 的 warp.registration_proxies），不参与业务出口转发。
+由管理器以独立子进程方式启动（-d <dir> -f <config>），与主程序只通过本地端口
+通信，属于 GPL-3.0 意义上的「聚合分发（mere aggregation）」。
+
+1) 组件
+   - 名称    : mihomo（原 Clash.Meta）
+   - 许可证  : GNU General Public License version 3（GPL-3.0-only），
+               见本目录 LICENSE（上游许可证原文，未修改）
+   - 版本    : v1.19.33（固定 tag，不跟 latest）
+
+2) 上游仓库
+   https://github.com/MetaCubeX/mihomo
+   发行页：https://github.com/MetaCubeX/mihomo/releases/tag/v1.19.33
+
+3) 本地补丁
+   无。直接使用官方 release 产物，未修改源码、未重新构建。
+
+4) 获取方式（scripts/fetch-mihomo.ps1 与 CI 一致）
+   下载官方资产 → 校验 SHA256 → 解压得到 mihomo(.exe) → 放到 bin/。
+   构建时由 src-tauri 的 build.rs 检测 bin/mihomo[.exe] 并内嵌，首次启动
+   释放到安装目录的 bin/ 下（与其他内嵌子程序同一机制）。
+
+   windows/amd64 : mihomo-windows-amd64-v1.19.33.zip
+                   sha256 6ab2180875f9f6fff8b19386d760daec257f66b45f72b3afc650634272fa837a
+   linux/amd64   : mihomo-linux-amd64-v1.19.33.gz
+                   sha256 132f6f3edf9a65e62f04853aed3358472e0b2b7666daa8419edfa2ddf5bb6323
+   darwin/arm64  : mihomo-darwin-arm64-v1.19.33.gz
+                   sha256 060b64b0f2c9a310831db0fe4adb2878de67bfa606c311813c1f13966aa504b6
+   darwin/amd64  : mihomo-darwin-amd64-v1.19.33.gz
+                   sha256 551ae54ef8d77a5e21f7a8185a59b441fb13a0fb0514fcdef5ca2816f6f50015
+
+   下载地址前缀：
+   https://github.com/MetaCubeX/mihomo/releases/download/v1.19.33/
+
+5) 分发义务
+   随安装包分发 mihomo 二进制时，必须同时提供本目录的 LICENSE 与 SOURCE.txt
+   （tauri.conf.json 的 bundle.resources 已包含本目录），并在发行说明中注明
+   「本项目以独立进程方式使用 mihomo（mere aggregation）」。

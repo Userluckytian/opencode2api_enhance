@@ -2,6 +2,7 @@ fn main() {
     println!("cargo:rustc-check-cfg=cfg(embed_windows_bin)");
     println!("cargo:rustc-check-cfg=cfg(embed_unix_bin)");
     println!("cargo:rustc-check-cfg=cfg(embed_free_tier_engine)");
+    println!("cargo:rustc-check-cfg=cfg(embed_mihomo)");
     // 按目标平台设置内嵌子程序的源文件名（embed.rs 据此条件编译 include_bytes）。
     // - Windows：bin/opencode2api.exe（CI 自行构建）
     // - Linux/macOS：优先 bin/opencode2api（平台对应二进制）；
@@ -44,6 +45,20 @@ fn main() {
         println!(
             "cargo:warning=bin/{} not found; free-tier engine (40080) will not be bundled (run scripts/fetch-free-tier-engine.ps1)",
             engine_name
+        );
+    }
+
+    // 节点池内核 mihomo（GPL-3.0 独立进程）：存在才内嵌，缺失不阻断编译。
+    // 缺失时节点池提示「未找到 mihomo」，其余功能不受影响。
+    let mihomo_name = if unix_bins { "mihomo" } else { "mihomo.exe" };
+    let mihomo = root.join("bin").join(mihomo_name);
+    println!("cargo:rerun-if-changed={}", mihomo.display());
+    if mihomo.exists() {
+        println!("cargo:rustc-cfg=embed_mihomo");
+    } else {
+        println!(
+            "cargo:warning=bin/{} not found; node-pool kernel will not be bundled (run scripts/fetch-mihomo.ps1)",
+            mihomo_name
         );
     }
 
