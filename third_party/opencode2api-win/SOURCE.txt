@@ -25,7 +25,7 @@ All rights reserved（明确未授予复制/修改/分发/使用），且配置�
    同时保留其 WARP / 会话亲和 / 免费通道增强。
    血脉祖先仍为 jasonxu114514/opencode2api（同样 GPL-3.0）。
 
-3) 对应上游提交（我们内嵌/分发的二进制即由该提交构建）
+3) 对应上游提交（我们内嵌/分发的二进制 = 该提交 + 本目录 patches/ 下的补丁）
    commit  : 1a208acbda4346e9492a6ad5266a46b70b21642f
    短提交  : 1a208ac
    标签    : v1.5.1-win.1（2026-11-20）
@@ -37,16 +37,35 @@ All rights reserved（明确未授予复制/修改/分发/使用），且配置�
              · 出口惩罚分类：普通限速 1~5min，额度冷却 30m→2h→8h→24h、
                Retry-After 优先且跨重启持久
              · 池空时不复活刚被 429 的 /64（防 429 死循环）
-             · warp.registration_proxies —— 注册走多代理，换取不同 egress /64
              2026-11-23 实测：带 Claude Code system prompt + tools 的请求
              由 429 变为 200（连续 3 次成功）。
 
+   重要更正（2026-11-25）：该 tag **不包含** `warp.registration_proxies`。
+   此前本节误记该字段在上游里；实际它来自下面的本地补丁。正式包引擎因此
+   会拒绝该字段（DisallowUnknownFields），管理器曾因此写出坏配置。
+
+3b) 本地补丁（构建时由 CI / 脚本应用，随源码包一起分发）
+   文件    : patches/registration-proxies.patch
+   改动    : internal/config/config.go（WarpConfig 新字段 + Normalize 校验）
+             internal/gateway/runtime.go（把列表转成注册代理 URL）
+             internal/warp/pool.go（多个 registrar 轮换注册出口）
+   规模    : 3 文件，+73 行
+   作用    : 每次注册换一个源代理，让 Cloudflare 下发不同的 /64，
+             从而在不改数据面（仍走 socks_udp/直连）的前提下拿到多个出口。
+   适用    : 应用后 `git apply` 再编译；CI 会把补丁提交进 engine-src，
+             因此 git archive 导出的源码与二进制一致（GPL-3.0 要求）。
+
 4) 构建命令（CI 与本仓库脚本 scripts/fetch-free-tier-engine.ps1 一致）
-   CGO_ENABLED=0 GOOS=<os> GOARCH=<arch> \
-     go build -trimpath -ldflags "-s -w" -o opencode2api-win ./cmd/opencode2api
+   git clone --no-checkout <repo> engine-src && git -C engine-src checkout 1a208ac
+   git -C engine-src apply third_party/opencode2api-win/patches/registration-proxies.patch
+   ( cd engine-src && CGO_ENABLED=0 GOOS=<os> GOARCH=<arch> \
+       go build -trimpath -ldflags "-s -w" -o ../opencode2api-win ./cmd/opencode2api )
 
    Windows 本地产物：bin/opencode2api-win.exe
    Linux/macOS     ：bin/opencode2api-win
+
+   产物自检：`grep -a registration_proxies opencode2api-win` 必须命中
+   （Go 会把 struct tag 编进二进制；CI 也用它防止补丁静默失效）。
 
 5) 与本项目（opencode2api_enhance，管理面板）的关系 —— mere aggregation
    - 引擎是**独立可执行程序**，由管理器以子进程方式启动（参数

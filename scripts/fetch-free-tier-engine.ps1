@@ -87,6 +87,29 @@ if (-not $SkipClone) {
     throw ("-SkipClone 但临时源码目录不存在或不完整：{0}；请先不带 -SkipClone 运行一次" -f $src)
 }
 
+# ---- 1b. 应用本地补丁（warp.registration_proxies 注册轮换）----
+# 上游 1a208ac 没有这个字段；不补的话节点池只能写 socks_udp、拿不到多个 /64。
+# 已应用过（-SkipClone 复用目录）时 git apply --check 会失败，按"已打过"处理。
+$patchFile = Join-Path $Root "third_party\opencode2api-win\patches\registration-proxies.patch"
+if (Test-Path $patchFile) {
+    Push-Location $src
+    & git apply --check $patchFile 2>$null
+    if ($LASTEXITCODE -eq 0) {
+        & git apply $patchFile
+        if ($LASTEXITCODE -ne 0) { Pop-Location; throw "git apply 失败：$patchFile" }
+        Write-Host "[1b/3] 已应用补丁: registration-proxies.patch"
+    } else {
+        Write-Host "[1b/3] 补丁已应用（或源码已包含该字段），跳过"
+        & git apply --reverse --check $patchFile 2>$null
+        if ($LASTEXITCODE -ne 0) {
+            Write-Host "[1b/3] 警告：既打不上也反向打不上，源码可能已被改过；继续按现状构建"
+        }
+    }
+    Pop-Location
+} else {
+    Write-Host "[1b/3] 未找到补丁文件，按上游源码构建（节点池将只能写 socks_udp）"
+}
+
 Push-Location $src
 $sha = & git rev-parse HEAD
 $rc = $LASTEXITCODE

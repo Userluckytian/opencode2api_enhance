@@ -120,9 +120,24 @@ jobs:
           rm -rf engine-src
           git clone --no-checkout "$ENGINE_REPO" engine-src
           git -C engine-src checkout "$ENGINE_COMMIT"
+          # 本地补丁：warp.registration_proxies（注册轮换）。上游 1a208ac 没有这个字段，
+          # 不补的话节点池只能写 socks_udp、拿不到多个 /64。补丁随源码包一起分发，
+          # 并把改动提交进 engine-src，保证 git archive 导出的是与二进制一致的源码。
+          patch_file="$GITHUB_WORKSPACE/third_party/opencode2api-win/patches/registration-proxies.patch"
+          git -C engine-src apply --check "$patch_file"
+          git -C engine-src -c user.name="opencode2api-ci" -c user.email="ci@localhost" apply "$patch_file"
+          git -C engine-src add -A
+          git -C engine-src -c user.name="opencode2api-ci" -c user.email="ci@localhost" \
+            commit -m "build: apply registration-proxies patch (opencode2api_enhance)"
           mkdir -p bin
           ( cd engine-src && CGO_ENABLED=0 GOOS=${{ matrix.goos }} GOARCH=${{ matrix.goarch }} \
               go build -trimpath -ldflags "-s -w" -o ../bin/${{ matrix.engine_bin }} ./cmd/opencode2api )
+          # 能力自检：产物里必须有 registration_proxies（Go 会把 struct tag 编进二进制），
+          # 防止补丁静默失效后管理器又写出引擎不认的字段。
+          if ! grep -a -q "registration_proxies" "bin/${{ matrix.engine_bin }}"; then
+            echo "::error::engine binary lacks registration_proxies; patch did not apply"
+            exit 1
+          fi
           # Windows 下 chmod 无意义，失败忽略；非 Windows 必须有执行位（spawn 会 Permission denied）
           chmod +x "bin/${{ matrix.engine_bin }}" || true
           ls -lh bin/
@@ -172,19 +187,25 @@ jobs:
 
       # GPL-3.0 义务：随引擎二进制分发「与本次构建完全一致」的源码 + 提交号
       # （LICENSE / SOURCE.txt / README.md 已在仓库 third_party/ 里入库）。
-      # git archive 从 engine-src 导出 tar.gz；COMMIT.txt 写完整 sha 供核对。
+      # git archive 从 engine-src 导出 tar.gz（HEAD 已包含 registration-proxies
+      # 补丁提交）；COMMIT.txt 同时写上游提交与补丁后的提交，供核对。
       - name: Package GPL source (opencode2api-win)
         shell: bash
         run: |
           set -euo pipefail
           mkdir -p third_party/opencode2api-win
           sha="$(git -C engine-src rev-parse HEAD)"
-          echo "engine commit: $sha"
+          upstream="$(git -C engine-src rev-parse HEAD^)"
+          echo "engine commit: $sha (upstream $upstream + registration-proxies patch)"
           # 在 engine-src 内执行 archive：-o 的相对路径按当前工作目录解析，
           # ../third_party = 仓库根的 third_party/（不能用 ../../，会跑到仓库外）
           ( cd engine-src && git archive --format=tar.gz -o ../third_party/opencode2api-win/opencode2api-win-source.tar.gz HEAD )
-          printf '%s\n' "$sha" > third_party/opencode2api-win/COMMIT.txt
-          echo "$sha" >> "$GITHUB_STEP_SUMMARY"
+          {
+            echo "upstream: $upstream"
+            echo "patched:  $sha"
+            echo "patch:    registration-proxies.patch"
+          } > third_party/opencode2api-win/COMMIT.txt
+          echo "$sha (upstream $upstream + registration-proxies.patch)" >> "$GITHUB_STEP_SUMMARY"
           ls -lh third_party/opencode2api-win/
 
       # tauri.conf 的 resources 引用 WebView2Loader.dll 仅 Windows 需要；

@@ -1,0 +1,144 @@
+diff --git a/internal/config/config.go b/internal/config/config.go
+index 2e50680..59719db 100644
+--- a/internal/config/config.go
++++ b/internal/config/config.go
+@@ -98,6 +98,13 @@ type WarpConfig struct {
+ 	// outer source. Enable it when a local TUN (for example a proxy client's
+ 	// TUN mode) must carry the WireGuard handshake.
+ 	TUN bool `json:"tun,omitempty"`
++	// RegistrationProxies rotates the exit used for device registration: each
++	// refill draws the next entry, so consecutive registrations leave from
++	// different addresses and Cloudflare hands back different /64 egresses.
++	// Empty falls back to the single registry proxy (the first non-direct
++	// `proxies` entry). Only HTTPS registration traffic goes through them; the
++	// WireGuard data plane still leaves from this host (see socks_udp).
++	RegistrationProxies []string `json:"registration_proxies,omitempty"`
+ }
+ 
+ // Normalize fills the defaults and canonicalizes the stack name.
+@@ -141,6 +148,21 @@ func (w *WarpConfig) Normalize() error {
+ 		}
+ 		w.SocksUDP = normalized
+ 	}
++	if len(w.RegistrationProxies) > 0 {
++		cleaned := make([]string, 0, len(w.RegistrationProxies))
++		for _, raw := range w.RegistrationProxies {
++			entry := strings.TrimSpace(raw)
++			if entry == "" || entry == "direct" {
++				continue
++			}
++			if err := ValidateProxyEntry(entry); err != nil {
++				return fmt.Errorf("warp.registration_proxies: %w", err)
++			}
++			clean, _ := ParseProxyEntry(entry)
++			cleaned = append(cleaned, clean)
++		}
++		w.RegistrationProxies = cleaned
++	}
+ 	return nil
+ }
+ 
+diff --git a/internal/gateway/runtime.go b/internal/gateway/runtime.go
+index ceaf547..9602519 100644
+--- a/internal/gateway/runtime.go
++++ b/internal/gateway/runtime.go
+@@ -348,7 +348,7 @@ func (m *RuntimeController) selectWARP(cfg config.Config, warpDeadline time.Dura
+ 	}
+ 	ctx, cancel := context.WithTimeout(m.root, timeout)
+ 	defer cancel()
+-	pool, err := warp.NewWithOptions(ctx, m.logger, warp.Options{Size: cfg.Warp.PoolSize, Stack: warp.Stack(cfg.Warp.Stack), SourceIPv6: source, RegistryProxy: registryProxyURL(cfg), StatePath: warpStatePath(m.configPath), TUN: cfg.Warp.TUN, SocksUDP: cfg.Warp.SocksUDP})
++	pool, err := warp.NewWithOptions(ctx, m.logger, warp.Options{Size: cfg.Warp.PoolSize, Stack: warp.Stack(cfg.Warp.Stack), SourceIPv6: source, RegistryProxy: registryProxyURL(cfg), RegistrationProxies: registrationProxyURLs(cfg), StatePath: warpStatePath(m.configPath), TUN: cfg.Warp.TUN, SocksUDP: cfg.Warp.SocksUDP})
+ 	if err != nil {
+ 		return nil, "", false, warpEgressError{err}
+ 	}
+@@ -365,6 +365,30 @@ func warpStatePath(configPath string) string {
+ 	return configPath + ".warp-state.json"
+ }
+ 
++// registrationProxyURLs parses warp.registration_proxies into a rotation list.
++// When empty it falls back to the single registry proxy so existing configs keep
++// their behaviour.
++func registrationProxyURLs(cfg config.Config) []*url.URL {
++	var out []*url.URL
++	for _, raw := range cfg.Warp.RegistrationProxies {
++		clean, _ := config.ParseProxyEntry(raw)
++		if clean == "" || clean == "direct" {
++			continue
++		}
++		parsed, err := url.Parse(clean)
++		if err != nil || parsed.Scheme == "" || parsed.Host == "" {
++			continue
++		}
++		out = append(out, parsed)
++	}
++	if len(out) == 0 {
++		if single := registryProxyURL(cfg); single != nil {
++			out = append(out, single)
++		}
++	}
++	return out
++}
++
+ // registryProxyURL picks the first configured proxy that is not "direct" for
+ // WARP registration. The data plane cannot use it — WireGuard needs UDP, which
+ // a CONNECT proxy does not relay — but device creation is plain HTTPS and
+diff --git a/internal/warp/pool.go b/internal/warp/pool.go
+index e99e9e2..0dc92b2 100644
+--- a/internal/warp/pool.go
++++ b/internal/warp/pool.go
+@@ -13,6 +13,7 @@ import (
+ 	"os"
+ 	"strings"
+ 	"sync"
++	"sync/atomic"
+ 	"time"
+ )
+ 
+@@ -249,6 +250,12 @@ type Options struct {
+ 	// cannot carry the tunnel, but it can keep device creation working while
+ 	// the direct route to api.cloudflareclient.com is flaky.
+ 	RegistryProxy *url.URL
++	// RegistrationProxies rotates the exit used for device registration: each
++	// refill draws the next entry, so consecutive registrations leave from
++	// different addresses and Cloudflare can hand back different /64 egresses.
++	// Only HTTPS registration traffic goes through them. When empty, RegistryProxy
++	// (or no proxy at all) is used for every registration.
++	RegistrationProxies []*url.URL
+ 	// SocksUDP routes the WireGuard outer UDP through a SOCKS5 proxy's UDP
+ 	// ASSOCIATE relay (socks5://[user:pass@]host:port). Use it when this host
+ 	// cannot send UDP directly but the proxy client can forward it. Empty keeps
+@@ -277,7 +284,24 @@ func NewWithOptions(ctx context.Context, log *slog.Logger, opts Options) (*Pool,
+ 		size = DefaultPoolSize
+ 	}
+ 	formatter := slogLogger{log: log}
+-	r := newRegistrar(formatter, opts.RegistryProxy, opts.TUN)
++	registrars := make([]*registrar, 0, len(opts.RegistrationProxies)+1)
++	for _, proxy := range opts.RegistrationProxies {
++		if proxy != nil {
++			registrars = append(registrars, newRegistrar(formatter, proxy, opts.TUN))
++		}
++	}
++	if len(registrars) == 0 {
++		registrars = append(registrars, newRegistrar(formatter, opts.RegistryProxy, opts.TUN))
++	}
++	var registrarPick atomic.Uint64
++	// nextRegistrar rotates the registration exit: a new source address makes
++	// Cloudflare hand out a different /64 instead of the same duplicate block.
++	nextRegistrar := func() *registrar {
++		if len(registrars) == 1 {
++			return registrars[0]
++		}
++		return registrars[int(registrarPick.Add(1)-1)%len(registrars)]
++	}
+ 	var relay *socks5Proxy
+ 	var guard *relayGuard
+ 	if opts.SocksUDP != "" {
+@@ -301,7 +325,7 @@ func NewWithOptions(ctx context.Context, log *slog.Logger, opts Options) (*Pool,
+ 				return nil, fmt.Errorf("WARP socks_udp: %w", err)
+ 			}
+ 		}
+-		reg, err := r.register(ctx)
++		reg, err := nextRegistrar().register(ctx)
+ 		if err != nil {
+ 			if guard != nil {
+ 				guard.abandon()
