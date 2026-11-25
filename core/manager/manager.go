@@ -48,6 +48,11 @@ type Manager struct {
 	nodeFarmMu          sync.Mutex
 	nodeFarm            *nodeFarm
 	nodePoolRefreshOnce sync.Once
+
+	// updateManifestMu / updateManifestCache 更新清单镜像加速的改写缓存。
+	// 见 updatemirror.go：只服务桌面壳的 updater，按平台缓存 5 分钟。
+	updateManifestMu    sync.Mutex
+	updateManifestCache map[string]updateManifestEntry
 }
 
 // retryAfterHint 某模型 429 时上游给出的额度重置提示。

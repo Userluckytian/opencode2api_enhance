@@ -169,6 +169,9 @@ func main() {
 	// 后台恢复，不阻塞 40000 监听。
 	go managerInst.AutoStartNodePool()
 
+	// 更新清单镜像加速：桌面壳的 updater 先取 127.0.0.1:40099，再回退 GitHub。
+	// 端口被占或探测失败都不影响主服务（壳会走第二个 endpoint）。
+	managerInst.StartUpdateManifestServer()
 
 	// 调用指标采集：增量消费引擎 stdout，把 request_routed 落成分析用的指标行。
 	// 与看门狗一样常驻；指标是旁路，采不到只记 warn，不影响推理。

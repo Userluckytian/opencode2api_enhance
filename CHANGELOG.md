@@ -1,5 +1,18 @@
 # Changelog
 
+## 未发布（Unreleased，2026-11-25）
+
+### 变更
+
+- **更新下载镜像加速**：桌面壳的 Tauri updater 改为先取本机 `127.0.0.1:40099/api/admin/update/manifest`。管理端拉取 GitHub 的 `latest.json` 后，把目标平台的安装包 URL 改写成 22 个公益加速源里**实测最快**的一个（并发探测首字节，2.5s 超时，结果缓存 5 分钟）；探测失败、端口被占或任何异常都回退到原来的 GitHub 直连 endpoint。
+- 安全边界不变：清单与 `signature` 原样取自 GitHub，安装包仍由 Tauri 用内置公钥验签；镜像只能影响下载字节，不能伪造内容。中转接口只监听回环地址，非本机请求返回 403。
+- `tauri.conf.json` 打开 `dangerousInsecureTransportProtocol`（仅用于上面这个本机 http endpoint），并保留 GitHub 作为第二个 endpoint。
+
+### 说明
+
+- 每个平台只改写自己的 `{os}-{arch}` 条目，其它平台保持原地址。
+- 旧版本客户端不受影响：2.0.11 及以前的内置 endpoint 就是 GitHub 直连。
+
 ## v2.0.11（2026-11-25）
 
 ### 变更

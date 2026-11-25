@@ -31,7 +31,9 @@
   "plugins": {
     "updater": {
       "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEM2QjlBOTlENkJGMkJDOTAKUldTUXZQSnJuYW01eGlVMXBNN0kwR3JhNlcwcmtoZUJHVXlyS0o1VVNQUWJPaklTNWh6ZHdVaWoK",
+      "dangerousInsecureTransportProtocol": true,
       "endpoints": [
+        "http://127.0.0.1:40099/api/admin/update/manifest?target={{target}}&arch={{arch}}",
         "https://github.com/Userluckytian/opencode2api_enhance/releases/download/updater-latest/latest.json"
       ],
       "windows": {
