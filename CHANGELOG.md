@@ -1,5 +1,24 @@
 # Changelog
 
+## 未发布（Unreleased，2026-11-24）
+
+### 变更
+
+- **免费层 WARP 不再自动降级**：池空只观测并上报，不再把 `engine_warp_enabled` 写成 `false`、不再自动重启引擎。免费层只剩匿名通道，关掉 WARP 等于关闭唯一出口（见 issue-log 2026-11-24 #1）。
+- **新增 `engine_warp_stack`**：`ipv6`（默认）/ `ipv4` / `dual`，引擎配置不再硬编码 ipv6（当前生产保持 ipv6）。
+- **WARP 注册代理轮换**：引擎新增 `warp.registration_proxies`，每次注册按列表轮换代理，减少重复 `/64`；管理端新增 `engine_warp_registration_proxies` 与 `engine_warp_socks_udp` 并透传。实测轮换后“重复 `/64` 率”由 2.16 降到 1.06 次/块。
+- **WARP 注册节点池（新）**：可导入 Clash 订阅（URL / 本地文件 / 粘贴），把选中节点用内置 mihomo 托管成本地 mixed 端口（默认 24001 起），再写入 `engine_warp_registration_proxies` 供引擎注册轮换。节点只用于注册，业务出口仍由「设置 → 出口代理」决定。入口在 OpenCode 页「WARP 注册节点池」卡片。
+- **免费层出口池卡片回到 OpenCode 页**：池大小、源 IPv6 前缀、重置出口冷却从设置页迁回 OpenCode 页（设置页只保留出口代理）。
+- **调用日志「清空」改为偏移隐藏**：引擎 stdout 是追加写、不能截断，改为记录已读字节偏移；日志页读取上限从 5000 提到 20 万条（超出时按摊还方式丢弃最旧记录）。
+- **开发模式改为直连 core**：`npm run tauri:dev` 的 `devUrl` 指向 core 自己的端口（44100），不再依赖 Vite dev server；壳在开窗前等待该端口就绪，避免首屏白屏。
+- `config.example.json` 的 `provider_port` 示例值从 50080 改为 30080（仅示例，不影响已有配置）。
+
+### 已知问题
+
+- 壳 `src-tauri/src/embed.rs` 用 `include_bytes!` 内嵌两个子程序，启动时 `ensure_binaries()` 会覆盖手工替换的 `bin/*.exe`；本地构建必须重新打包壳或直接运行管理端（见 issue-log 2026-11-24 #4）。
+- **节点池未随安装包发布**：`third_party/mihomo` 还缺 `LICENSE` / `SOURCE.txt`，`tauri.conf.json` 的 `resources` 也没打 mihomo；安装版打开节点池会提示「未找到 mihomo」（见 issue-log 2026-11-25）。
+- `core/manager` 仍有 4 条 `TestEngineMetric*` 失败：测试数据硬编码 `2026-11-05`，已滑出 `now±48h` 读取窗口（2026-11-10 已登记，非本轮引入）。
+
 ## v2.0.10（2026-11-23）
 
 ### 修复
