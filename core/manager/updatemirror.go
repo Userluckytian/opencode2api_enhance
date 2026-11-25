@@ -134,7 +134,13 @@ func (m *Manager) updateManifestHandler(w http.ResponseWriter, r *http.Request) 
 }
 
 // updateManifest 取清单并把目标平台的 url 改写成最快镜像（带 5 分钟缓存）。
+//
+// 整条链路（探测 + 拉取 + 改写）用 20s 上限收口：极端网络下逐个尝试
+// 23 个来源可能拖过壳的 30s 检查超时，超时后壳会直接回退 GitHub。
 func (m *Manager) updateManifest(ctx context.Context, target, arch string) ([]byte, error) {
+	ctx, cancel := context.WithTimeout(ctx, 20*time.Second)
+	defer cancel()
+
 	key := target + "/" + arch
 	m.updateManifestMu.Lock()
 	if e, ok := m.updateManifestCache[key]; ok && time.Since(e.at) < updateManifestTTL {

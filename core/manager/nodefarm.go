@@ -30,6 +30,7 @@ type nodeFarm struct {
 	cmd        *exec.Cmd
 	pid        int
 	ports      []int
+	nodes      []PoolNode // 与 ports 一一对应（生成配置时的那份，避免重新读取时错位）
 	configPath string
 	logPath    string
 	lastErr    string
@@ -206,6 +207,7 @@ func (m *Manager) StartNodeFarm() error {
 	f.cmd = cmd
 	f.pid = cmd.Process.Pid
 	f.ports = ports
+	f.nodes = append([]PoolNode(nil), nodes...)
 	f.configPath = configPath
 	f.logPath = logPath
 	f.done = done
@@ -285,6 +287,7 @@ func (m *Manager) StopNodeFarm() {
 	f.pid = 0
 	f.running = false
 	f.ports = nil
+	f.nodes = nil
 	f.mu.Unlock()
 	if cmd != nil && cmd.Process != nil {
 		_ = cmd.Process.Kill()
@@ -295,6 +298,14 @@ func (m *Manager) StopNodeFarm() {
 		case <-time.After(3 * time.Second):
 		}
 	}
+}
+
+// farmNodes 返回当前农场启动时使用的节点快照（与 NodeFarmInfo().Ports 对齐）。
+func (m *Manager) farmNodes() []PoolNode {
+	f := m.farm()
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]PoolNode(nil), f.nodes...)
 }
 
 // writeEngineRegistration 依据选中节点与分配端口，写引擎侧的两个旋钮：
@@ -317,7 +328,13 @@ func (m *Manager) writeEngineRegistration(ports []int) (string, error) {
 
 	socksUDP := ""
 	if strings.TrimSpace(m.loadConfig().EngineWarpSourceIPv6) == "" {
-		for i, n := range m.SelectedNodes() {
+		// 用启动农场时的节点快照，和 ports 一一对应；直接重读 SelectedNodes
+		// 可能因订阅刷新改了顺序而把中继指到别的节点上。
+		nodes := m.farmNodes()
+		if len(nodes) != len(ports) {
+			nodes = m.SelectedNodes()
+		}
+		for i, n := range nodes {
 			if i >= len(ports) {
 				break
 			}
