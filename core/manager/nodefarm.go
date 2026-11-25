@@ -643,7 +643,27 @@ func (m *Manager) ApplyNodePool(selected []string) (hot bool, err error) {
 			return false, err
 		}
 	}
+	// UDP 中继体检：TCP 注册成功不代表 WireGuard 握手能出去。
+	if relay := effectiveSocksUDP(m.loadConfig(), m.nodePoolOn(m.loadConfig())); relay != "" {
+		if err := probeSocks5UDP(relay, 5*time.Second); err != nil {
+			m.appendNodePoolWarning(fmt.Sprintf(
+				"UDP 中继不可用（%s）：%v；引擎注册会成功但握手发不出去，请改填可用的手动中继", relay, err))
+		}
+	}
 	return m.syncRegistrationAfterApply()
+}
+
+// appendNodePoolWarning 在现有告警后追加一条（不覆盖可达性预检的结果）。
+func (m *Manager) appendNodePoolWarning(msg string) {
+	if strings.TrimSpace(msg) == "" {
+		return
+	}
+	cur := strings.TrimSpace(m.loadConfig().NodePoolLastWarning)
+	if cur == "" {
+		_ = m.ConfigSet("node_pool_last_warning", msg)
+		return
+	}
+	_ = m.ConfigSet("node_pool_last_warning", cur+"；"+msg)
 }
 
 // verifySlotReachability 槽位级兜底探测（没有 controller 时用）。
