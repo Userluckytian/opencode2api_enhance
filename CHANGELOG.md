@@ -1,5 +1,19 @@
 # Changelog
 
+## v2.0.14（2026-11-25）
+
+### 变更
+
+- **引擎补丁随构建发布**：CI 在克隆固定提交 `1a208ac` 后应用 `third_party/opencode2api-win/patches/registration-proxies.patch`（3 文件 +73 行），补回 `warp.registration_proxies`。节点池因此恢复「注册轮换」：同一轮注册从不同源代理出去，Cloudflare 会下发不同的 `/64`，出口池能填满。
+- 补丁先提交进 `engine-src` 再 `git archive`，源码包与二进制一致（GPL-3.0）；构建增加 `grep registration_proxies` 自检，补丁失效会让构建直接失败，不会静默发出坏引擎。
+- 本地 `scripts/fetch-free-tier-engine.ps1` 同样应用补丁（已打过时自动跳过）。
+- `SOURCE.txt` 更正：`registration_proxies` **不在**上游 tag 里，来自本地补丁（此前记载有误，导致 v2.0.12 写出引擎不认的配置）。
+
+### 说明
+
+- v2.0.13 的引擎能力探测保留：即使将来引擎又缺这个字段，管理器只降级到 `socks_udp`，不会再把配置写坏。
+- 安装包体积不变；已导入的节点池不需要重新导入，升级后点一次「应用并重启引擎」即可重新拿到注册轮换。
+
 ## v2.0.13（2026-11-25）
 
 ### 修复
