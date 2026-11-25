@@ -2,17 +2,27 @@
 
 ## v2.0.14（2026-11-25）
 
+### 修复
+
+- **匿名通道熔断让免费层「整小时停机」**：免费层自 v2.0.9 起没有 key，匿名是唯一通道，而引擎的熔断只看到期时间、不看出口是否恢复——连续 6 次失败后暂停 1h→24h，期间所有请求立即 503（2026-11-25 13:10 实测 40 分钟全 503，`/healthz` 仍报 warp ready）。现在不再下发 `models.anonymous_backoff`（引擎缺省 = 熔断关闭）：失败立刻返回真实原因（出口被封 / 无可用出口），出口一恢复就能继续用。
+- **探测全部 503 且无解释**：手动探测先打一发，识别到 `free_tier_lane_paused` / `free_tier_ip_blocked` / 无可用出口就停止批量并给出中文原因与冷却数量，不再让用户看 20 行一样的 503。
+- **`engine_enabled=false` 不生效**：看门狗有判断，启动路径漏了——手动停掉引擎、重启面板后它又自己起来。现在启动前读同一开关。
+- **构建链路两处静默失败（导致 2.0.14 前三轮 CI 全红）**：① 在 git 工作树内 `cd engine-src` 再 `git apply`，git 会把补丁路径解释为仓库根相对，目标落在当前目录之外时**静默跳过并返回 0**，编出未打补丁的引擎；改为仓库根 `git apply -p1 --directory=engine-src`，并在编译前断言源码含 `RegistrationProxies`。② Windows runner 的 `tar` 把 `$GITHUB_WORKSPACE` 的 `D:/...` 当远程主机（`Cannot connect to D:`，exit 2）；改为全程相对路径。
+
 ### 变更
 
-- **引擎补丁随构建发布**：CI 在克隆固定提交 `1a208ac` 后应用 `third_party/opencode2api-win/patches/registration-proxies.patch`（3 文件 +73 行），补回 `warp.registration_proxies`。节点池因此恢复「注册轮换」：同一轮注册从不同源代理出去，Cloudflare 会下发不同的 `/64`，出口池能填满。
-- 补丁先提交进 `engine-src` 再 `git archive`，源码包与二进制一致（GPL-3.0）；构建增加 `grep registration_proxies` 自检，补丁失效会让构建直接失败，不会静默发出坏引擎。
-- 本地 `scripts/fetch-free-tier-engine.ps1` 同样应用补丁（已打过时自动跳过）。
-- `SOURCE.txt` 更正：`registration_proxies` **不在**上游 tag 里，来自本地补丁（此前记载有误，导致 v2.0.12 写出引擎不认的配置）。
+- **状态单一来源**：引擎状态新增 `restarting` / `restart_started_at` / `warp_size` / `warp_preload` / `warp_standby`。节点池「应用」、看门狗、工具栏触发的重启都会让顶部按钮显示「重启中」并禁用，状态徽章、免费模型开关、两张卡片同步——不会再出现「下面在重启、上面还能再点一次」。
+- **出口注册可见**：出口池卡片显示目标/就绪/预注册/冷却与进度条；保存后提示「配置 X · 当前引擎 Y」。无可用出口时页面顶部给出原因与处理路径（等冷却/换注册源/开节点池）。
+- **节点池可移除**：每行可删除、可清空列表；被移除的节点记入屏蔽名单，订阅刷新不会复活；选中项同步剔除。卡片改为 4s 轮询，不再依赖手点刷新。
+- **引擎补丁随构建发布**：CI 解包固定快照 `1a208ac` 后应用 `third_party/opencode2api-win/patches/registration-proxies.patch`（3 文件 +73 行），补回 `warp.registration_proxies`。节点池因此恢复「注册轮换」：同一轮注册从不同源代理出去，Cloudflare 会下发不同的 `/64`。
+- 补丁先提交进 `engine-src` 再打包，源码包与二进制一致（GPL-3.0）；构建增加 `grep registration_proxies` 自检，补丁失效会让构建直接失败。
+- 本地 `scripts/fetch-free-tier-engine.ps1` 同样应用补丁并做源码断言；`SOURCE.txt` 更正：`registration_proxies` **不在**上游 tag 里，来自本地补丁。
 
 ### 说明
 
-- v2.0.13 的引擎能力探测保留：即使将来引擎又缺这个字段，管理器只降级到 `socks_udp`，不会再把配置写坏。
-- 安装包体积不变；已导入的节点池不需要重新导入，升级后点一次「应用并重启引擎」即可重新拿到注册轮换。
+- v2.0.13 的引擎能力探测保留：引擎缺字段时只降级到 `socks_udp`，不会再把配置写坏。
+- 升级后节点池需要重新「应用」一次才能让引擎拿到注册轮换；引擎重启仍会发生（热加在 2.0.15）。
+- `.gitattributes` 强制 `*.patch` LF、`*.tar.gz` binary：CRLF 补丁在 Windows 检出后打不上。
 
 ## v2.0.13（2026-11-25）
 
