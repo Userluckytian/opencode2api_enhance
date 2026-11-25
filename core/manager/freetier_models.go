@@ -313,6 +313,29 @@ func (m *Manager) FreeTierModels(ctx context.Context) FreeTierModelsView {
 		merged[id] = v
 	}
 
+	// 4e. 手动探测结果覆盖：必须放在最后，catalog / availability / /v1/models
+	// 三种来源的模型都要能被覆盖——否则点完探测拿到 200，状态列仍显示旧的
+	// 「受限 / 额度重置 59 分钟后」。
+	for id, v := range merged {
+		h, okHint := m.ProbeHint(id)
+		if !okHint {
+			continue
+		}
+		if t, perr := time.Parse(time.RFC3339, v.CheckedAt); perr == nil && t.After(h.At) {
+			continue
+		}
+		v.ProbeOK = h.OK
+		v.ProbeStatus = h.Status
+		v.CheckedAt = h.At.UTC().Format(time.RFC3339)
+		if h.OK {
+			v.Reason = "probe_succeeded"
+			v.RetryAfterSeconds, v.RetryAfterAt = 0, ""
+		} else {
+			v.Reason = fmt.Sprintf("http_%d", h.Status)
+		}
+		merged[id] = v
+	}
+
 	// 5. 排序：免费优先 → 探测通过优先 → 引擎暴露优先 → ID 升序
 	//
 	// 为什么免费排最前：面板默认勾了「只使用免费模型」，用户打开卡片想看的就是
@@ -445,8 +468,10 @@ func fetchEngineModels(ctx context.Context, base, apiKey string) (engineModelsPa
 // readEnginePricing 读引擎的定价缓存（`*.models.dev.json`）。
 //
 // 这是「免费」判定的第二来源：引擎 Decide() 的规则是
-//   name_free       —— 模型 ID 含 "free"（大小写不敏感）
-//   metadata_free   —— 元数据显示 input/output 成本均为 0 且未废弃
+//
+//	name_free       —— 模型 ID 含 "free"（大小写不敏感）
+//	metadata_free   —— 元数据显示 input/output 成本均为 0 且未废弃
+//
 // 只靠名字会漏掉 big-pickle 这类「名字没 free 但成本为 0」的模型。
 func readEnginePricing(engineDir string) (*pricingCache, string) {
 	p := newestMatch(engineDir, "*models.dev.json")

@@ -38,6 +38,13 @@ type Manager struct {
 	retryAfterMu sync.RWMutex
 	retryAfter   map[string]retryAfterHint
 
+	// probeMu 保护 probeHints：手动探测的最近结果。
+	// 引擎的 availability 只在它自己巡检时更新，面板点「探测」拿到 200 后
+	// 状态列仍显示「受限」—— 这里记录手动结果，FreeTierModels 合并时以
+	// 「更新的那个」为准；成功时顺手清掉旧的 429 倒计时。
+	probeMu    sync.RWMutex
+	probeHints map[string]probeHint
+
 	// warpFallbackMu 保护 warpFallback：WARP 池空时的自动降级判定状态。
 	// 见 freetier_warp_fallback.go 顶部的成因说明。
 	warpFallbackMu sync.Mutex
@@ -64,6 +71,40 @@ type retryAfterHint struct {
 }
 
 // NoteRetryAfter 记录某模型的 429 重置提示（seconds <= 0 视为未知，忽略）。
+// probeHint 一次手动探测的结果。
+type probeHint struct {
+	OK     bool
+	Status int
+	At     time.Time
+}
+
+// NoteProbeResult 记录手动探测结果；成功时清掉该模型的 429 倒计时，
+// 避免面板继续显示「额度重置 59 分钟后」。
+func (m *Manager) NoteProbeResult(model string, ok bool, status int) {
+	if model == "" {
+		return
+	}
+	m.probeMu.Lock()
+	if m.probeHints == nil {
+		m.probeHints = map[string]probeHint{}
+	}
+	m.probeHints[model] = probeHint{OK: ok, Status: status, At: time.Now()}
+	m.probeMu.Unlock()
+	if ok {
+		m.retryAfterMu.Lock()
+		delete(m.retryAfter, model)
+		m.retryAfterMu.Unlock()
+	}
+}
+
+// ProbeHint 读最近一次手动探测结果。
+func (m *Manager) ProbeHint(model string) (probeHint, bool) {
+	m.probeMu.RLock()
+	h, ok := m.probeHints[model]
+	m.probeMu.RUnlock()
+	return h, ok
+}
+
 func (m *Manager) NoteRetryAfter(model string, seconds int) {
 	if model == "" || seconds <= 0 {
 		return

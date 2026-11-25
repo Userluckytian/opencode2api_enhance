@@ -282,6 +282,7 @@ func modelProbeHandler(m *manager.Manager) http.HandlerFunc {
 		// 让用户看 20 行一样的 503 没有任何信息量，直接早停 + 人话原因。
 		first := probeOneModel(r.Context(), base, st.APIKey, targets[0])
 		results[0] = first
+		m.NoteProbeResult(first.Model, first.OK, first.Status)
 		if first.RetryAfterSeconds > 0 {
 			m.NoteRetryAfter(first.Model, first.RetryAfterSeconds)
 		}
@@ -305,6 +306,7 @@ func modelProbeHandler(m *manager.Manager) http.HandlerFunc {
 				defer wg.Done()
 				defer func() { <-sem }()
 				results[idx] = probeOneModel(r.Context(), base, st.APIKey, modelID)
+				m.NoteProbeResult(modelID, results[idx].OK, results[idx].Status)
 				// 把 429 的重置提示记下来，供模型列表显示「额度何时重置」。
 				// 引擎只写 reason=http_429，不写 Retry-After，所以这里是唯一
 				// 能拿到它的地方。
