@@ -53,6 +53,37 @@ type Config struct {
 	EngineWarpPoolSize int `json:"engine_warp_pool_size,omitempty"`
 	// EngineWarpSourceIPv6 外层源 IPv6 前缀（通常一个路由到本机的 /64）。
 	EngineWarpSourceIPv6 string `json:"engine_warp_source_ipv6,omitempty"`
+	// EngineWarpStack 引擎 WARP 出口栈：ipv6（默认）/ ipv4 / dual。
+	//
+	// 为什么需要：引擎默认 ipv6（每出口一个独享 IPv6，额度桶更细）；
+	// 本机没有可用 IPv6 时，部分 Cloudflare 端点会握手失败
+	// （wsasendto: unreachable network），此时可改成 ipv4 让出口走 IPv4。
+	EngineWarpStack string `json:"engine_warp_stack,omitempty"`
+	// EngineWarpRegistrationProxies WARP 注册代理轮换列表。
+	//
+	// 为什么需要：引擎默认只用 proxies 里第一个非 direct 代理做注册，所有注册从
+	// 同一出口 IP 出去，Cloudflare 反复下发同一个 /64，池子被 duplicate 卡住。
+	// 配多项后每次注册轮换一个代理，注册源不同，才有机会拿到不同的 /64。
+	EngineWarpRegistrationProxies []string `json:"engine_warp_registration_proxies,omitempty"`
+	// EngineWarpSocksUDP WARP 外层 UDP 的 SOCKS5 中继（socks5://host:port）。
+	//
+	// 用途：本机无法直发 UDP（或 IPv6 不可达）时，把 WireGuard 握手交给
+	// SOCKS5 代理的 UDP ASSOCIATE 转发。留空则直连。
+	EngineWarpSocksUDP string `json:"engine_warp_socks_udp,omitempty"`
+
+	// ---- 节点池（WARP 注册源；只服务 OpenCode 免费层）----
+	// NodePoolEnabled 节点池开关（未配置默认关闭）。
+	NodePoolEnabled *bool `json:"node_pool_enabled,omitempty"`
+	// NodePoolSubscriptionURL 订阅地址（仅为记录来源，刷新时可重拉）。
+	NodePoolSubscriptionURL string `json:"node_pool_subscription_url,omitempty"`
+	// NodePoolMihomoPath mihomo 可执行文件路径；留空找 bin 目录。
+	NodePoolMihomoPath string `json:"node_pool_mihomo_path,omitempty"`
+	// NodePoolPortBase 节点本地端口起始值（默认 24001）。
+	NodePoolPortBase int `json:"node_pool_port_base,omitempty"`
+	// NodePoolSelected 选中的节点指纹（换行分隔）。
+	NodePoolSelected []string `json:"node_pool_selected,omitempty"`
+	// NodePoolRefreshMin 订阅自动刷新间隔（分钟，0 = 不自动刷新）。
+	NodePoolRefreshMin int `json:"node_pool_refresh_min,omitempty"`
 	// EngineProxies 引擎出口代理列表（每项 http/https/socks5/socks5h 或 direct）。
 	EngineProxies []string `json:"engine_proxies,omitempty"`
 	// 注意：v2.0.9 起移除了 engine_zen_keys / engine_go_keys。
@@ -268,6 +299,24 @@ func (m *Manager) ConfigGet(key string) (string, error) {
 		return strconv.Itoa(cfg.EngineWarpPoolSize), nil
 	case "engine_warp_source_ipv6":
 		return cfg.EngineWarpSourceIPv6, nil
+	case "engine_warp_stack":
+		return engineWarpStack(cfg), nil
+	case "engine_warp_registration_proxies":
+		return strings.Join(cfg.EngineWarpRegistrationProxies, "\n"), nil
+	case "engine_warp_socks_udp":
+		return cfg.EngineWarpSocksUDP, nil
+	case "node_pool_enabled":
+		return strconv.FormatBool(cfg.NodePoolEnabled != nil && *cfg.NodePoolEnabled), nil
+	case "node_pool_subscription_url":
+		return cfg.NodePoolSubscriptionURL, nil
+	case "node_pool_mihomo_path":
+		return cfg.NodePoolMihomoPath, nil
+	case "node_pool_port_base":
+		return strconv.Itoa(cfg.NodePoolPortBase), nil
+	case "node_pool_selected":
+		return strings.Join(cfg.NodePoolSelected, "\n"), nil
+	case "node_pool_refresh_min":
+		return strconv.Itoa(cfg.NodePoolRefreshMin), nil
 	case "engine_proxies":
 		return strings.Join(cfg.EngineProxies, "\n"), nil
 	case "engine_retry_max_attempts":
@@ -396,6 +445,56 @@ func (m *Manager) ConfigSet(key, value string) error {
 		cfg.EngineWarpPoolSize = int(v)
 	case "engine_warp_source_ipv6":
 		cfg.EngineWarpSourceIPv6 = strings.TrimSpace(value)
+	case "engine_warp_stack":
+		s := strings.ToLower(strings.TrimSpace(value))
+		switch s {
+		case "", "ipv6", "v6":
+			cfg.EngineWarpStack = ""
+		case "ipv4", "v4":
+			cfg.EngineWarpStack = "ipv4"
+		case "dual", "both":
+			cfg.EngineWarpStack = "dual"
+		default:
+			return fmt.Errorf("engine_warp_stack 只能是 ipv6 / ipv4 / dual，收到 %q", value)
+		}
+	case "engine_warp_registration_proxies":
+		cfg.EngineWarpRegistrationProxies = splitLinesOrCommas(value)
+	case "engine_warp_socks_udp":
+		s := strings.TrimSpace(value)
+		if s != "" && !strings.Contains(s, ":") {
+			return fmt.Errorf("engine_warp_socks_udp 必须是 socks5://host:port 或 host:port")
+		}
+		cfg.EngineWarpSocksUDP = s
+	case "node_pool_enabled":
+		b, err := parseBool()
+		if err != nil {
+			return err
+		}
+		cfg.NodePoolEnabled = &b
+	case "node_pool_subscription_url":
+		cfg.NodePoolSubscriptionURL = strings.TrimSpace(value)
+	case "node_pool_mihomo_path":
+		cfg.NodePoolMihomoPath = strings.TrimSpace(value)
+	case "node_pool_port_base":
+		v, err := parseInt()
+		if err != nil {
+			return err
+		}
+		if v < 1024 || v > 65000 {
+			return fmt.Errorf("node_pool_port_base 需在 1024~65000 之间")
+		}
+		cfg.NodePoolPortBase = int(v)
+	case "node_pool_selected":
+		cfg.NodePoolSelected = splitLinesOrCommas(value)
+	case "node_pool_refresh_min":
+		v, err := parseInt()
+		if err != nil {
+			return err
+		}
+		if v < 0 || v > 1440 {
+			return fmt.Errorf("node_pool_refresh_min 需在 0~1440 分钟之间")
+		}
+		cfg.NodePoolRefreshMin = int(v)
 	case "engine_proxies":
 		cfg.EngineProxies = splitLinesOrCommas(value)
 	case "engine_retry_max_attempts":
@@ -480,6 +579,18 @@ func engineWarpAutoFallback(cfg Config) bool {
 		return true
 	}
 	return *cfg.EngineWarpAutoFallback
+}
+
+// engineWarpStack 引擎 WARP 出口栈（ipv6 默认；ipv4 走 Cloudflare NAT 公网地址；dual 双栈）。
+func engineWarpStack(cfg Config) string {
+	switch strings.ToLower(strings.TrimSpace(cfg.EngineWarpStack)) {
+	case "ipv4", "v4":
+		return "ipv4"
+	case "dual", "both":
+		return "dual"
+	default:
+		return "ipv6"
+	}
 }
 
 // engineFreeOnly 只暴露/路由免费模型（nil = 默认开启）。

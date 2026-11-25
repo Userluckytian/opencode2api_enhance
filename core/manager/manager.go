@@ -42,6 +42,12 @@ type Manager struct {
 	// 见 freetier_warp_fallback.go 顶部的成因说明。
 	warpFallbackMu sync.Mutex
 	warpFallback   warpFallbackState
+
+	// nodeFarmMu / nodeFarm 节点池农场（订阅节点 → 本地端口）。
+	// 见 nodepool.go / nodefarm.go：只服务 OpenCode 免费层注册，不影响出口代理。
+	nodeFarmMu          sync.Mutex
+	nodeFarm            *nodeFarm
+	nodePoolRefreshOnce sync.Once
 }
 
 // retryAfterHint 某模型 429 时上游给出的额度重置提示。

@@ -130,6 +130,10 @@ type engineWarpConfig struct {
 	PoolSize   int    `json:"pool_size,omitempty"`
 	Stack      string `json:"stack,omitempty"`
 	SourceIPv6 string `json:"source_ipv6,omitempty"`
+	// RegistrationProxies 注册代理轮换（每次注册取下一个）。
+	RegistrationProxies []string `json:"registration_proxies,omitempty"`
+	// SocksUDP WARP 外层 UDP 的 SOCKS5 中继。
+	SocksUDP string `json:"socks_udp,omitempty"`
 }
 
 type engineUpstream struct {
@@ -298,10 +302,12 @@ func (m *Manager) buildEngineConfigBytes() ([]byte, error) {
 		// 继续 429」——那是引擎更早版本的行为，在当前上游 9964407 已不成立。）
 		Anonymous: engineAnonymousEnabled(cfg),
 		Warp: engineWarpConfig{
-			Enabled:    engineWarpEnabled(cfg),
-			PoolSize:   poolSize,
-			Stack:      "ipv6",
-			SourceIPv6: cfg.EngineWarpSourceIPv6,
+			Enabled:             engineWarpEnabled(cfg),
+			PoolSize:            poolSize,
+			Stack:               engineWarpStack(cfg),
+			SourceIPv6:          cfg.EngineWarpSourceIPv6,
+			RegistrationProxies: cfg.EngineWarpRegistrationProxies,
+			SocksUDP:            cfg.EngineWarpSocksUDP,
 		},
 		Proxies:   proxies,
 		ProxyFile: "",

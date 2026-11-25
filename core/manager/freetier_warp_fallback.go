@@ -34,14 +34,14 @@ package manager
 // 池于是永远 0 出口，引擎 /healthz 报 degraded + issues=["warp_unavailable"]，
 // 面板显示「引擎未运行 / 模型 0/0」。
 //
-// ## 降级方式
+// ## 处理方式：只观测，不改配置
 //
-// 把引擎 config 的 warp.enabled 写成 false → 引擎启动时 g.warp == nil →
-// usesWARP() 恒 false → key 直接走 proxies（直连或面板配置的出口代理）。
-// 这是**不修改引擎**（GPL 独立程序）前提下唯一能恢复 key 可用的手段。
+// 2026-11-24 起不再自动把 warp.enabled 写成 false：免费层只剩匿名通道，关掉 WARP
+// 等于把「唯一出口」静默换成直连，面板看起来能用，实际已经偏离「必须依赖 WARP」的
+// 要求。现在池空时只累计观测次数并上报状态，请求由引擎自行返回 503 /
+// warp_unavailable，是否重试或关 WARP 交给用户决定。
 //
-// 降级只做一次、不自动切回：池空通常是环境性的（无 IPv6 / 出口被封），反复重试只会
-// 反复烧出口并把冷却账本撑大。用户可在面板点「重试 WARP」重新尝试。
+// 计数只累加到阈值一次：达到后标记 applied 并停止累计，避免日志刷屏。
 
 import (
 	"encoding/json"
@@ -154,15 +154,15 @@ func (m *Manager) ResetWarpFallback() WarpFallbackStatus {
 	return m.WarpFallbackStatusOf()
 }
 
-// maybeAutoFallbackWarp 看门狗每轮调用：观测到 WARP 池连续多次 0 出口时，
-// 自动把引擎的 warp.enabled 关掉并重启引擎，让 key 恢复直连可用。
+// maybeAutoFallbackWarp 看门狗每轮调用：观测 WARP 池是否连续多次 0 出口。
 //
-// 返回 true 表示本轮执行了降级（调用方据此决定是否跳过后续健康检查）。
+// 只观测、只上报，不改配置也不重启引擎：本项目必须依赖 WARP，池空时宁可让请求
+// 503，也不能把 engine_warp_enabled 写成 false（那会把整条免费通道静默降级成
+// 直连）。
 //
-// 为什么在这里做而不是在 Status() 里：Status() 是面板高频轮询路径（前端 5s 一次），
-// 在里面改配置 + 重启引擎会把面板变成「点一下就重启」。看门狗是 30s 一次的后台
-// 循环，语义上就该由它负责这类自愈动作。
+// 返回 true 表示本轮首次判定「池空」（调用方据此记一次告警日志），不会重复返回。
 func (m *Manager) maybeAutoFallbackWarp(runner Runner, health warpHealth) bool {
+	_ = runner // 保留参数兼容历史调用点；本函数已不再重启引擎
 	cfg := m.loadConfig()
 	if !engineWarpEnabled(cfg) || !engineWarpAutoFallback(cfg) {
 		return false
@@ -195,24 +195,10 @@ func (m *Manager) maybeAutoFallbackWarp(runner Runner, health warpHealth) bool {
 		return false
 	}
 
-	// 达到阈值：关掉 WARP 并重启引擎。
+	// 达到阈值：只标记并上报，不改配置、不重启（见文件顶部说明）。
 	reason := fmt.Sprintf(
-		"WARP 池连续 %d 次观测到 0 可用出口（冷却 %d 个），已自动降级为直连以恢复 key 可用",
+		"WARP 池连续 %d 次观测到 0 可用出口（冷却 %d 个），已保持 WARP 模式，未做降级",
 		strikes, health.Cooling)
-	if err := m.ConfigSet("engine_warp_enabled", "false"); err != nil {
-		// 写配置失败：不标记 applied，下一轮继续尝试。
-		return false
-	}
-	if err := m.RestartFreeTierEngine(runner); err != nil {
-		// 重启失败：配置已改，下一轮引擎起来后就是直连模式；仍标记 applied
-		// 以免反复重启。
-		m.warpFallbackMu.Lock()
-		m.warpFallback.applied = true
-		m.warpFallback.at = time.Now()
-		m.warpFallback.reason = reason + "（重启引擎失败：" + err.Error() + "）"
-		m.warpFallbackMu.Unlock()
-		return true
-	}
 	m.warpFallbackMu.Lock()
 	m.warpFallback.applied = true
 	m.warpFallback.at = time.Now()
