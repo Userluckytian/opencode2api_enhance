@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import { Loader2, Waves } from 'lucide-react'
-import { api, type ConfigView, type FreeTierEngineStatus } from '../lib/api'
+import { api, type ConfigView, type FreeTierEngineStatus, type WarpSample } from '../lib/api'
 
 // 免费层出口池（WARP）：自 2026-11-24 从设置页整体迁到 OpenCode 页。
 // 只写 engine_warp_* 配置，生效需要重启引擎（重启按钮在工具栏）。
@@ -82,6 +82,7 @@ export default function WarpPoolCard({
   const cooling = status?.warp_cooling ?? 0
   const pendingApply = target > 0 && String(target) !== pool
   const progress = target > 0 ? Math.min(100, Math.round((ready / target) * 100)) : 0
+  const history: WarpSample[] = status?.warp_history ?? []
 
   return (
     <section className="bg-white rounded-2xl border border-zinc-200 shadow-sm p-5">
@@ -131,6 +132,28 @@ export default function WarpPoolCard({
             />
           </div>
         ) : null}
+        {history.length > 1 ? (() => {
+          const max = Math.max(
+            1,
+            ...history.map((h) => Math.max(h.size, h.active, h.cooling)),
+          )
+          const w = 240
+          const hgt = 32
+          const path = (vals: number[]) =>
+            vals.map((v, i) => `${(i / (vals.length - 1)) * w},${hgt - (v / max) * hgt}`).join(' ')
+          return (
+            <div className="mt-2">
+              <svg viewBox={`0 0 ${w} ${hgt}`} className="w-full h-8" preserveAspectRatio="none">
+                <polyline points={path(history.map((h) => h.cooling))} fill="none" stroke="#f59e0b" strokeWidth="1" opacity="0.5" />
+                <polyline points={path(history.map((h) => h.active))} fill="none" stroke="#10b981" strokeWidth="1.5" />
+              </svg>
+              <div className="text-[10px] text-zinc-400">
+                近 {history.length} 次巡检：<span className="text-emerald-600">绿=就绪</span> ·{' '}
+                <span className="text-amber-600">橙=冷却</span>
+              </div>
+            </div>
+          )
+        })() : null}
         {cooling > 0 ? (
           <div className="mt-1.5 text-[11px] text-amber-700">
             冷却中的 /64 额度已烧穿，等冷却到期或换注册源（节点池 / 出口代理）拿新 /64。
@@ -173,9 +196,9 @@ export default function WarpPoolCard({
             UDP 中继（socks5://host:port，留空 = 用节点池槽位 0 / 直连）
             {poolManaged ? ' · 节点池管理注册源' : ''}
           </span>
-          <input
-            type="text"
-            placeholder="socks5://127.0.0.1:7890"
+          <textarea
+            rows={2}
+            placeholder={"socks5://127.0.0.1:7890（可多行：按顺序探测，第一行生效）"}
             value={relay}
             onChange={(e) => setRelay(e.target.value)}
             className="w-full px-3 py-2 rounded-lg border border-zinc-200 text-[13px] font-mono disabled:bg-zinc-50 disabled:text-zinc-500"

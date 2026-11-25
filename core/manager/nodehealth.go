@@ -39,6 +39,10 @@ func (m *Manager) WatchNodePoolHealth() {
 			continue
 		}
 		last = time.Now()
+		m.appendWarpSample(WarpSample{
+			At: time.Now().Format("15:04:05"), Size: st.WarpSize,
+			Active: st.WarpActive, Cooling: st.WarpCooling,
+		})
 		if st.WarpActive > 0 {
 			zeroRounds = 0
 		} else {
@@ -83,17 +87,43 @@ func (m *Manager) WatchNodePoolHealth() {
 	}
 }
 
-// failoverUDPRelay 当前中继转发不了 UDP 时，切换到备用中继并重启引擎。
-// 候选：手动中继（当前没在用的话）与农场槽位 0。切换成功会写入手动键，
-// 之后每次应用/巡检都沿用它（手动值优先）。
-func (m *Manager) failoverUDPRelay() {
+// relayCandidates 中继候选：手动列表（每行一个）+ 农场槽位 0（兜底）。
+func (m *Manager) relayCandidates() []string {
 	cfg := m.loadConfig()
-	manual := strings.TrimSpace(cfg.EngineWarpSocksUDPManual)
-	info := m.NodeFarmInfo()
+	out := splitRelayCandidates(cfg.EngineWarpSocksUDPManual)
 	farm := ""
-	if len(info.Ports) > 0 {
+	if info := m.NodeFarmInfo(); len(info.Ports) > 0 {
 		farm = "socks5://127.0.0.1:" + strconv.Itoa(info.Ports[0])
 	}
+	if farm != "" {
+		dup := false
+		for _, c := range out {
+			if c == farm {
+				dup = true
+				break
+			}
+		}
+		if !dup {
+			out = append(out, farm)
+		}
+	}
+	return out
+}
+
+// pickWorkingRelay 按顺序探测候选，返回第一个能真正转发 UDP 的中继。
+func pickWorkingRelay(cands []string, timeout time.Duration) string {
+	for _, c := range cands {
+		if probeSocks5UDP(c, timeout) == nil {
+			return c
+		}
+	}
+	return ""
+}
+
+// failoverUDPRelay 当前中继转发不了 UDP 时，切换到备用中继并重启引擎。
+// 候选：手动列表的其余行 + 农场槽位 0；选中后写回手动键（手动值优先）。
+func (m *Manager) failoverUDPRelay() {
+	cfg := m.loadConfig()
 	cur := effectiveSocksUDP(cfg, m.nodePoolOn(cfg))
 	if cur == "" {
 		return // 直连模式，无从探测
@@ -101,19 +131,19 @@ func (m *Manager) failoverUDPRelay() {
 	if probeSocks5UDP(cur, 5*time.Second) == nil {
 		return // 中继没问题，出口不足是额度/注册问题
 	}
-	alts := make([]string, 0, 2)
-	if manual != "" && manual != cur {
-		alts = append(alts, manual)
-	}
-	if farm != "" && farm != cur {
-		alts = append(alts, farm)
-	}
+	alts := m.relayCandidates()
 	for _, alt := range alts {
-		if probeSocks5UDP(alt, 5*time.Second) != nil {
+		if alt == cur || probeSocks5UDP(alt, 5*time.Second) != nil {
 			continue
 		}
 		log.Printf("warp relay failover: %s unusable, switching to %s and restarting engine", cur, alt)
-		_ = m.ConfigSet("engine_warp_socks_udp_manual", alt)
+		reordered := []string{alt}
+		for _, c := range splitRelayCandidates(cfg.EngineWarpSocksUDPManual) {
+			if c != alt {
+				reordered = append(reordered, c)
+			}
+		}
+		_ = m.ConfigSet("engine_warp_socks_udp_manual", strings.Join(reordered, "\n"))
 		m.restartEngineAsync()
 		return
 	}

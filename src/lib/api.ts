@@ -542,6 +542,14 @@ export type MetricSuggestions = {
 }
 
 
+/** 出口池历史采样（巡检每轮一个点） */
+export type WarpSample = {
+  at: string
+  size: number
+  active: number
+  cooling: number
+}
+
 /** 一个注册代理（节点池槽位）的累计注册结果 */
 export type WarpRegistrar = {
   index: number
@@ -581,6 +589,8 @@ export type FreeTierEngineStatus = {
   restarting: boolean
   /** 实际下发的 UDP 中继（空 = 直连） */
   warp_socks_udp?: string
+  /** 出口池历史采样（最多 60 点） */
+  warp_history?: WarpSample[]
   /** 每个注册代理（= 节点池槽位）的累计注册成败；2.0.16 引擎补丁提供 */
   warp_registrars?: WarpRegistrar[]
   restart_started_at?: string

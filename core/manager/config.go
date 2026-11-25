@@ -616,10 +616,37 @@ func nodePoolHealthSec(cfg Config) int {
 // 手动留空时才用农场槽位 0（或停用后的残留值）。
 func effectiveSocksUDP(cfg Config, nodePoolOn bool) string {
 	_ = nodePoolOn // 保留参数：调用点语义清晰，将来若要按模式切换再启用
-	if manual := strings.TrimSpace(cfg.EngineWarpSocksUDPManual); manual != "" {
+	// 手动值支持多行候选（每行一个 socks5），第一行是当前生效值；
+	// 巡检/应用会把「实测能转发 UDP 的那个」提到第一行。
+	if manual := firstNonEmptyLine(cfg.EngineWarpSocksUDPManual); manual != "" {
 		return manual
 	}
-	return cfg.EngineWarpSocksUDP
+	return strings.TrimSpace(cfg.EngineWarpSocksUDP)
+}
+
+// firstNonEmptyLine 取多行文本里第一个非空行。
+func firstNonEmptyLine(s string) string {
+	for _, line := range strings.Split(s, "\n") {
+		if v := strings.TrimSpace(line); v != "" {
+			return v
+		}
+	}
+	return ""
+}
+
+// splitRelayCandidates 把手动中继按行拆成候选列表（去重、去空）。
+func splitRelayCandidates(s string) []string {
+	out := make([]string, 0, 4)
+	seen := map[string]bool{}
+	for _, line := range strings.Split(s, "\n") {
+		v := strings.TrimSpace(line)
+		if v == "" || seen[v] {
+			continue
+		}
+		seen[v] = true
+		out = append(out, v)
+	}
+	return out
 }
 
 func engineEnabled(cfg Config) bool {

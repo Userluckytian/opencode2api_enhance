@@ -569,7 +569,7 @@ func (m *Manager) writeEngineRegistration(ports []int) (string, error) {
 //   - 端口集合没变（固定 8 槽位）→ 只改了 mihomo 的槽位映射，引擎不用动；
 //   - 空 → 有（首次启用）、或 socks_udp 空↔有 → 引擎只在启动时读这两个字段，
 //     必须重启一次。
-func (m *Manager) syncRegistrationAfterApply() (hot bool, err error) {
+func (m *Manager) syncRegistrationAfterApply(prevPool int) (hot bool, err error) {
 	info := m.NodeFarmInfo()
 	prevList, _ := m.ConfigGet("engine_warp_registration_proxies")
 	prevSocks, _ := m.ConfigGet("engine_warp_socks_udp")
@@ -581,7 +581,8 @@ func (m *Manager) syncRegistrationAfterApply() (hot bool, err error) {
 		log.Printf("node pool: WARP handshake relay %s", socks)
 	}
 	newList, _ := m.ConfigGet("engine_warp_registration_proxies")
-	if prevList == newList && prevSocks == socks {
+	poolChanged := prevPool != m.loadConfig().EngineWarpPoolSize
+	if prevList == newList && prevSocks == socks && !poolChanged {
 		log.Printf("node pool: engine registration unchanged (%d slots); no engine restart", len(info.Ports))
 		return true, nil
 	}
@@ -643,14 +644,53 @@ func (m *Manager) ApplyNodePool(selected []string) (hot bool, err error) {
 			return false, err
 		}
 	}
-	// UDP 中继体检：TCP 注册成功不代表 WireGuard 握手能出去。
-	if relay := effectiveSocksUDP(m.loadConfig(), m.nodePoolOn(m.loadConfig())); relay != "" {
-		if err := probeSocks5UDP(relay, 5*time.Second); err != nil {
+	prevPool := m.loadConfig().EngineWarpPoolSize
+	// 目标池自适应：target 超过「实际不同注册源」只会制造重复 /64。
+	m.clampPoolToReachable()
+	// UDP 中继体检 + 候选排序：TCP 注册成功不代表握手能出去。
+	if cands := m.relayCandidates(); len(cands) > 0 {
+		manual := splitRelayCandidates(m.loadConfig().EngineWarpSocksUDPManual)
+		if ok := pickWorkingRelay(cands, 5*time.Second); ok == "" {
 			m.appendNodePoolWarning(fmt.Sprintf(
-				"UDP 中继不可用（%s）：%v；引擎注册会成功但握手发不出去，请改填可用的手动中继", relay, err))
+				"所有 UDP 中继候选都不可用（%d 个）：引擎注册会成功但握手发不出去；请检查本地代理的 UDP 能力",
+				len(cands)))
+		} else if len(manual) > 0 && manual[0] != ok {
+			reordered := []string{ok}
+			for _, c := range manual {
+				if c != ok {
+					reordered = append(reordered, c)
+				}
+			}
+			_ = m.ConfigSet("engine_warp_socks_udp_manual", strings.Join(reordered, "\n"))
+			m.appendNodePoolWarning(fmt.Sprintf("UDP 中继已切换为 %s（原 %s 不可用）", ok, manual[0]))
 		}
 	}
-	return m.syncRegistrationAfterApply()
+	return m.syncRegistrationAfterApply(prevPool)
+}
+
+// clampPoolToReachable 让出口池目标不超过实际参与轮换的不同节点数。
+// 8 个源要 32 个出口只会反复注册同一批 /64（duplicate）。只下调、不上调。
+func (m *Manager) clampPoolToReachable() {
+	cfg := m.loadConfig()
+	if cfg.EngineWarpPoolSize <= 0 || !m.nodePoolOn(cfg) {
+		return
+	}
+	nodes := dedupeNodes(m.farmNodes())
+	if len(nodes) == 0 {
+		return
+	}
+	target := len(nodes)
+	if target < 2 {
+		target = 2
+	}
+	if cfg.EngineWarpPoolSize <= target {
+		return
+	}
+	_ = m.ConfigSet("engine_warp_pool_size", strconv.Itoa(target))
+	m.appendNodePoolWarning(fmt.Sprintf(
+		"出口池 %d → %d（实际只有 %d 个不同注册源，多余的只会是重复 /64）",
+		cfg.EngineWarpPoolSize, target, len(nodes)))
+	log.Printf("node pool: pool size clamped %d -> %d (%d distinct sources)", cfg.EngineWarpPoolSize, target, len(nodes))
 }
 
 // appendNodePoolWarning 在现有告警后追加一条（不覆盖可达性预检的结果）。

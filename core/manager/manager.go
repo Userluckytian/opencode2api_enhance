@@ -45,6 +45,10 @@ type Manager struct {
 	probeMu    sync.RWMutex
 	probeHints map[string]probeHint
 
+	// warpHistoryMu 保护 warpHistory：巡检采样的出口数曲线（最多 60 点）。
+	warpHistoryMu sync.Mutex
+	warpHistory   []WarpSample
+
 	// warpFallbackMu 保护 warpFallback：WARP 池空时的自动降级判定状态。
 	// 见 freetier_warp_fallback.go 顶部的成因说明。
 	warpFallbackMu sync.Mutex
@@ -71,6 +75,31 @@ type retryAfterHint struct {
 }
 
 // NoteRetryAfter 记录某模型的 429 重置提示（seconds <= 0 视为未知，忽略）。
+// WarpSample 一次出口池采样（每轮巡检记录一个点）。
+type WarpSample struct {
+	At      string `json:"at"`
+	Size    int    `json:"size"`
+	Active  int    `json:"active"`
+	Cooling int    `json:"cooling"`
+}
+
+// appendWarpSample 记录一个采样点（环形，最多 60 个）。
+func (m *Manager) appendWarpSample(s WarpSample) {
+	m.warpHistoryMu.Lock()
+	m.warpHistory = append(m.warpHistory, s)
+	if len(m.warpHistory) > 60 {
+		m.warpHistory = m.warpHistory[len(m.warpHistory)-60:]
+	}
+	m.warpHistoryMu.Unlock()
+}
+
+// WarpHistory 返回历史采样副本。
+func (m *Manager) WarpHistory() []WarpSample {
+	m.warpHistoryMu.Lock()
+	defer m.warpHistoryMu.Unlock()
+	return append([]WarpSample(nil), m.warpHistory...)
+}
+
 // probeHint 一次手动探测的结果。
 type probeHint struct {
 	OK     bool

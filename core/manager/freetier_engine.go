@@ -64,6 +64,8 @@ type FreeTierEngineStatus struct {
 	RestartStartedAt string `json:"restart_started_at,omitempty"`
 	// WarpSocksUDP 实际下发的 UDP 中继（空 = 直连），用于面板展示来源。
 	WarpSocksUDP string `json:"warp_socks_udp,omitempty"`
+	// WarpHistory 出口池历史采样（巡检每轮一个点，最多 60 个）。
+	WarpHistory []WarpSample `json:"warp_history,omitempty"`
 	// WarpRegistrars 每个注册代理的累计成败（引擎 registrar-stats 补丁暴露）。
 	// index 与 warp.registration_proxies 顺序一致，也就是节点池槽位顺序。
 	WarpRegistrars []WarpRegistrar `json:"warp_registrars,omitempty"`
@@ -601,6 +603,7 @@ func (m *Manager) FreeTierEngineStatus() FreeTierEngineStatus {
 		Error:        lastErr,
 		WarpCooling:  warpCooling,
 		WarpSocksUDP: effectiveSocksUDP(cfg, m.nodePoolOn(cfg)),
+		WarpHistory:  m.WarpHistory(),
 		Restarting:   restarting,
 		WarpFallback: m.WarpFallbackStatusOf(),
 	}

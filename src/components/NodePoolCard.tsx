@@ -236,6 +236,16 @@ export default function NodePoolCard({
     return { label: `成功 ${successes}`, cls: 'bg-emerald-50 text-emerald-700', title: '' }
   }
 
+  // 注册成功率：所有槽位 attempts/successes 汇总。
+  const regStats = (engineStatus?.warp_registrars ?? []).reduce(
+    (acc, r) => {
+      acc.att += r.attempts
+      acc.ok += r.successes
+      return acc
+    },
+    { att: 0, ok: 0 },
+  )
+
   const toggle = (fp: string) => {
     setSel((prev) => (prev.includes(fp) ? prev.filter((x) => x !== fp) : [...prev, fp]))
   }
@@ -394,6 +404,9 @@ export default function NodePoolCard({
               端口基址 {st.port_base} · 固定槽位 {st.slots || st.ports.length || '—'}
               {st.health_checked_at
                 ? ` · 巡检 ${st.health_checked_at}${st.health_dead ? `（不可达 ${st.health_dead}）` : ''}`
+                : ''}
+              {regStats.att > 0
+                ? ` · 注册成功率 ${Math.round((regStats.ok / regStats.att) * 100)}%（${regStats.ok}/${regStats.att}）`
                 : ''}
             </span>
           </div>
