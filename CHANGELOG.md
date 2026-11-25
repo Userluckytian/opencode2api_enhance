@@ -20,7 +20,7 @@
 
 - 壳 `src-tauri/src/embed.rs` 用 `include_bytes!` 内嵌子程序，启动时 `ensure_binaries()` 会覆盖手工替换的 `bin/*.exe`（含 mihomo）；本地构建必须重新打包壳或直接运行管理端（见 issue-log 2026-11-24 #4）。
 - 节点池依赖构建期存在 `bin/mihomo[.exe]`：缺失时壳不内嵌，安装版点节点池会提示「未找到 mihomo」（其余功能不受影响）。
-- 本轮 CI 改动（Intel Mac 矩阵、mihomo 下载）**尚未跑过 CI**，首次需用含大写 `CI` 的提交验证，不要直接打 tag。
+- **v2.0.11 的构建已验证**：发布前用 main 预演（四平台矩阵全绿），随后 tag 发布同样全绿；Intel Mac dmg 与 `aarch64`/`x64` 两份 updater 包均已产出。
 - `core/manager` 仍有 4 条 `TestEngineMetric*` 失败：测试数据硬编码 `2026-11-05`，已滑出 `now±48h` 读取窗口（2026-11-10 已登记，非本轮引入）。
 
 ## v2.0.10（2026-11-23）
