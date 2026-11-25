@@ -16,6 +16,10 @@ import (
 	"github.com/6Kmfi6HP/opencode2api/core/protocol"
 )
 
+// emptyFunctionCallOutput 空工具结果的占位文本：部分 Responses 上游
+// （如 tokenrouter）拒绝空 output，会用 400 拒绝整个请求。
+const emptyFunctionCallOutput = "(empty)"
+
 // responsesProto 复用 openai 协议的模型目录拉取（Responses 与 Chat 共用 /models）与认证头。
 type responsesProto struct {
 	openaiProto
@@ -86,17 +90,28 @@ func openAIToResponsesRequest(raw []byte) ([]byte, error) {
 					if callID == "" {
 						callID = "call_" + name
 					}
+					// 部分 Responses 上游（如 tokenrouter）要求历史 function_call 项必须带
+					// 独立的 id；缺失时会以 json_parse_error/400 拒绝整个请求。
+					itemID := callID
+					if !strings.HasPrefix(itemID, "fc_") {
+						itemID = "fc_" + itemID
+					}
 					input = append(input, map[string]any{
-						"type": "function_call", "call_id": callID,
+						"type": "function_call", "id": itemID, "call_id": callID,
 						"name": name, "arguments": args,
 					})
 				}
 			}
 		case "tool":
 			callID, _ := m["tool_call_id"].(string)
+			output := contentToText(m["content"])
+			if output == "" {
+				// 用占位符保留 tool_call 配对关系，避免上游拒绝空 output。
+				output = emptyFunctionCallOutput
+			}
 			input = append(input, map[string]any{
 				"type": "function_call_output", "call_id": callID,
-				"output": contentToText(m["content"]),
+				"output": output,
 			})
 		}
 	}
