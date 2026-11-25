@@ -84,8 +84,6 @@ func runDiag(ctx context.Context, m *manager.Manager) DiagReport {
 	view := m.ConfigViewOf()
 	rep.Checks = append(rep.Checks, probeHealth(ctx, view.ProviderPortEffective))
 
-
-
 	// 4) 配置文件
 	rep.Checks = append(rep.Checks, checkConfigFile(configPath))
 
@@ -278,14 +276,29 @@ func modelProbeHandler(m *manager.Manager) http.HandlerFunc {
 		}
 
 		base := fmt.Sprintf("http://127.0.0.1:%d", st.Port)
+		results := make([]ModelProbeResult, len(targets))
+		// 先打一发再决定要不要批量：如果这次失败是「引擎层面不可用」
+		// （熔断 / 全部出口被封 / 池子空），其余模型必然是同一个 503 ——
+		// 让用户看 20 行一样的 503 没有任何信息量，直接早停 + 人话原因。
+		first := probeOneModel(r.Context(), base, st.APIKey, targets[0])
+		results[0] = first
+		if first.RetryAfterSeconds > 0 {
+			m.NoteRetryAfter(first.Model, first.RetryAfterSeconds)
+		}
+		if note, laneDown := probeLaneDownNote(first, st.WarpCooling); laneDown {
+			writeJSONResp(w, map[string]any{"results": results[:1], "note": note})
+			return
+		}
 		// 并发探测：每个模型是一次真实 chat 请求，单模型可能耗时数秒；串行
 		// 跑 20 个会把「全量探测」变成等两三分钟。这里限并发 6，既不压垮
 		// 引擎（免费层对并发敏感）又把总耗时压到最长的那一个。
-		results := make([]ModelProbeResult, len(targets))
 		const probeConcurrency = 6
 		sem := make(chan struct{}, probeConcurrency)
 		var wg sync.WaitGroup
 		for i, id := range targets {
+			if i == 0 {
+				continue // 第一发已经单独跑过
+			}
 			wg.Add(1)
 			sem <- struct{}{}
 			go func(idx int, modelID string) {
@@ -303,6 +316,35 @@ func modelProbeHandler(m *manager.Manager) http.HandlerFunc {
 		wg.Wait()
 		writeJSONResp(w, map[string]any{"results": results})
 	}
+}
+
+// probeLaneDownNote 判断一次探测是否属于「引擎层面不可用」的 503。
+//
+// 这类失败的共同点是：引擎根本没走到上游（或者所有出口都被上游按 IP 封了），
+// 换成哪个模型结果都一样。返回 true 时调用方应停止批量探测，并把 note 原样
+// 交给面板 —— 面板上写「全部 503」对排障毫无帮助，写清楚是哪一种才有人能动手。
+func probeLaneDownNote(res ModelProbeResult, cooling int) (string, bool) {
+	if res.Status != http.StatusServiceUnavailable {
+		return "", false
+	}
+	p := res.Preview
+	switch {
+	case strings.Contains(p, "free_tier_lane_paused"):
+		return fmt.Sprintf(
+			"匿名通道被引擎熔断（free_tier_lane_paused）：熔断期间所有请求立即 503，"+
+				"且出口恢复也不会自动解开。重启引擎可清除；冷却中的出口 %d 个。", cooling), true
+	case strings.Contains(p, "free_tier_ip_blocked"):
+		return fmt.Sprintf(
+			"所有出口都被免费层按 IP 封禁（free_tier_ip_blocked）：冷却中 %d 个。"+
+				"等冷却到期，或更换出口代理/注册源后重启引擎重新注册。", cooling), true
+	case strings.Contains(p, "WARP egress is unavailable") || strings.Contains(p, "no ready egress"):
+		return fmt.Sprintf(
+			"WARP 池当前没有可用出口（注册中或全部冷却，冷却 %d 个）。"+
+				"等注册完成/冷却结束再试；持续为空就换注册源。", cooling), true
+	case strings.Contains(p, "free_tier_blocked"):
+		return "免费层已阻断当前出口（free_tier_blocked）：换出口代理或等冷却。", true
+	}
+	return "", false
 }
 
 // probeOneModel 对单个模型发一次最小请求。

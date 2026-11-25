@@ -52,8 +52,16 @@ type FreeTierEngineStatus struct {
 	ModelShown  int    `json:"model_shown"`
 	WarpStatus  string `json:"warp_status,omitempty"`
 	WarpStack   string `json:"warp_stack,omitempty"`
+	WarpSize    int    `json:"warp_size"`
+	WarpPreload int    `json:"warp_preload"`
+	WarpStandby int    `json:"warp_standby"`
 	WarpActive  int    `json:"warp_active"`
 	WarpCooling int    `json:"warp_cooling"`
+	// Restarting 管理器正在重启引擎（stop→start→等待健康）。它不是进程状态，
+	// 而是「这次重启还没收尾」的标记：面板据此禁用重启按钮，避免用户连点，
+	// 也让节点池「应用」触发的重启和工具栏按钮共用同一个状态源。
+	Restarting       bool   `json:"restarting"`
+	RestartStartedAt string `json:"restart_started_at,omitempty"`
 	// WarpFallback WARP 池空时的自动降级状态（见 freetier_warp_fallback.go）。
 	WarpFallback WarpFallbackStatus `json:"warp_fallback"`
 	// BinPath / BinExists 引擎二进制位置与是否已安装。
@@ -70,6 +78,9 @@ type freeTierEngine struct {
 	state       string
 	lastErr     string
 	warpCooling int
+	// restarting / restartAt 标记「重启流程进行中」，供状态接口对外暴露。
+	restarting bool
+	restartAt  time.Time
 }
 
 // FreeTierEngine 返回引擎托管句柄。
@@ -159,11 +170,17 @@ type engineModels struct {
 	FreeOnly  bool              `json:"free_only"`
 	// AnonymousBackoff 匿名通道熔断参数。
 	//
-	// 为什么必须写：引擎在 models.anonymous_backoff 缺省时把熔断阈值置 0，
-	// 即「熔断关闭」（gateway.go:148 → anonymousBackoffFromConfig(nil)）。
-	// 于是 WARP 通道不可用时，每条请求都要先陪跑一次失败的匿名尝试才落到
-	// key —— 白白多花一次往返。有了熔断：连续失败达阈值就暂停匿名通道，
-	// key 直接接管。
+	// 2.0.14 起刻意留空（不写这个字段）：引擎在缺省时把阈值置 0 =
+	// 「熔断关闭」（gateway.go:148 → anonymousBackoffFromConfig(nil)）。
+	//
+	// 早先写 6/1/24 的理由是「WARP 不可用时别让匿名尝试拖累 key 请求」，
+	// 但 v2.0.9 起免费层不再有 key（见下方 zen_keys 注释），匿名是唯一通道：
+	// 熔断 = 把唯一通道按时间锁死 1h→24h，且出口恢复了也不解锁
+	// （AllowAttempt 只看到期时间，不看池子健康）。2026-11-25 13:10 的事故
+	// 就是熔断后 40 分钟全部 503，而 /healthz 仍报 warp ready。
+	// 关掉后失败变成快速且真实的上游/池状态（free_tier_ip_blocked /
+	// no ready egress），出口一旦恢复立即可用；出口级冷却账本
+	// （warp-state.json）仍然阻止对已烧穿的 /64 反复重试。
 	AnonymousBackoff *engineAnonymousBackoff `json:"anonymous_backoff,omitempty"`
 }
 
@@ -174,31 +191,15 @@ type engineAnonymousBackoff struct {
 	MaxHours  int `json:"max_hours,omitempty"`
 }
 
-// 匿名通道熔断的默认参数。
-//
-// 为什么固定成常量而不开放成配置项（YAGNI）：先把「熔断存在」这件事做对，
-// 参数调优等真实反馈。
-//
-// 取值对齐引擎自己的默认（internal/config/config.go:179-202 Normalize：
-// 6 / 1 / 24），**不要**为了「跳得快」把 max_hours 压短：
-//
-//   - 引擎的出口黑名单是固定 24h（internal/warp/pool.go:29
-//     `egressCooldown = 24 * time.Hour`，封禁不升级）。
-//     ⚠️ 该前提基于 11-11 之前的 wbi35772 分叉引擎；自 v2.0.5 起 CI 构建源
-//     换为 stock v1.4.7（其 egressCooldown 恒为 30min），常量与注释待 R1
-//     升级评估后重估（见 OPEN.md / 11-11 调研），本阶段未改。
-//   - 熔断窗口若比出口冷却期短（比如 6h < 24h），熔断一过出口还没解冻，
-//     引擎会再次陪跑匿名尝试、再把整池出口烧掉 —— 恰好是本熔断想避免的
-//     那个循环。
-//
-// 所以 max_hours 必须 >= 出口冷却周期（24h）。
+// 匿名通道熔断：**已停用**（见 engineModels.AnonymousBackoff 的说明）。
+// 保留这三个值只用于契约文档与旧配置读取，不再下发。
 const (
-	// anonymousBackoffThreshold 连续失败多少次后熔断匿名通道。
-	anonymousBackoffThreshold = 6
-	// anonymousBackoffBaseHours 首次熔断暂停多久（小时），之后指数翻倍。
-	anonymousBackoffBaseHours = 1
-	// anonymousBackoffMaxHours 熔断暂停上限（小时），对齐出口 24h 冷却周期。
-	anonymousBackoffMaxHours = 24
+	// anonymousBackoffThreshold 旧默认阈值；0 = 关闭（现行行为）。
+	anonymousBackoffThreshold = 0
+	// anonymousBackoffBaseHours 旧默认首次暂停小时数（不再下发）。
+	anonymousBackoffBaseHours = 0
+	// anonymousBackoffMaxHours 旧默认暂停上限（不再下发）。
+	anonymousBackoffMaxHours = 0
 )
 
 type enginePerformance struct {
@@ -336,12 +337,10 @@ func (m *Manager) buildEngineConfigBytes() ([]byte, error) {
 			// 「免费」判定（pricing.go:256 Decide）：模型 ID 含 "free"，
 			// 或元数据显示 input/output 成本均为 0 且未废弃。
 			FreeOnly: engineFreeOnly(cfg),
-			// 匿名通道熔断：WARP 不可用时快速跳过匿名尝试，把请求直接交给 key。
-			AnonymousBackoff: &engineAnonymousBackoff{
-				Threshold: anonymousBackoffThreshold,
-				BaseHours: anonymousBackoffBaseHours,
-				MaxHours:  anonymousBackoffMaxHours,
-			},
+			// 匿名通道熔断：不再下发（nil = 引擎关闭熔断）。
+			// 免费层没有 key，匿名是唯一通道，熔断只会把整条链路按时间锁死；
+			// 详见 engineModels.AnonymousBackoff 的说明。
+			AnonymousBackoff: nil,
 		},
 		Performance: enginePerformance{
 			MaxIdleConns:          2048,
@@ -518,7 +517,21 @@ func (m *Manager) StopFreeTierEngine(runner Runner) error {
 }
 
 // Restart 重启引擎。
+//
+// restarting 标记覆盖整个 stop→start→等待健康 的过程：节点池「应用」、看门狗、
+// 工具栏按钮都会走到这里，面板只需要看这一个字段就知道「现在别点重启」。
 func (m *Manager) RestartFreeTierEngine(runner Runner) error {
+	e := m.FreeTierEngine()
+	e.mu.Lock()
+	e.restarting = true
+	e.restartAt = time.Now()
+	e.mu.Unlock()
+	defer func() {
+		e.mu.Lock()
+		e.restarting = false
+		e.restartAt = time.Time{}
+		e.mu.Unlock()
+	}()
 	_ = m.StopFreeTierEngine(runner)
 	return m.StartFreeTierEngine(runner)
 }
@@ -556,6 +569,7 @@ func (m *Manager) FreeTierEngineStatus() FreeTierEngineStatus {
 	e := m.FreeTierEngine()
 	e.mu.Lock()
 	pid, state, lastErr := e.pid, e.state, e.lastErr
+	restarting, restartAt, warpCooling := e.restarting, e.restartAt, e.warpCooling
 	e.mu.Unlock()
 
 	cfg := m.loadConfig()
@@ -568,8 +582,12 @@ func (m *Manager) FreeTierEngineStatus() FreeTierEngineStatus {
 		APIKey:       effectiveGatewayKey(cfg),
 		BinPath:      m.EngineBinPath(),
 		Error:        lastErr,
-		WarpCooling:  e.warpCooling,
+		WarpCooling:  warpCooling,
+		Restarting:   restarting,
 		WarpFallback: m.WarpFallbackStatusOf(),
+	}
+	if restarting && !restartAt.IsZero() {
+		st.RestartStartedAt = restartAt.Format(time.RFC3339)
 	}
 	if _, err := os.Stat(st.BinPath); err == nil {
 		st.BinExists = true
@@ -598,6 +616,9 @@ func (m *Manager) FreeTierEngineStatus() FreeTierEngineStatus {
 		Warp *struct {
 			Status  string `json:"status"`
 			Stack   string `json:"stack"`
+			Size    int    `json:"size"`
+			Preload int    `json:"preload"`
+			Standby int    `json:"standby"`
 			Active  int    `json:"active"`
 			Cooling int    `json:"cooling"`
 		} `json:"warp"`
@@ -609,6 +630,9 @@ func (m *Manager) FreeTierEngineStatus() FreeTierEngineStatus {
 		if hz.Warp != nil {
 			st.WarpStatus = hz.Warp.Status
 			st.WarpStack = hz.Warp.Stack
+			st.WarpSize = hz.Warp.Size
+			st.WarpPreload = hz.Warp.Preload
+			st.WarpStandby = hz.Warp.Standby
 			st.WarpActive = hz.Warp.Active
 			st.WarpCooling = hz.Warp.Cooling
 			e.mu.Lock()

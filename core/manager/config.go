@@ -663,10 +663,10 @@ type ConfigView struct {
 	EngineFreeOnly bool `json:"engine_free_only"`
 	// EngineChannelOrder 生效的通道顺序（warp_first / key_first，默认 warp_first）。
 	EngineChannelOrder string `json:"engine_channel_order"`
-	// EngineAnonymousBackoffThreshold 匿名通道熔断阈值（连续失败多少次后熔断）。
+	// EngineAnonymousBackoffThreshold 匿名通道熔断阈值；0 = 关闭（默认）。
 	//
-	// 下发给前端是为了让面板文案与真实参数同源 —— 否则后端改了阈值、
-	// 前端还写着「连续失败达 6 次」，面板就会开始说谎。
+	// 下发给前端是为了让面板文案与真实参数同源 —— 否则后端改成关闭、
+	// 前端还写着「连续失败达 6 次熔断」，面板就会开始说谎。
 	EngineAnonymousBackoffThreshold int `json:"engine_anonymous_backoff_threshold"`
 	// EngineWarpAutoFallback WARP 池空时自动降级为直连（默认 true）。
 	EngineWarpAutoFallback bool `json:"engine_warp_auto_fallback"`
