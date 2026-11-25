@@ -61,9 +61,15 @@ All rights reserved（明确未授予复制/修改/分发/使用），且配置�
 
 4) 构建命令（CI 与本仓库脚本 scripts/fetch-free-tier-engine.ps1 一致）
    tar -xzf third_party/opencode2api-win/src/opencode2api-win-1a208ac.tar.gz -C engine-src
-   ( cd engine-src && git apply ../third_party/opencode2api-win/patches/registration-proxies.patch )
+   git apply -p1 --directory=engine-src \
+       third_party/opencode2api-win/patches/registration-proxies.patch
    ( cd engine-src && CGO_ENABLED=0 GOOS=<os> GOARCH=<arch> \
        go build -trimpath -ldflags "-s -w" -o ../opencode2api-win ./cmd/opencode2api )
+
+   注意：解包目录若在 git 工作树内，**不要** cd 进去再 `git apply`。git 会把补丁
+   路径解释为「仓库根相对」，目标落在当前目录之外时它会静默跳过并返回 0
+   （Skipped patch ...），结果编出未打补丁的二进制。必须按上面的
+   `--directory=engine-src`（仓库根执行），或把 engine-src 放到工作树之外。
 
    Windows 本地产物：bin/opencode2api-win.exe
    Linux/macOS     ：bin/opencode2api-win

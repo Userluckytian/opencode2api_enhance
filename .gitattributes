@@ -5,3 +5,8 @@
 *.sh text eol=lf
 scripts/*.service text eol=lf
 scripts/*.env text eol=lf
+# 补丁也必须 LF：CRLF 会让 git apply 在 Windows 检出后打不上（构建脚本用它套
+# registration-proxies 补丁）。源码快照是二进制，禁止任何行尾转换。
+*.patch text eol=lf
+*.tar.gz binary
+*.tgz binary

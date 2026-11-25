@@ -113,21 +113,34 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          # 全程相对路径：Windows runner 上的 tar 会把 "D:/..." 当远程主机
+          # （tar: Cannot connect to D: resolve failed, exit 2），盘符路径不能喂给它。
           rm -rf engine-src
-          mkdir -p engine-src
-          src_tgz="$GITHUB_WORKSPACE/third_party/opencode2api-win/src/opencode2api-win-1a208ac.tar.gz"
+          mkdir -p engine-src bin
+          src_tgz="third_party/opencode2api-win/src/opencode2api-win-1a208ac.tar.gz"
           [ -f "$src_tgz" ] || { echo "::error::missing vendored engine source: $src_tgz"; exit 1; }
           tar -xzf "$src_tgz" -C engine-src
           # 本地补丁：warp.registration_proxies（注册轮换）。上游 1a208ac 没有这个字段，
           # 不补的话节点池只能写 socks_udp、拿不到多个 /64。
-          patch_file="$GITHUB_WORKSPACE/third_party/opencode2api-win/patches/registration-proxies.patch"
-          ( cd engine-src && git apply --check "$patch_file" && git apply "$patch_file" )
-          mkdir -p bin
+          # 必须在仓库根用 --directory 打补丁：在 git 工作树内 cd 进 engine-src 再
+          # git apply，git 会把补丁路径解释为「仓库根相对」，目标落在当前目录之外时
+          # 静默跳过并返回 0（Skipped patch ...），最终编出未打补丁的二进制。
+          patch_file="third_party/opencode2api-win/patches/registration-proxies.patch"
+          git apply -p1 --directory=engine-src --check "$patch_file"
+          git apply -p1 --directory=engine-src "$patch_file"
+          # 源码级断言：补丁没落到文件上就立刻失败，别等到 grep 二进制才发现。
+          grep -q "RegistrationProxies" engine-src/internal/config/config.go || {
+            echo "::error::registration-proxies patch did not modify engine-src/internal/config/config.go"
+            exit 1
+          }
+          echo "toolchain: $(go version)"
           ( cd engine-src && CGO_ENABLED=0 GOOS=${{ matrix.goos }} GOARCH=${{ matrix.goarch }} \
               go build -trimpath -ldflags "-s -w" -o ../bin/${{ matrix.engine_bin }} ./cmd/opencode2api )
           # 能力自检：产物里必须有 registration_proxies（Go 会把 struct tag 编进二进制），
           # 防止补丁静默失效后管理器又写出引擎不认的字段。
-          if ! grep -a -q "registration_proxies" "bin/${{ matrix.engine_bin }}"; then
+          hits="$(grep -a -c registration_proxies "bin/${{ matrix.engine_bin }}" || true)"
+          echo "registration_proxies hits in binary: ${hits:-0}"
+          if [ "${hits:-0}" -lt 1 ]; then
             echo "::error::engine binary lacks registration_proxies; patch did not apply"
             exit 1
           fi
@@ -187,7 +200,7 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p third_party/opencode2api-win
-          patch_file="$GITHUB_WORKSPACE/third_party/opencode2api-win/patches/registration-proxies.patch"
+          patch_file="third_party/opencode2api-win/patches/registration-proxies.patch"
           if command -v sha256sum >/dev/null 2>&1; then
             patch_sum="$(sha256sum "$patch_file" | cut -d' ' -f1)"
           else

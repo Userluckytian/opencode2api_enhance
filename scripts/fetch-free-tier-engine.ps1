@@ -116,6 +116,12 @@ if (Test-Path $patchFile) {
         }
     }
     Pop-Location
+    # 补丁是否真的落到源码上：git apply 在 git 工作树内、目标路径又落在当前目录
+    # 之外时会**静默跳过并返回 0**（Skipped patch ...）。退出码不可信，按内容验。
+    $cfgFile = Join-Path $src "internal\config\config.go"
+    if (-not (Select-String -Path $cfgFile -Pattern "RegistrationProxies" -Quiet)) {
+        throw "补丁未生效：$cfgFile 里没有 RegistrationProxies（引擎将不认 registration_proxies）"
+    }
 } else {
     Write-Host "[1b/3] 未找到补丁文件，按上游源码构建（节点池将只能写 socks_udp）"
 }
