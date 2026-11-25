@@ -85,7 +85,10 @@ export default function NodePoolCard({
   const [intervalMin, setIntervalMin] = useState('0')
   const [fileName, setFileName] = useState('')
 
-  const load = useCallback(async () => {
+  // replaceSelection=true 时才用服务端已选覆盖本地勾选。
+  // 轮询不能动本地选择：4s 一次的 setSel(服务端值) 会把用户刚点的
+  // 「全选 / 只勾选 UDP」瞬间弹回去（2.0.14 引入轮询时的回归）。
+  const load = useCallback(async (replaceSelection = false) => {
     const r = await fetch('/api/admin/node-pool/status', { credentials: 'include' })
     if (r.ok) {
       const s = (await r.json()) as PoolStatus
@@ -98,12 +101,12 @@ export default function NodePoolCard({
         selected: s.selected ?? [],
       }
       setSt(norm)
-      setSel(norm.selected)
+      if (replaceSelection) setSel(norm.selected)
     }
   }, [])
 
   useEffect(() => {
-    void load().catch(() => undefined)
+    void load(true).catch(() => undefined)
     // 农场/引擎会在后台自发变化（重启、自动刷新订阅），卡片不能只靠手点刷新。
     const t = window.setInterval(() => void load().catch(() => undefined), 4000)
     return () => window.clearInterval(t)
@@ -124,7 +127,7 @@ export default function NodePoolCard({
         content: tab === 'url' ? '' : content,
       })
       toast(`导入成功：${res.node_count} 个节点${res.bad ? `，${res.bad} 个解析失败` : ''}`, true)
-      await load()
+      await load(true)
     } catch (e) {
       toast((e as Error).message, false)
     } finally {
@@ -144,7 +147,7 @@ export default function NodePoolCard({
           : '已应用：首次启用/中继变化，引擎正在重启（WARP 重新注册出口，最长 90s）',
         true,
       )
-      await load()
+      await load(true)
     } catch (e) {
       toast((e as Error).message, false)
     } finally {
@@ -157,7 +160,7 @@ export default function NodePoolCard({
     try {
       await post('/api/admin/node-pool/stop', {})
       toast('已停用节点池，注册回退到出口代理', true)
-      await load()
+      await load(true)
     } catch (e) {
       toast((e as Error).message, false)
     } finally {
@@ -178,7 +181,7 @@ export default function NodePoolCard({
         all,
       })
       toast(all ? `已清空节点（原 ${r.removed} 个）` : `已移除 ${r.removed} 个节点，剩余 ${r.remain} 个`, true)
-      await load()
+      await load(true)
     } catch (e) {
       toast((e as Error).message, false)
     } finally {
@@ -267,7 +270,8 @@ export default function NodePoolCard({
         <div className="text-[11px] text-zinc-500 text-right whitespace-nowrap">
           {st ? (
             <>
-              节点 {st.node_count} · 已选 {st.selected_count}
+              节点 {st.node_count} · 已选 {sel.length}
+              {sel.join(',') !== (st.selected ?? []).join(',') ? '（未应用）' : ''}
               <br />
               {st.updated_at ? `更新于 ${st.updated_at}` : '尚未导入'}
             </>
