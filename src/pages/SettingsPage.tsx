@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import clsx from 'clsx'
-import { Globe, Loader2, RefreshCw, Search, Settings, Trash2, Waves } from 'lucide-react'
+import { Globe, Loader2, RefreshCw, Search, Settings, Trash2 } from 'lucide-react'
 import { api, type OrphanProcess } from '../lib/api'
 import type { ConfigView, BinariesInfo } from '../lib/api'
 import type { UpdateInfo } from '../lib/updates'
@@ -34,12 +34,6 @@ export default function SettingsPage({
   const [proxyDraft, setProxyDraft] = useState('')
   const [proxyDirty, setProxyDirty] = useState(false)
   const [savingProxy, setSavingProxy] = useState(false)
-  // OpenCode 免费层出口池（v2.0.9 起从 OpenCode 页移到这里：本页是唯一的旋钮入口）
-  const [warpPoolDraft, setWarpPoolDraft] = useState('4')
-  const [warpSrcDraft, setWarpSrcDraft] = useState('')
-  const [warpDirty, setWarpDirty] = useState(false)
-  const [savingWarp, setSavingWarp] = useState(false)
-  const [resettingCooldown, setResettingCooldown] = useState(false)
 
   // 阶段 L E4：日志保留上限 / 界面轮询间隔（消除日志页文案矛盾）
   const [logMaxDraft, setLogMaxDraft] = useState('')
@@ -70,8 +64,6 @@ export default function SettingsPage({
         ])
         setConfig(cfg)
         setProxyDraft((cfg.engine_proxies ?? []).join('\n'))
-        setWarpPoolDraft(String(cfg.engine_warp_pool_size || 4))
-        setWarpSrcDraft(cfg.engine_warp_source_ipv6 ?? '')
         setLogMaxDraft(String(cfg.call_log_max ?? 0))
         setPollDraft(String(cfg.ui_poll_interval_sec ?? 5))
         setAutostart(as)
@@ -113,36 +105,7 @@ export default function SettingsPage({
   }
 
 
-  // 免费层出口池：v2.0.9 起没有 key，出口池是唯一能调「额度再生」的旋钮。
-  const saveWarp = async () => {
-    setSavingWarp(true)
-    try {
-      const pool = Math.max(1, Math.min(32, parseInt(warpPoolDraft, 10) || 4))
-      await api.configSet('engine_warp_pool_size', String(pool))
-      await api.configSet('engine_warp_source_ipv6', warpSrcDraft.trim())
-      setWarpDirty(false)
-      const cfg = await api.configGet()
-      setConfig(cfg)
-      setWarpPoolDraft(String(cfg.engine_warp_pool_size || pool))
-      toast('出口池已保存（重启引擎后重新注册出口）')
-    } catch (e) {
-      toast('保存失败：' + (e as Error).message, false)
-    } finally {
-      setSavingWarp(false)
-    }
-  }
-
-  const resetCooldown = async () => {
-    setResettingCooldown(true)
-    try {
-      const r = await api.freeTierResetWarpCooldown()
-      toast(`已清除 ${r.cleared} 个冷却出口，请重启引擎让它重新注册出口`)
-    } catch (e) {
-      toast((e as Error).message, false)
-    } finally {
-      setResettingCooldown(false)
-    }
-  }
+  // 免费层出口池已迁到 OpenCode 页（WarpPoolCard），设置页只保留出口代理。
 
   const saveRuntime = async () => {
     setSavingRuntime(true)
@@ -209,7 +172,7 @@ export default function SettingsPage({
   }
 
   return (
-    <div className="p-6 space-y-4 max-w-4xl">
+    <div className="p-6 space-y-4">
       <div className="flex items-center gap-2">
         <Settings size={18} className="text-teal-700" />
         <h1 className="text-[16px] font-semibold text-zinc-900">设置</h1>
@@ -343,66 +306,6 @@ export default function SettingsPage({
           <span className="text-[11px] text-zinc-400">
             每行一个：http / https / socks5 / socks5h；direct 或留空 = 直连
           </span>
-        </div>
-      </section>
-
-      {/* OpenCode 免费层出口池（v2.0.9 起从 OpenCode 页移入：那里只留接入信息 + 可用模型） */}
-      <section className="bg-white rounded-2xl border border-zinc-200 shadow-sm p-5">
-        <div className="flex items-center gap-2">
-          <Waves size={16} className="text-teal-700" />
-          <h2 className="text-lg font-semibold text-zinc-900">免费层出口池（WARP）</h2>
-        </div>
-        <p className="mt-1 text-[12px] text-zinc-500">
-          免费层只走匿名通道、没有 key 兜底：每个出口是 Cloudflare 分配的一个独立 /64，额度按 /64 记账。
-          出口被上游限流会进 24 小时冷却账本，池子会自动补新的；连续失败 6 次会让匿名通道熔断（1h 起，逐次翻倍至 24h）。
-        </p>
-        <div className="mt-3 grid grid-cols-2 gap-3">
-          <label className="space-y-1 block">
-            <span className="text-[12px] text-zinc-600">出口池大小（1~32）</span>
-            <input
-              type="number"
-              min={1}
-              max={32}
-              value={warpPoolDraft}
-              onChange={(e) => {
-                setWarpPoolDraft(e.target.value)
-                setWarpDirty(true)
-              }}
-              className="w-full px-3 py-2 rounded-lg border border-zinc-200 text-[13px]"
-            />
-          </label>
-          <label className="space-y-1 block">
-            <span className="text-[12px] text-zinc-600">源 IPv6 前缀（/64，留空 = 不轮换）</span>
-            <input
-              type="text"
-              placeholder="2001:db8:1:2::/64"
-              value={warpSrcDraft}
-              onChange={(e) => {
-                setWarpSrcDraft(e.target.value)
-                setWarpDirty(true)
-              }}
-              className="w-full px-3 py-2 rounded-lg border border-zinc-200 text-[13px] font-mono"
-            />
-          </label>
-        </div>
-        <div className="mt-3 flex items-center gap-2">
-          <button
-            onClick={() => void saveWarp()}
-            disabled={!warpDirty || savingWarp}
-            className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-[13px] text-white bg-zinc-900 hover:bg-zinc-800 disabled:opacity-40"
-          >
-            {savingWarp ? <Loader2 size={14} className="animate-spin" /> : null}
-            保存
-          </button>
-          <button
-            onClick={() => void resetCooldown()}
-            disabled={resettingCooldown}
-            className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-[13px] text-orange-700 bg-orange-50 hover:bg-orange-100 disabled:opacity-40"
-          >
-            {resettingCooldown ? <Loader2 size={14} className="animate-spin" /> : null}
-            重置出口冷却
-          </button>
-          <span className="text-[11px] text-zinc-400">改完需重启引擎生效</span>
         </div>
       </section>
 

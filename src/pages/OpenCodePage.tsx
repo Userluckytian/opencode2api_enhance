@@ -9,11 +9,12 @@ import {
   Play,
   Power,
   RefreshCw,
-  Settings2,
   ShieldCheck,
   Zap,
 } from 'lucide-react'
 import { api, type FreeTierEngineStatus, type FreeTierModelsView, type ConfigView } from '../lib/api'
+import NodePoolCard from '../components/NodePoolCard'
+import WarpPoolCard from '../components/WarpPoolCard'
 
 /** 上下文档位：1048576 → 1M，200000 → 200K，0 → —。 */
 function fmtCtx(n?: number): string {
@@ -175,18 +176,7 @@ export default function OpenCodePage({ toast }: { toast: (msg: string, ok?: bool
     }
   }
 
-  const doWriteConfig = async () => {
-    setBusy('config')
-    try {
-      const r = await api.freeTierEngineWriteConfig()
-      toast(`配置已生成：${r.path}`)
-      await reload()
-    } catch (e) {
-      toast((e as Error).message, false)
-    } finally {
-      setBusy(null)
-    }
-  }
+  // 已放弃「重新生成配置」：引擎配置由面板改配置时自动落盘。
 
 
   // switchChannelOrder 切换通道顺序（WARP 优先 ↔ 密钥优先）。
@@ -347,7 +337,7 @@ export default function OpenCodePage({ toast }: { toast: (msg: string, ok?: bool
 
   const [stateCls, stateText] = stateBadge(status?.state ?? 'stopped', status?.running ?? false)
   return (
-    <div className="p-6 space-y-4">
+    <div className="p-6 flex flex-col gap-4">
       {/* 工具条 */}
       <div className="flex items-center justify-between">
         <div className="flex items-center gap-3">
@@ -419,24 +409,27 @@ export default function OpenCodePage({ toast }: { toast: (msg: string, ok?: bool
             )}
             {restartingAt > 0 ? '重启中' : '重启'}
           </button>
-          <button
-            onClick={() => void doWriteConfig()}
-            disabled={busy !== null || restartingAt > 0}
-            title="按当前面板设置重新生成引擎 config.json"
-            className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-[13px] text-zinc-700 bg-white border border-zinc-200 hover:bg-zinc-50 disabled:opacity-40"
-          >
-            {busy === 'config' ? <Loader2 size={14} className="animate-spin" /> : <Settings2 size={14} />}
-            重新生成配置
-          </button>
         </div>
       </div>
 
       {/* 通道状态：一眼看出当前走在哪一档（WARP 优先 / 密钥优先 / 不可用） */}
-      <ChannelStatusBar status={status} config={config} />
+      <div className="order-1">
+        <ChannelStatusBar status={status} config={config} />
+      </div>
+
+      {/* WARP 注册节点池（订阅 → 本地端口 → engine_warp_registration_proxies） */}
+      <div className="order-4">
+        <NodePoolCard toast={toast} />
+      </div>
+
+      {/* 免费层出口池（WARP）：从设置页整体迁入 */}
+      <div className="order-5">
+        <WarpPoolCard toast={toast} />
+      </div>
 
 
       {/* 引擎接入卡（沿用「统一网关」卡的信息层级） */}
-      <div className="bg-white rounded-2xl border border-zinc-200 shadow-sm p-5">
+      <div className="order-2 bg-white rounded-2xl border border-zinc-200 shadow-sm p-5">
         <div className="flex items-center gap-2 mb-4">
           <ShieldCheck size={16} className="text-teal-600" />
           <h3 className="text-[15px] font-semibold text-zinc-900">接入信息</h3>
@@ -494,7 +487,7 @@ export default function OpenCodePage({ toast }: { toast: (msg: string, ok?: bool
       </div>
 
       {/* 可用模型 */}
-      <div className="bg-white rounded-2xl border border-zinc-200 shadow-sm p-5">
+      <div className="order-3 bg-white rounded-2xl border border-zinc-200 shadow-sm p-5">
         <div className="flex flex-wrap items-center gap-2 mb-3">
           <ListChecks size={16} className="text-teal-600" />
           <h3 className="text-[15px] font-semibold text-zinc-900">可用模型</h3>
