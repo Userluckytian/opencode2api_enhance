@@ -180,7 +180,7 @@ export default function WarpPoolCard({
           {engineRestarting
             ? '重启完成后出口会自动重新注册'
             : pendingApply
-              ? `已保存 ${pool}，当前引擎是 ${target}：点顶部「重启」生效`
+              ? `配置 ${pool} · 当前引擎 ${target}：保存后点顶部「重启」生效`
               : '改完需重启引擎生效'}
         </span>
       </div>

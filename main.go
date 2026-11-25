@@ -174,6 +174,13 @@ func main() {
 		case <-time.After(15 * time.Second):
 			slog.Warn("node pool autostart timed out; starting engine with the current config")
 		}
+		// engine_enabled=false 时不要自动拉起引擎：配置注释承诺的是「管理进程
+		// 自动拉起引擎并看护」，但这里早先无条件启动 —— 用户手动停了引擎、
+		// 重启面板后它又自己起来了（看门狗有判断，启动路径漏了）。
+		if v, _ := managerInst.ConfigGet("engine_enabled"); v == "false" {
+			slog.Info("engine disabled by config; skip auto start")
+			return
+		}
 		if err := managerInst.StartFreeTierEngine(engineRunner); err != nil {
 			slog.Warn("free-tier engine unavailable", "error", err, "hint", "把 opencode2api-win 放到 bin/ 目录")
 		} else {
