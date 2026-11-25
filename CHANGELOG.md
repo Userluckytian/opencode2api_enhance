@@ -11,12 +11,16 @@
 - **免费层出口池卡片回到 OpenCode 页**：池大小、源 IPv6 前缀、重置出口冷却从设置页迁回 OpenCode 页（设置页只保留出口代理）。
 - **调用日志「清空」改为偏移隐藏**：引擎 stdout 是追加写、不能截断，改为记录已读字节偏移；日志页读取上限从 5000 提到 20 万条（超出时按摊还方式丢弃最旧记录）。
 - **开发模式改为直连 core**：`npm run tauri:dev` 的 `devUrl` 指向 core 自己的端口（44100），不再依赖 Vite dev server；壳在开窗前等待该端口就绪，避免首屏白屏。
+- **节点池内核 mihomo 随安装包内置**：固定 v1.19.33，CI/本地脚本按平台下载并校验 SHA256，壳内嵌后在首次启动释放到 `bin/`；补齐 `third_party/mihomo/` 的 LICENSE 与 SOURCE.txt，并加进 `bundle.resources`（GPL-3.0 分发义务）。新增 `scripts/fetch-mihomo.ps1`，便携打包脚本会自动调用。
+- **新增 Intel Mac 产物**：CI 矩阵补 `darwin/amd64`（`--target x86_64-apple-darwin`），macOS 的 updater 清单与滚动 release 按架构（aarch64 / x64）分别生成。
+- `scripts/fetch-free-tier-engine.ps1` 对齐现役引擎（`wbi35772/opencode2api-win@1a208ac`）；此前仍指向 v1.4.7，本地便携构建会得到与发布版不一致的引擎。
 - `config.example.json` 的 `provider_port` 示例值从 50080 改为 30080（仅示例，不影响已有配置）。
 
 ### 已知问题
 
-- 壳 `src-tauri/src/embed.rs` 用 `include_bytes!` 内嵌两个子程序，启动时 `ensure_binaries()` 会覆盖手工替换的 `bin/*.exe`；本地构建必须重新打包壳或直接运行管理端（见 issue-log 2026-11-24 #4）。
-- **节点池未随安装包发布**：`third_party/mihomo` 还缺 `LICENSE` / `SOURCE.txt`，`tauri.conf.json` 的 `resources` 也没打 mihomo；安装版打开节点池会提示「未找到 mihomo」（见 issue-log 2026-11-25）。
+- 壳 `src-tauri/src/embed.rs` 用 `include_bytes!` 内嵌子程序，启动时 `ensure_binaries()` 会覆盖手工替换的 `bin/*.exe`（含 mihomo）；本地构建必须重新打包壳或直接运行管理端（见 issue-log 2026-11-24 #4）。
+- 节点池依赖构建期存在 `bin/mihomo[.exe]`：缺失时壳不内嵌，安装版点节点池会提示「未找到 mihomo」（其余功能不受影响）。
+- 本轮 CI 改动（Intel Mac 矩阵、mihomo 下载）**尚未跑过 CI**，首次需用含大写 `CI` 的提交验证，不要直接打 tag。
 - `core/manager` 仍有 4 条 `TestEngineMetric*` 失败：测试数据硬编码 `2026-11-05`，已滑出 `now±48h` 读取窗口（2026-11-10 已登记，非本轮引入）。
 
 ## v2.0.10（2026-11-23）
