@@ -62,6 +62,8 @@ type FreeTierEngineStatus struct {
 	// 也让节点池「应用」触发的重启和工具栏按钮共用同一个状态源。
 	Restarting       bool   `json:"restarting"`
 	RestartStartedAt string `json:"restart_started_at,omitempty"`
+	// WarpSocksUDP 实际下发的 UDP 中继（空 = 直连），用于面板展示来源。
+	WarpSocksUDP string `json:"warp_socks_udp,omitempty"`
 	// WarpRegistrars 每个注册代理的累计成败（引擎 registrar-stats 补丁暴露）。
 	// index 与 warp.registration_proxies 顺序一致，也就是节点池槽位顺序。
 	WarpRegistrars []WarpRegistrar `json:"warp_registrars,omitempty"`
@@ -329,7 +331,8 @@ func (m *Manager) buildEngineConfigBytes() ([]byte, error) {
 			Stack:               engineWarpStack(cfg),
 			SourceIPv6:          cfg.EngineWarpSourceIPv6,
 			RegistrationProxies: registrationProxies,
-			SocksUDP:            cfg.EngineWarpSocksUDP,
+			// 手动中继 vs 节点池中继的优先级见 effectiveSocksUDP。
+			SocksUDP: effectiveSocksUDP(cfg, m.nodePoolOn(cfg)),
 		},
 		Proxies:   proxies,
 		ProxyFile: "",
@@ -597,6 +600,7 @@ func (m *Manager) FreeTierEngineStatus() FreeTierEngineStatus {
 		BinPath:      m.EngineBinPath(),
 		Error:        lastErr,
 		WarpCooling:  warpCooling,
+		WarpSocksUDP: effectiveSocksUDP(cfg, m.nodePoolOn(cfg)),
 		Restarting:   restarting,
 		WarpFallback: m.WarpFallbackStatusOf(),
 	}

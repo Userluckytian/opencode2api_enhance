@@ -70,10 +70,18 @@ type Config struct {
 	// 用途：本机无法直发 UDP（或 IPv6 不可达）时，把 WireGuard 握手交给
 	// SOCKS5 代理的 UDP ASSOCIATE 转发。留空则直连。
 	EngineWarpSocksUDP string `json:"engine_warp_socks_udp,omitempty"`
+	// EngineWarpSocksUDPManual 用户手动指定的 UDP 中继（面板「UDP 中继」输入框）。
+	//
+	// 与节点池写入的 EngineWarpSocksUDP 分开存：节点池停用会清空后者，
+	// 手动值必须保留（否则每次停用农场都要重新手填）。生效优先级：
+	// 节点池开启 → 用农场的中继；否则手动值 > 农场残留值。
+	EngineWarpSocksUDPManual string `json:"engine_warp_socks_udp_manual,omitempty"`
 
 	// ---- 节点池（WARP 注册源；只服务 OpenCode 免费层）----
 	// NodePoolEnabled 节点池开关（未配置默认关闭）。
 	NodePoolEnabled *bool `json:"node_pool_enabled,omitempty"`
+	// NodePoolLastWarning 最近一次应用的可达性预检结果（空 = 全部可达）。
+	NodePoolLastWarning string `json:"node_pool_last_warning,omitempty"`
 	// NodePoolSubscriptionURL 订阅地址（仅为记录来源，刷新时可重拉）。
 	NodePoolSubscriptionURL string `json:"node_pool_subscription_url,omitempty"`
 	// NodePoolMihomoPath mihomo 可执行文件路径；留空找 bin 目录。
@@ -304,6 +312,10 @@ func (m *Manager) ConfigGet(key string) (string, error) {
 		return strings.Join(cfg.EngineWarpRegistrationProxies, "\n"), nil
 	case "engine_warp_socks_udp":
 		return cfg.EngineWarpSocksUDP, nil
+	case "engine_warp_socks_udp_manual":
+		return cfg.EngineWarpSocksUDPManual, nil
+	case "node_pool_last_warning":
+		return cfg.NodePoolLastWarning, nil
 	case "node_pool_enabled":
 		return strconv.FormatBool(cfg.NodePoolEnabled != nil && *cfg.NodePoolEnabled), nil
 	case "node_pool_subscription_url":
@@ -464,6 +476,12 @@ func (m *Manager) ConfigSet(key, value string) error {
 			return fmt.Errorf("engine_warp_socks_udp 必须是 socks5://host:port 或 host:port")
 		}
 		cfg.EngineWarpSocksUDP = s
+	case "engine_warp_socks_udp_manual":
+		s := strings.TrimSpace(value)
+		if s != "" && !strings.Contains(s, ":") {
+			return fmt.Errorf("engine_warp_socks_udp_manual 必须是 socks5://host:port 或 host:port")
+		}
+		cfg.EngineWarpSocksUDPManual = s
 	case "node_pool_enabled":
 		b, err := parseBool()
 		if err != nil {
@@ -557,6 +575,20 @@ func splitLinesOrCommas(raw string) []string {
 }
 
 // engineEnabled 引擎总开关（nil = 默认开启）。
+// effectiveSocksUDP 决定下发给引擎的 warp.socks_udp：
+//   - 节点池开启：用农场写入的值（槽位 0 的端口）；
+//   - 节点池关闭：手填值优先，其次才是农场残留值（停用后会清空）。
+func effectiveSocksUDP(cfg Config, nodePoolOn bool) string {
+	manual := strings.TrimSpace(cfg.EngineWarpSocksUDPManual)
+	if nodePoolOn {
+		return cfg.EngineWarpSocksUDP
+	}
+	if manual != "" {
+		return manual
+	}
+	return cfg.EngineWarpSocksUDP
+}
+
 func engineEnabled(cfg Config) bool {
 	if cfg.EngineEnabled == nil {
 		return true
@@ -652,10 +684,14 @@ type ConfigView struct {
 	ProviderPortEffective uint16 `json:"provider_port_effective"`
 
 	// 免费层引擎（40080）
-	EngineEnabled          bool     `json:"engine_enabled"`
-	EngineWarpEnabled      bool     `json:"engine_warp_enabled"`
-	EngineWarpPoolSize     int      `json:"engine_warp_pool_size"`
-	EngineWarpSourceIPv6   string   `json:"engine_warp_source_ipv6"`
+	EngineEnabled        bool   `json:"engine_enabled"`
+	EngineWarpEnabled    bool   `json:"engine_warp_enabled"`
+	EngineWarpPoolSize   int    `json:"engine_warp_pool_size"`
+	EngineWarpSourceIPv6 string `json:"engine_warp_source_ipv6"`
+	// EngineWarpSocksUDPManual 面板手填的 UDP 中继；节点池开启时以农场为准。
+	EngineWarpSocksUDPManual string `json:"engine_warp_socks_udp_manual"`
+	// NodePoolEnabled 节点池是否在管理注册/中继（面板据此锁定手填中继）。
+	NodePoolEnabled        bool     `json:"node_pool_enabled"`
 	EngineProxies          []string `json:"engine_proxies"`
 	EngineRetryMaxAttempts int      `json:"engine_retry_max_attempts"`
 	EngineModelsRefreshSec int      `json:"engine_models_refresh_sec"`
@@ -692,19 +728,21 @@ func (m *Manager) ConfigViewOf() ConfigView {
 		HasGatewayKey:     cfg.GatewayKey != "",
 		GatewayKey:        maskSecret(cfg.GatewayKey),
 
-		GatewayPort:            cfg.GatewayPort,
-		ProviderPort:           cfg.ProviderPort,
-		GatewayPortEffective:   m.managerGatewayPort(),
-		ProviderPortEffective:  m.managerProviderPort(),
-		EngineEnabled:          engineEnabled(cfg),
-		EngineWarpEnabled:      engineWarpEnabled(cfg),
-		EngineWarpPoolSize:     cfg.EngineWarpPoolSize,
-		EngineWarpSourceIPv6:   cfg.EngineWarpSourceIPv6,
-		EngineProxies:          cfg.EngineProxies,
-		EngineRetryMaxAttempts: cfg.EngineRetryMaxAttempts,
-		EngineModelsRefreshSec: cfg.EngineModelsRefreshSec,
-		EngineFreeOnly:         engineFreeOnly(cfg),
-		EngineChannelOrder:     engineChannelOrder(cfg),
+		GatewayPort:              cfg.GatewayPort,
+		ProviderPort:             cfg.ProviderPort,
+		GatewayPortEffective:     m.managerGatewayPort(),
+		ProviderPortEffective:    m.managerProviderPort(),
+		EngineEnabled:            engineEnabled(cfg),
+		EngineWarpEnabled:        engineWarpEnabled(cfg),
+		EngineWarpPoolSize:       cfg.EngineWarpPoolSize,
+		EngineWarpSourceIPv6:     cfg.EngineWarpSourceIPv6,
+		EngineWarpSocksUDPManual: cfg.EngineWarpSocksUDPManual,
+		NodePoolEnabled:          m.nodePoolOn(cfg),
+		EngineProxies:            cfg.EngineProxies,
+		EngineRetryMaxAttempts:   cfg.EngineRetryMaxAttempts,
+		EngineModelsRefreshSec:   cfg.EngineModelsRefreshSec,
+		EngineFreeOnly:           engineFreeOnly(cfg),
+		EngineChannelOrder:       engineChannelOrder(cfg),
 		// 熔断阈值同源下发：前端文案直接用它，不另写一份常量。
 		EngineAnonymousBackoffThreshold: anonymousBackoffThreshold,
 		EngineWarpAutoFallback:          engineWarpAutoFallback(cfg),

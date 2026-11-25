@@ -19,6 +19,9 @@ export default function WarpPoolCard({
 }) {
   const [pool, setPool] = useState('4')
   const [srcV6, setSrcV6] = useState('')
+  const [relay, setRelay] = useState('')
+  const [savedRelay, setSavedRelay] = useState('')
+  const [poolManaged, setPoolManaged] = useState(false)
   const [dirty, setDirty] = useState(false)
   const [saving, setSaving] = useState(false)
   const [resetting, setResetting] = useState(false)
@@ -31,6 +34,9 @@ export default function WarpPoolCard({
         if (!alive) return
         setPool(String(cfg.engine_warp_pool_size || 4))
         setSrcV6(cfg.engine_warp_source_ipv6 ?? '')
+        setRelay(cfg.engine_warp_socks_udp_manual ?? '')
+        setSavedRelay(cfg.engine_warp_socks_udp_manual ?? '')
+        setPoolManaged(Boolean(cfg.node_pool_enabled))
       } catch {
         // 读不到配置时保持默认值，页面其它区域会显示连接错误
       }
@@ -46,9 +52,11 @@ export default function WarpPoolCard({
       const size = Math.max(1, Math.min(32, parseInt(pool, 10) || 4))
       await api.configSet('engine_warp_pool_size', String(size))
       await api.configSet('engine_warp_source_ipv6', srcV6.trim())
+      await api.configSet('engine_warp_socks_udp_manual', relay.trim())
       setPool(String(size))
+      setSavedRelay(relay.trim())
       setDirty(false)
-      toast(`出口池已保存为 ${size}：点顶部「重启」后开始注册新出口（重启中会显示进度）`)
+      toast(`已保存：出口池 ${size}${relay.trim() ? `，UDP 中继 ${relay.trim()}` : ''}；点顶部「重启」生效`)
     } catch (e) {
       toast('保存失败：' + (e as Error).message, false)
     } finally {
@@ -159,10 +167,34 @@ export default function WarpPoolCard({
           />
         </label>
       </div>
+      <div className="mt-3">
+        <label className="space-y-1 block">
+          <span className="text-[12px] text-zinc-600">
+            UDP 中继（socks5://host:port，留空 = 直连）
+            {poolManaged ? ' · 由节点池管理' : ''}
+          </span>
+          <input
+            type="text"
+            placeholder="socks5://127.0.0.1:7890"
+            value={poolManaged ? (status?.warp_socks_udp ?? '') : relay}
+            disabled={poolManaged}
+            onChange={(e) => setRelay(e.target.value)}
+            className="w-full px-3 py-2 rounded-lg border border-zinc-200 text-[13px] font-mono disabled:bg-zinc-50 disabled:text-zinc-500"
+          />
+        </label>
+        <div className="mt-1 text-[11px] text-zinc-500">
+          本机没有公网 IPv6 时，WireGuard 握手必须经 SOCKS5 UDP 转发；填你本地代理的 socks5 端口即可。
+          当前生效：<span className="font-mono">{status?.warp_socks_udp || '直连'}</span>
+          {!poolManaged && relay.trim() !== savedRelay ? '（未保存）' : ''}
+          {!poolManaged && relay.trim() === savedRelay && relay.trim() !== (status?.warp_socks_udp ?? '') && relay.trim()
+            ? '（重启引擎后生效）'
+            : ''}
+        </div>
+      </div>
       <div className="mt-3 flex items-center gap-2">
         <button
           onClick={() => void save()}
-          disabled={!dirty || saving || engineRestarting}
+          disabled={(!dirty && relay.trim() === savedRelay) || saving || engineRestarting}
           className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-[13px] text-white bg-zinc-900 hover:bg-zinc-800 disabled:opacity-40"
         >
           {saving ? <Loader2 size={14} className="animate-spin" /> : null}

@@ -327,6 +327,10 @@ export type ConfigView = {
   engine_warp_pool_size: number
   /** 外层源 IPv6 前缀（通常一个路由到本机的 /64） */
   engine_warp_source_ipv6: string
+  /** 手填 UDP 中继（socks5://host:port）；节点池开启时以农场为准 */
+  engine_warp_socks_udp_manual?: string
+  /** 节点池是否在管理注册/中继 */
+  node_pool_enabled?: boolean
   /** 出口代理列表（http/https/socks5/socks5h 或 direct） */
   engine_proxies: string[]
   /** 可选付费密钥池（空 = 纯匿名免费层） */
@@ -575,6 +579,8 @@ export type FreeTierEngineStatus = {
   warp_cooling: number
   /** 管理器正在重启引擎（stop→start→等健康）：驱动「重启中」并禁用重启按钮 */
   restarting: boolean
+  /** 实际下发的 UDP 中继（空 = 直连） */
+  warp_socks_udp?: string
   /** 每个注册代理（= 节点池槽位）的累计注册成败；2.0.16 引擎补丁提供 */
   warp_registrars?: WarpRegistrar[]
   restart_started_at?: string

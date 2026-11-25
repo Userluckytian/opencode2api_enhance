@@ -609,6 +609,35 @@ func (m *Manager) ApplyNodePool(selected []string) (hot bool, err error) {
 	if len(info.Ports) == 0 {
 		return false, fmt.Errorf("农场未就绪: %s", info.LastError)
 	}
+	// 可达性预检：全挂就拒绝应用（否则会写一组死端口、引擎 90s 后无出口启动）；
+	// 部分挂写进告警，用户能直接看到哪些节点是死的。
+	probes := probeNodeFarmSlots(info.Ports)
+	slots := m.farmNodes()
+	dead := make([]string, 0, len(probes))
+	for i, pr := range probes {
+		if pr.Err == nil {
+			continue
+		}
+		label := fmt.Sprintf("端口 %d", pr.Port)
+		if i < len(slots) {
+			label = slots[i].Name
+		}
+		dead = append(dead, label)
+	}
+	if len(dead) == len(probes) {
+		msg := fmt.Sprintf("选中节点全部不可达（%d/%d）：%s；请检查订阅节点或先停用节点池",
+			len(dead), len(probes), strings.Join(dead, "、"))
+		_ = m.ConfigSet("node_pool_last_warning", msg)
+		return false, fmt.Errorf("%s", msg)
+	}
+	if len(dead) > 0 {
+		msg := fmt.Sprintf("%d/%d 个节点不可达：%s（这些槽位的注册会失败）",
+			len(dead), len(probes), strings.Join(dead, "、"))
+		_ = m.ConfigSet("node_pool_last_warning", msg)
+		log.Printf("node pool: %s", msg)
+	} else {
+		_ = m.ConfigSet("node_pool_last_warning", "")
+	}
 	return m.syncRegistrationAfterApply()
 }
 
@@ -756,6 +785,9 @@ func (m *Manager) NodePoolStatusOf() NodePoolStatus {
 		case st.SocksUDP == "" && hasUDP:
 			warns = append(warns, "尚未写入握手中继，点一次「应用」生效")
 		}
+	}
+	if last := strings.TrimSpace(cfg.NodePoolLastWarning); last != "" {
+		warns = append(warns, last)
 	}
 	st.Warning = strings.Join(warns, "；")
 	return st
