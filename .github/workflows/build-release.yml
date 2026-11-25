@@ -43,6 +43,16 @@ jobs:
             bundles: dmg,app
             updater_platform: darwin-aarch64
             win_dll: false
+          # Intel Mac：macos-latest 宿主是 arm64，需显式 --target 交叉构建。
+          - os: macos-latest
+            go_bin: opencode2api
+            goos: darwin
+            goarch: amd64
+            engine_bin: opencode2api-win
+            bundles: dmg,app
+            updater_platform: darwin-x86_64
+            win_dll: false
+            target: x86_64-apple-darwin
     runs-on: ${{ matrix.os }}
     permissions:
       contents: write
@@ -57,6 +67,11 @@ jobs:
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
+
+      # Intel Mac 需要额外安装 Rust 目标（macos-latest 宿主是 arm64）
+      - name: Add Rust target (${{ matrix.target }})
+        if: matrix.target != ''
+        run: rustup target add ${{ matrix.target }}
 
       - name: Setup Go
         uses: actions/setup-go@v5
@@ -112,6 +127,49 @@ jobs:
           chmod +x "bin/${{ matrix.engine_bin }}" || true
           ls -lh bin/
 
+      # 节点池内核 mihomo（GPL-3.0 独立进程，v1.19.33 固定版本）：
+      # 与 third_party/mihomo/SOURCE.txt 的资产名/哈希保持一致；缺失只影响节点池。
+      - name: Fetch mihomo (node-pool kernel)
+        shell: bash
+        env:
+          MIHOMO_VERSION: v1.19.33
+          TARGET_GOOS: ${{ matrix.goos }}
+          TARGET_GOARCH: ${{ matrix.goarch }}
+        run: |
+          set -euo pipefail
+          case "${TARGET_GOOS}/${TARGET_GOARCH}" in
+            windows/amd64) asset="mihomo-windows-amd64-${MIHOMO_VERSION}.zip"
+                           sha="6ab2180875f9f6fff8b19386d760daec257f66b45f72b3afc650634272fa837a" ;;
+            linux/amd64)   asset="mihomo-linux-amd64-${MIHOMO_VERSION}.gz"
+                           sha="132f6f3edf9a65e62f04853aed3358472e0b2b7666daa8419edfa2ddf5bb6323" ;;
+            darwin/arm64)  asset="mihomo-darwin-arm64-${MIHOMO_VERSION}.gz"
+                           sha="060b64b0f2c9a310831db0fe4adb2878de67bfa606c311813c1f13966aa504b6" ;;
+            darwin/amd64)  asset="mihomo-darwin-amd64-${MIHOMO_VERSION}.gz"
+                           sha="551ae54ef8d77a5e21f7a8185a59b441fb13a0fb0514fcdef5ca2816f6f50015" ;;
+            *) echo "::error::mihomo 没有 ${TARGET_GOOS}/${TARGET_GOARCH} 的固定资产"; exit 1 ;;
+          esac
+          url="https://github.com/MetaCubeX/mihomo/releases/download/${MIHOMO_VERSION}/${asset}"
+          tmp="$(mktemp -d)"
+          curl -fsSL --retry 5 --retry-delay 3 -o "$tmp/$asset" "$url"
+          if command -v sha256sum >/dev/null 2>&1; then
+            echo "$sha  $tmp/$asset" | sha256sum -c -
+          else
+            echo "$sha  $tmp/$asset" | shasum -a 256 -c -
+          fi
+          mkdir -p bin
+          if [ "${asset##*.}" = "zip" ]; then
+            unzip -oq "$tmp/$asset" -d "$tmp"
+            # 官方 zip 里的文件名带平台后缀（mihomo-windows-amd64.exe）
+            src="$(find "$tmp" -type f -name '*.exe' -print -quit)"
+            [ -n "$src" ] || { echo "::error::压缩包里没有 .exe"; exit 1; }
+            cp "$src" bin/mihomo.exe
+          else
+            gunzip -c "$tmp/$asset" > bin/mihomo
+            chmod +x bin/mihomo
+          fi
+          rm -rf "$tmp"
+          ls -lh bin/
+
       # GPL-3.0 义务：随引擎二进制分发「与本次构建完全一致」的源码 + 提交号
       # （LICENSE / SOURCE.txt / README.md 已在仓库 third_party/ 里入库）。
       # git archive 从 engine-src 导出 tar.gz；COMMIT.txt 写完整 sha 供核对。
@@ -158,7 +216,20 @@ jobs:
           # 应用内更新（Tauri updater）所需签名；私钥与密码放在仓库 Secrets 中
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
-        run: npx tauri build --bundles ${{ matrix.bundles }}
+          TAURI_TARGET: ${{ matrix.target }}
+          BUNDLES: ${{ matrix.bundles }}
+        run: |
+          set -euo pipefail
+          if [ -n "${TAURI_TARGET:-}" ]; then
+            npx tauri build --target "$TAURI_TARGET" --bundles "$BUNDLES"
+            # 交叉构建的产物在 target/<triple>/release 下；统一搬到默认路径，
+            # 后续「收集元数据 / 上传产物」步骤无需感知 target。
+            rm -rf src-tauri/target/release/bundle
+            mkdir -p src-tauri/target/release
+            cp -R "src-tauri/target/$TAURI_TARGET/release/bundle" src-tauri/target/release/bundle
+          else
+            npx tauri build --bundles "$BUNDLES"
+          fi
 
       # 每个平台产出 updater 元数据（平台标识 + 安装包相对路径 + 签名），
       # 供 release job 生成 latest.json。macOS 的上传包名不含架构，不能靠文件名推断。
@@ -211,10 +282,10 @@ jobs:
         env:
           UPDATER_PLATFORM: ${{ matrix.updater_platform }}
 
-      - name: Upload artifact (${{ matrix.os }})
+      - name: Upload artifact (${{ matrix.updater_platform }})
         uses: actions/upload-artifact@v4
         with:
-          name: opencode2api-${{ matrix.os }}
+          name: opencode2api-${{ matrix.updater_platform }}
           if-no-files-found: error
           path: |
             src-tauri/target/release/bundle/updater-meta-*.json
@@ -233,6 +304,10 @@ jobs:
             third_party/opencode2api-win/README.md
             third_party/opencode2api-win/COMMIT.txt
             third_party/opencode2api-win/opencode2api-win-source.tar.gz
+            # GPL-3.0 分发件：节点池内核 mihomo 的许可证/来源声明
+            third_party/mihomo/LICENSE
+            third_party/mihomo/SOURCE.txt
+            third_party/mihomo/README.md
 
   # GitHub Release：仅 tag（v*）触发时执行——汇总三平台产物并发布（首次新建，幂等）。
   release:
@@ -325,10 +400,12 @@ jobs:
               artifact = meta_path.parent / meta["artifact"]
               if not artifact.exists():
                   raise SystemExit(f"updater 安装包缺失：{artifact}")
-              if key == "darwin-aarch64":
+              if key.startswith("darwin-"):
                   # macOS 的 updater 包是 .app.tar.gz，不是用户要的安装包；
                   # 放到内部滚动 release，版本 Release 只保留 .dmg。
-                  rolling_name = f"opencode2api_{version}_aarch64.app.tar.gz"
+                  # 文件名里的架构沿用 Tauri 约定：aarch64 / x64。
+                  file_arch = "aarch64" if key.endswith("aarch64") else "x64"
+                  rolling_name = f"opencode2api_{version}_{file_arch}.app.tar.gz"
                   url = f"https://github.com/{repo}/releases/download/updater-latest/{urllib.parse.quote(rolling_name)}"
               else:
                   url = f"https://github.com/{repo}/releases/download/{tag}/{urllib.parse.quote(artifact.name)}"
@@ -405,17 +482,29 @@ jobs:
               --notes "由 CI 自动维护的应用内更新清单，请勿手动修改。"
           # macOS 的 .app.tar.gz 是 updater 包：先传滚动 release，再传 latest.json，
           # 保证客户端拿到清单时对应资产已经存在。
-          mac="$(find release -name 'opencode2api.app.tar.gz' -print -quit)"
-          if [ -n "$mac" ]; then
-            out="/tmp/opencode2api_${version}_aarch64.app.tar.gz"
-            cp "$mac" "$out"
-            gh release upload updater-latest "$out" --clobber
-          fi
-          # 滚动 release 只保留当前版本的 macOS updater 包，避免历史版本无限累积。
+          # 每个架构各一份（aarch64 / x64），从各自的 updater-meta 定位产物。
+          python3 - <<'PY' > /tmp/mac_assets.txt
+          import json, os, pathlib
+          version = os.environ["GITHUB_REF_NAME"].lstrip("vV")
+          for meta_path in sorted(pathlib.Path("release").rglob("updater-meta-darwin-*.json")):
+              meta = json.loads(meta_path.read_text(encoding="utf-8"))
+              file_arch = "aarch64" if meta["platform"].endswith("aarch64") else "x64"
+              artifact = meta_path.parent / meta["artifact"]
+              print(f"{artifact}|/tmp/opencode2api_{version}_{file_arch}.app.tar.gz")
+          PY
+          while IFS='|' read -r src dst; do
+            [ -n "$src" ] || continue
+            cp "$src" "$dst"
+            gh release upload updater-latest "$dst" --clobber
+          done < /tmp/mac_assets.txt
+          # 滚动 release 只保留当前版本的两个 macOS updater 包，避免历史版本无限累积。
+          keep_a="opencode2api_${version}_aarch64.app.tar.gz"
+          keep_b="opencode2api_${version}_x64.app.tar.gz"
           gh release view updater-latest --json assets --jq '.assets[].name' \
-            | grep -E '^opencode2api_.*_aarch64\.app\.tar\.gz$' \
-            | grep -vF "opencode2api_${version}_aarch64.app.tar.gz" \
+            | grep -E '^opencode2api_.*_(aarch64|x64)\.app\.tar\.gz$' \
             | while read -r old; do
-                gh release delete-asset updater-latest "$old" -y
+                if [ "$old" != "$keep_a" ] && [ "$old" != "$keep_b" ]; then
+                  gh release delete-asset updater-latest "$old" -y
+                fi
               done || true
           gh release upload updater-latest release/latest.json --clobber
