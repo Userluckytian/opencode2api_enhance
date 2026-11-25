@@ -95,6 +95,10 @@ type Config struct {
 	NodePoolSelected []string `json:"node_pool_selected,omitempty"`
 	// NodePoolRefreshMin 订阅自动刷新间隔（分钟，0 = 不自动刷新）。
 	NodePoolRefreshMin int `json:"node_pool_refresh_min,omitempty"`
+	// NodePoolHealthSec 节点池定时巡检间隔（秒）。nil = 默认 120；0 = 关闭。
+	// 巡检只做一件事：出口不足(active<target)且槽位里有死节点时，重新选源；
+	// 槽位都健康时不动，交给引擎自己 refill。
+	NodePoolHealthSec *int `json:"node_pool_health_sec,omitempty"`
 	// EngineProxies 引擎出口代理列表（每项 http/https/socks5/socks5h 或 direct）。
 	EngineProxies []string `json:"engine_proxies,omitempty"`
 	// 注意：v2.0.9 起移除了 engine_zen_keys / engine_go_keys。
@@ -333,6 +337,8 @@ func (m *Manager) ConfigGet(key string) (string, error) {
 		return strings.Join(cfg.NodePoolSelected, "\n"), nil
 	case "node_pool_refresh_min":
 		return strconv.Itoa(cfg.NodePoolRefreshMin), nil
+	case "node_pool_health_sec":
+		return strconv.Itoa(nodePoolHealthSec(cfg)), nil
 	case "engine_proxies":
 		return strings.Join(cfg.EngineProxies, "\n"), nil
 	case "engine_retry_max_attempts":
@@ -521,6 +527,12 @@ func (m *Manager) ConfigSet(key, value string) error {
 			return fmt.Errorf("node_pool_refresh_min 需在 0~1440 分钟之间")
 		}
 		cfg.NodePoolRefreshMin = int(v)
+	case "node_pool_health_sec":
+		v, err := strconv.Atoi(strings.TrimSpace(value))
+		if err != nil || v < 0 {
+			return fmt.Errorf("node_pool_health_sec 必须是非负整数（秒，0=关闭）")
+		}
+		cfg.NodePoolHealthSec = &v
 	case "engine_proxies":
 		cfg.EngineProxies = splitLinesOrCommas(value)
 	case "engine_retry_max_attempts":
@@ -587,6 +599,15 @@ func splitLinesOrCommas(raw string) []string {
 // effectiveSocksUDP 决定下发给引擎的 warp.socks_udp：
 //   - 节点池开启：用农场写入的值（槽位 0 的端口）；
 //   - 节点池关闭：手填值优先，其次才是农场残留值（停用后会清空）。
+//
+// nodePoolHealthSec 巡检间隔：未设置默认 120s，0 = 关闭。
+func nodePoolHealthSec(cfg Config) int {
+	if cfg.NodePoolHealthSec == nil {
+		return 120
+	}
+	return *cfg.NodePoolHealthSec
+}
+
 func effectiveSocksUDP(cfg Config, nodePoolOn bool) string {
 	manual := strings.TrimSpace(cfg.EngineWarpSocksUDPManual)
 	if nodePoolOn {

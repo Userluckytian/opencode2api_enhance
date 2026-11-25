@@ -64,6 +64,9 @@ type nodeFarm struct {
 	// ctlPort / secret 是 mihomo external-controller，用于热重载配置。
 	ctlPort int
 	secret  string
+	// healthAt / healthDead 最近一次定时巡检的时间与不可达槽位数。
+	healthAt   string
+	healthDead int
 	// gen 每次 Start/Stop 递增；监护协程据此判断自己是否已被取代，
 	// 避免旧进程退出后把新农场再重启一次。
 	gen        int
@@ -73,11 +76,14 @@ type nodeFarm struct {
 
 // NodeFarmInfo 农场运行状态。
 type NodeFarmInfo struct {
-	Running   bool   `json:"running"`
-	PID       int    `json:"pid"`
-	Ports     []int  `json:"ports"`
-	Slots     int    `json:"slots"`
-	LastError string `json:"last_error,omitempty"`
+	Running bool  `json:"running"`
+	PID     int   `json:"pid"`
+	Ports   []int `json:"ports"`
+	Slots   int   `json:"slots"`
+	// HealthCheckedAt / HealthDead 定时巡检结果。
+	HealthCheckedAt string `json:"health_checked_at,omitempty"`
+	HealthDead      int    `json:"health_dead"`
+	LastError       string `json:"last_error,omitempty"`
 }
 
 func (m *Manager) farm() *nodeFarm {
@@ -95,7 +101,10 @@ func (m *Manager) NodeFarmInfo() NodeFarmInfo {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	ports := append([]int(nil), f.ports...)
-	return NodeFarmInfo{Running: f.running, PID: f.pid, Ports: ports, Slots: len(ports), LastError: f.lastErr}
+	return NodeFarmInfo{
+		Running: f.running, PID: f.pid, Ports: ports, Slots: len(ports),
+		HealthCheckedAt: f.healthAt, HealthDead: f.healthDead, LastError: f.lastErr,
+	}
 }
 
 // mihomoBin 解析 mihomo 路径：显式配置 → bin 目录 → third_party 目录。
@@ -827,20 +836,22 @@ func (m *Manager) NodePoolStatusOf() NodePoolStatus {
 		sel = []string{}
 	}
 	st := NodePoolStatus{
-		Enabled:     m.nodePoolOn(cfg),
-		Running:     info.Running,
-		PID:         info.PID,
-		PortBase:    cfg.NodePoolPortBase,
-		Ports:       info.Ports,
-		Nodes:       cache.Nodes,
-		Selected:    sel,
-		NodeCount:   len(cache.Nodes),
-		SelectedLen: len(sel),
-		HiddenCount: len(cache.Hidden),
-		Slots:       info.Slots,
-		SocksUDP:    cfg.EngineWarpSocksUDP,
-		LastError:   info.LastError,
-		UpdatedAt:   cache.FetchedAt,
+		Enabled:         m.nodePoolOn(cfg),
+		Running:         info.Running,
+		PID:             info.PID,
+		PortBase:        cfg.NodePoolPortBase,
+		Ports:           info.Ports,
+		Nodes:           cache.Nodes,
+		Selected:        sel,
+		NodeCount:       len(cache.Nodes),
+		SelectedLen:     len(sel),
+		HiddenCount:     len(cache.Hidden),
+		Slots:           info.Slots,
+		HealthCheckedAt: info.HealthCheckedAt,
+		HealthDead:      info.HealthDead,
+		SocksUDP:        cfg.EngineWarpSocksUDP,
+		LastError:       info.LastError,
+		UpdatedAt:       cache.FetchedAt,
 	}
 	if st.PortBase <= 0 {
 		st.PortBase = nodeFarmDefaultPortBase

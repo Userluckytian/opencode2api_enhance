@@ -65,7 +65,10 @@ type NodePoolStatus struct {
 	// SlotsNodes 槽位 i 对应的节点指纹（长度 = Slots），与引擎 warp.registrars
 	// 的 index 对齐，面板据此按节点聚合注册成败。
 	SlotsNodes []string `json:"slots_nodes,omitempty"`
-	MihomoPath string   `json:"mihomo_path"`
+	// HealthCheckedAt / HealthDead 定时巡检结果（空 = 还没跑过）。
+	HealthCheckedAt string `json:"health_checked_at,omitempty"`
+	HealthDead      int    `json:"health_dead"`
+	MihomoPath      string `json:"mihomo_path"`
 	// SocksUDP 当前写进引擎的握手中继（空 = 直连）。
 	SocksUDP  string `json:"socks_udp,omitempty"`
 	Warning   string `json:"warning,omitempty"`

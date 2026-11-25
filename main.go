@@ -188,6 +188,8 @@ func main() {
 		}
 	}()
 	go managerInst.WatchdogFreeTierEngine(engineRunner)
+	// 节点池定时巡检：出口不足且槽位里有死节点时重新选源（不重启引擎）。
+	go managerInst.WatchNodePoolHealth()
 
 	// 更新清单镜像加速：桌面壳的 updater 先取 127.0.0.1:40099，再回退 GitHub。
 	// 端口被占或探测失败都不影响主服务（壳会走第二个 endpoint）。

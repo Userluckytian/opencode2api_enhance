@@ -28,6 +28,9 @@ type PoolStatus = {
   hidden_count?: number
   /** 固定注册槽位数（0 = 农场未按固定槽位运行） */
   slots?: number
+  /** 定时巡检：最近一次时间与不可达槽位数 */
+  health_checked_at?: string
+  health_dead?: number
   /** 槽位 i 对应的节点指纹（与引擎 warp.registrars 的 index 对齐） */
   slots_nodes?: string[]
   mihomo_path: string
@@ -389,6 +392,9 @@ export default function NodePoolCard({
             </button>
             <span className="ml-auto">
               端口基址 {st.port_base} · 固定槽位 {st.slots || st.ports.length || '—'}
+              {st.health_checked_at
+                ? ` · 巡检 ${st.health_checked_at}${st.health_dead ? `（不可达 ${st.health_dead}）` : ''}`
+                : ''}
             </span>
           </div>
           {(st.hidden_count ?? 0) > 0 ? (
