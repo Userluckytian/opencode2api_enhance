@@ -42,6 +42,9 @@ type nodePoolCache struct {
 	FetchedAt string            `json:"fetched_at"`
 	Nodes     []PoolNode        `json:"nodes"`
 	Blocks    map[string]string `json:"blocks"` // fingerprint → 原始 YAML 块
+	// Hidden 被用户移除的节点指纹：导入/自动刷新时不再复活。
+	// 没有它的话，删掉的节点会被下一次订阅刷新原样带回来。
+	Hidden []string `json:"hidden,omitempty"`
 }
 
 // NodePoolStatus 面板视图。
@@ -55,7 +58,9 @@ type NodePoolStatus struct {
 	Selected    []string   `json:"selected"`
 	NodeCount   int        `json:"node_count"`
 	SelectedLen int        `json:"selected_count"`
-	MihomoPath  string     `json:"mihomo_path"`
+	// HiddenCount 用户移除的节点数（重新导入不会复活）。
+	HiddenCount int    `json:"hidden_count"`
+	MihomoPath  string `json:"mihomo_path"`
 	// SocksUDP 当前写进引擎的握手中继（空 = 直连）。
 	SocksUDP  string `json:"socks_udp,omitempty"`
 	Warning   string `json:"warning,omitempty"`
@@ -147,6 +152,23 @@ func (m *Manager) ImportNodePool(source, content string) (nodePoolCache, int, er
 		FetchedAt: time.Now().Format(time.RFC3339),
 		Nodes:     nodes,
 		Blocks:    blocks,
+	}
+	// 用户手动移除（隐藏）的节点，订阅刷新时不再复活。
+	if prev := m.LoadNodePoolCache(); len(prev.Hidden) > 0 {
+		cache.Hidden = prev.Hidden
+		hidden := make(map[string]bool, len(prev.Hidden))
+		for _, fp := range prev.Hidden {
+			hidden[fp] = true
+		}
+		kept := make([]PoolNode, 0, len(nodes))
+		for _, n := range nodes {
+			if hidden[n.Fingerprint] {
+				delete(blocks, n.Fingerprint)
+				continue
+			}
+			kept = append(kept, n)
+		}
+		cache.Nodes = kept
 	}
 	if err := m.saveNodePoolCache(cache); err != nil {
 		return cache, bad, err
@@ -349,4 +371,73 @@ func (m *Manager) SelectedNodes() []PoolNode {
 		}
 	}
 	return out
+}
+
+// RemoveNodePoolNodes 从缓存里移除节点（all=true 清空并重置屏蔽），
+// 同时把它们记进 Hidden，订阅刷新时不再复活。
+//
+// 只改缓存与选中项，不碰农场/引擎：要让引擎的注册列表跟着变，还需要
+// ApplyNodePool（当前引擎只在启动时读 registration_proxies，仍会重启一次；
+// 2.0.15 的热加会去掉这一步）。
+func (m *Manager) RemoveNodePoolNodes(fps []string, all bool) (removed, remain int, err error) {
+	cache := m.LoadNodePoolCache()
+	drop := make(map[string]bool, len(fps))
+	for _, fp := range fps {
+		if v := strings.TrimSpace(fp); v != "" {
+			drop[v] = true
+		}
+	}
+	if all {
+		removed = len(cache.Nodes)
+		for _, n := range cache.Nodes {
+			delete(cache.Blocks, n.Fingerprint)
+		}
+		cache.Nodes = nil
+		// 整体清空 = 连屏蔽一起重置，用户下次导入能拿到全部节点。
+		cache.Hidden = nil
+	} else {
+		if len(drop) == 0 {
+			return 0, len(cache.Nodes), fmt.Errorf("需要 fingerprints 或 all=true")
+		}
+		kept := make([]PoolNode, 0, len(cache.Nodes))
+		for _, n := range cache.Nodes {
+			if drop[n.Fingerprint] {
+				removed++
+				delete(cache.Blocks, n.Fingerprint)
+				continue
+			}
+			kept = append(kept, n)
+		}
+		cache.Nodes = kept
+		// 屏蔽名单去重累积（只增不减，直到清空重置）。
+		seen := make(map[string]bool, len(cache.Hidden)+len(drop))
+		for _, fp := range cache.Hidden {
+			seen[fp] = true
+		}
+		for fp := range drop {
+			if !seen[fp] {
+				cache.Hidden = append(cache.Hidden, fp)
+				seen[fp] = true
+			}
+		}
+		sort.Strings(cache.Hidden)
+	}
+	if err := m.saveNodePoolCache(cache); err != nil {
+		return 0, len(cache.Nodes), err
+	}
+	// 选中项同步剔除：否则下次 Apply 会带着已删除的指纹（节点不存在，
+	// 农场端口数会对不上）。
+	cfg := m.loadConfig()
+	sel := make([]string, 0, len(cfg.NodePoolSelected))
+	for _, fp := range cfg.NodePoolSelected {
+		v := strings.TrimSpace(fp)
+		if v == "" || drop[v] || all {
+			continue
+		}
+		sel = append(sel, v)
+	}
+	if err := m.ConfigSet("node_pool_selected", strings.Join(sel, "\n")); err != nil {
+		return removed, len(cache.Nodes), err
+	}
+	return removed, len(cache.Nodes), nil
 }

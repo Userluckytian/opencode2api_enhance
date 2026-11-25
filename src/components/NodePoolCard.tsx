@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useState } from 'react'
+import { Trash2 } from 'lucide-react'
 
 // WARP 注册节点池：订阅 → 本地端口 → engine_warp_registration_proxies。
 // 只服务 OpenCode 免费层注册；设置里的「出口代理」不受影响。
@@ -22,6 +23,8 @@ type PoolStatus = {
   selected: string[]
   node_count: number
   selected_count: number
+  /** 被移除（屏蔽）的节点数：订阅刷新不会复活 */
+  hidden_count?: number
   mihomo_path: string
   socks_udp?: string
   warning?: string
@@ -54,7 +57,17 @@ const post = async <T,>(path: string, body: unknown): Promise<T> => {
   return data as T
 }
 
-export default function NodePoolCard({ toast }: { toast: (msg: string, ok?: boolean) => void }) {
+export default function NodePoolCard({
+  toast,
+  onEngineRestarting,
+  engineRestarting,
+}: {
+  toast: (msg: string, ok?: boolean) => void
+  /** 应用成功会触发引擎重启：通知父页面立刻切到「重启中」 */
+  onEngineRestarting?: () => void
+  /** 父页面判定的重启态（本卡片据此禁用按钮并显示进度） */
+  engineRestarting?: boolean
+}) {
   const [st, setSt] = useState<PoolStatus | null>(null)
   const [url, setUrl] = useState('')
   const [content, setContent] = useState('')
@@ -83,6 +96,9 @@ export default function NodePoolCard({ toast }: { toast: (msg: string, ok?: bool
 
   useEffect(() => {
     void load().catch(() => undefined)
+    // 农场/引擎会在后台自发变化（重启、自动刷新订阅），卡片不能只靠手点刷新。
+    const t = window.setInterval(() => void load().catch(() => undefined), 4000)
+    return () => window.clearInterval(t)
   }, [load])
 
   const importSub = async () => {
@@ -112,7 +128,8 @@ export default function NodePoolCard({ toast }: { toast: (msg: string, ok?: bool
     setBusy('apply')
     try {
       await post('/api/admin/node-pool/apply', { selected: sel })
-      toast('已应用：农场启动并同步到引擎（引擎重启中）', true)
+      onEngineRestarting?.()
+      toast('已应用：农场启动并同步到引擎，引擎正在重启（WARP 重新注册出口，最长 90s）', true)
       await load()
     } catch (e) {
       toast((e as Error).message, false)
@@ -126,6 +143,27 @@ export default function NodePoolCard({ toast }: { toast: (msg: string, ok?: bool
     try {
       await post('/api/admin/node-pool/stop', {})
       toast('已停用节点池，注册回退到出口代理', true)
+      await load()
+    } catch (e) {
+      toast((e as Error).message, false)
+    } finally {
+      setBusy(null)
+    }
+  }
+
+  const removeNodes = async (fps: string[], all = false) => {
+    if (!all && fps.length === 0) return
+    const tip = all ? '清空全部节点并重置屏蔽名单？' : `移除 ${fps.length} 个节点？`
+    if (!window.confirm(`${tip}
+
+移除只改本地列表（订阅刷新也不会复活），已选中的节点需要重新「应用」才会从引擎注册表里去掉。`)) return
+    setBusy('remove')
+    try {
+      const r = await post<{ removed: number; remain: number }>('/api/admin/node-pool/remove', {
+        fingerprints: fps,
+        all,
+      })
+      toast(all ? `已清空节点（原 ${r.removed} 个）` : `已移除 ${r.removed} 个节点，剩余 ${r.remain} 个`, true)
       await load()
     } catch (e) {
       toast((e as Error).message, false)
@@ -277,18 +315,32 @@ export default function NodePoolCard({ toast }: { toast: (msg: string, ok?: bool
               全选
             </button>
             <button onClick={() => setSel([])} className="px-2 py-1 rounded bg-zinc-100 hover:bg-zinc-200">
-              清空
+              全不选
+            </button>
+            <button
+              onClick={() => void removeNodes([], true)}
+              disabled={busy !== null || engineRestarting}
+              className="px-2 py-1 rounded bg-red-50 text-red-600 hover:bg-red-100 disabled:opacity-40"
+              title="清空节点列表并重置屏蔽名单（之后重新导入可恢复全部）"
+            >
+              {busy === 'remove' ? '处理中…' : '清空列表'}
             </button>
             <span className="ml-auto">端口基址 {st.port_base}</span>
           </div>
+          {(st.hidden_count ?? 0) > 0 ? (
+            <div className="text-[11px] text-zinc-500">
+              已屏蔽 {st.hidden_count} 个被移除的节点：订阅刷新不会复活，点「清空列表」可重置屏蔽
+            </div>
+          ) : null}
           <div className="max-h-64 overflow-auto rounded-lg border border-zinc-200 divide-y divide-zinc-100">
             {st.nodes.map((n) => (
-              <label
+              <div
                 key={n.fingerprint}
-                className="flex items-center gap-3 px-3 py-2 text-[12px] hover:bg-zinc-50 cursor-pointer"
+                className="flex items-center gap-3 px-3 py-2 text-[12px] hover:bg-zinc-50"
               >
                 <input
                   type="checkbox"
+                  className="cursor-pointer"
                   checked={sel.includes(n.fingerprint)}
                   onChange={() => toggle(n.fingerprint)}
                 />
@@ -307,7 +359,15 @@ export default function NodePoolCard({ toast }: { toast: (msg: string, ok?: bool
                 >
                   UDP {n.udp ? '✓' : '✗'}
                 </span>
-              </label>
+                <button
+                  onClick={() => void removeNodes([n.fingerprint])}
+                  disabled={busy !== null || engineRestarting}
+                  className="px-1 py-0.5 rounded text-zinc-400 hover:text-red-600 hover:bg-red-50 disabled:opacity-30"
+                  title="从列表移除（不再参与注册；订阅刷新不会复活）"
+                >
+                  <Trash2 size={13} />
+                </button>
+              </div>
             ))}
           </div>
           {st.ports.length > 0 ? (
@@ -346,10 +406,14 @@ export default function NodePoolCard({ toast }: { toast: (msg: string, ok?: bool
       <div className="flex items-center gap-2">
         <button
           onClick={() => void apply()}
-          disabled={busy !== null || sel.length === 0}
+          disabled={busy !== null || engineRestarting || sel.length === 0}
           className="px-3 py-1.5 rounded-lg text-[13px] text-white bg-teal-600 hover:bg-teal-700 disabled:opacity-40"
         >
-          {busy === 'apply' ? '应用中…' : '应用并重启引擎'}
+          {busy === 'apply'
+            ? '应用中…'
+            : engineRestarting
+              ? '引擎重启中…'
+              : '应用并重启引擎'}
         </button>
         <button
           onClick={() => void disable()}

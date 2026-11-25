@@ -1,10 +1,22 @@
 import { useEffect, useState } from 'react'
 import { Loader2, Waves } from 'lucide-react'
-import { api, type ConfigView } from '../lib/api'
+import { api, type ConfigView, type FreeTierEngineStatus } from '../lib/api'
 
 // 免费层出口池（WARP）：自 2026-11-24 从设置页整体迁到 OpenCode 页。
 // 只写 engine_warp_* 配置，生效需要重启引擎（重启按钮在工具栏）。
-export default function WarpPoolCard({ toast }: { toast: (msg: string, ok?: boolean) => void }) {
+//
+// 状态全部来自父页面的引擎状态轮询（同一个数据源），不在这里另起一套：
+// 目标数 / 就绪 / 预注册 / 冷却，以及「重启中」。否则用户永远不知道
+// 「保存之后到底注册成功没有」。
+export default function WarpPoolCard({
+  toast,
+  status,
+  engineRestarting,
+}: {
+  toast: (msg: string, ok?: boolean) => void
+  status?: FreeTierEngineStatus | null
+  engineRestarting?: boolean
+}) {
   const [pool, setPool] = useState('4')
   const [srcV6, setSrcV6] = useState('')
   const [dirty, setDirty] = useState(false)
@@ -36,7 +48,7 @@ export default function WarpPoolCard({ toast }: { toast: (msg: string, ok?: bool
       await api.configSet('engine_warp_source_ipv6', srcV6.trim())
       setPool(String(size))
       setDirty(false)
-      toast('出口池已保存（重启引擎后重新注册出口）')
+      toast(`出口池已保存为 ${size}：点顶部「重启」后开始注册新出口（重启中会显示进度）`)
     } catch (e) {
       toast('保存失败：' + (e as Error).message, false)
     } finally {
@@ -48,7 +60,7 @@ export default function WarpPoolCard({ toast }: { toast: (msg: string, ok?: bool
     setResetting(true)
     try {
       const r = await api.freeTierResetWarpCooldown()
-      toast(`已清除 ${r.cleared} 个冷却出口，请重启引擎让它重新注册出口`)
+      toast(`已清除 ${r.cleared} 个冷却出口；需要重启引擎才会重新注册`)
     } catch (e) {
       toast((e as Error).message, false)
     } finally {
@@ -56,17 +68,68 @@ export default function WarpPoolCard({ toast }: { toast: (msg: string, ok?: bool
     }
   }
 
+  const target = status?.warp_size ?? 0
+  const ready = status?.warp_active ?? 0
+  const preload = status?.warp_preload ?? 0
+  const cooling = status?.warp_cooling ?? 0
+  const pendingApply = target > 0 && String(target) !== pool
+  const progress = target > 0 ? Math.min(100, Math.round((ready / target) * 100)) : 0
+
   return (
     <section className="bg-white rounded-2xl border border-zinc-200 shadow-sm p-5">
       <div className="flex items-center gap-2">
         <Waves size={16} className="text-teal-700" />
         <h2 className="text-lg font-semibold text-zinc-900">免费层出口池（WARP）</h2>
+        {engineRestarting ? (
+          <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-amber-50 text-amber-700 text-[11px]">
+            <Loader2 size={10} className="animate-spin" />
+            引擎重启中
+          </span>
+        ) : null}
       </div>
       <p className="mt-1 text-[12px] text-zinc-500">
         免费层只走匿名通道、没有 key 兜底：每个出口是 Cloudflare 分配的一个独立 /64，额度按 /64
-        记账。出口被上游限流会进 24 小时冷却账本，池子会自动补新的；连续失败 6 次会让匿名通道熔断（1h
-        起，逐次翻倍至 24h）。
+        记账。出口被上游限流会进 24 小时冷却账本，池子会自动补新的。2.0.14 起不再熔断匿名通道——
+        失败会立刻返回真实原因（出口被封 / 无可用出口），出口一恢复就能继续用。
       </p>
+
+      {/* 实时池状态：注册成功没有，一眼可见 */}
+      <div className="mt-3 rounded-lg border border-zinc-200 px-3 py-2">
+        <div className="flex items-center gap-3 text-[12px] text-zinc-700">
+          <span>
+            目标 <b>{target || '—'}</b>
+          </span>
+          <span className={ready > 0 ? 'text-emerald-700' : 'text-amber-700'}>
+            就绪 <b>{ready}</b>
+          </span>
+          <span>预注册 <b>{preload}</b></span>
+          <span>冷却 <b>{cooling}</b>
+          </span>
+          <span className="ml-auto text-[11px] text-zinc-400">
+            {engineRestarting || status?.state === 'starting'
+              ? '注册中…（每个出口 10~90s）'
+              : target > 0 && ready < target
+                ? '部分出口还在注册/冷却'
+                : target > 0
+                  ? '全部就绪'
+                  : ''}
+          </span>
+        </div>
+        {target > 0 ? (
+          <div className="mt-2 h-1.5 rounded bg-zinc-100 overflow-hidden">
+            <div
+              className={ready > 0 ? 'h-full bg-emerald-500' : 'h-full bg-amber-400'}
+              style={{ width: `${progress}%` }}
+            />
+          </div>
+        ) : null}
+        {cooling > 0 ? (
+          <div className="mt-1.5 text-[11px] text-amber-700">
+            冷却中的 /64 额度已烧穿，等冷却到期或换注册源（节点池 / 出口代理）拿新 /64。
+          </div>
+        ) : null}
+      </div>
+
       <div className="mt-3 grid grid-cols-2 gap-3">
         <label className="space-y-1 block">
           <span className="text-[12px] text-zinc-600">出口池大小（1~32）</span>
@@ -99,7 +162,7 @@ export default function WarpPoolCard({ toast }: { toast: (msg: string, ok?: bool
       <div className="mt-3 flex items-center gap-2">
         <button
           onClick={() => void save()}
-          disabled={!dirty || saving}
+          disabled={!dirty || saving || engineRestarting}
           className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-[13px] text-white bg-zinc-900 hover:bg-zinc-800 disabled:opacity-40"
         >
           {saving ? <Loader2 size={14} className="animate-spin" /> : null}
@@ -107,13 +170,19 @@ export default function WarpPoolCard({ toast }: { toast: (msg: string, ok?: bool
         </button>
         <button
           onClick={() => void resetCooldown()}
-          disabled={resetting}
+          disabled={resetting || engineRestarting}
           className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-[13px] text-orange-700 bg-orange-50 hover:bg-orange-100 disabled:opacity-40"
         >
           {resetting ? <Loader2 size={14} className="animate-spin" /> : null}
           重置出口冷却
         </button>
-        <span className="text-[11px] text-zinc-400">改完需重启引擎生效</span>
+        <span className="text-[11px] text-zinc-400">
+          {engineRestarting
+            ? '重启完成后出口会自动重新注册'
+            : pendingApply
+              ? `已保存 ${pool}，当前引擎是 ${target}：点顶部「重启」生效`
+              : '改完需重启引擎生效'}
+        </span>
       </div>
     </section>
   )

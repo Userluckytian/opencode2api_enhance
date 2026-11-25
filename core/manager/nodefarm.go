@@ -486,6 +486,7 @@ func (m *Manager) NodePoolStatusOf() NodePoolStatus {
 		Selected:    sel,
 		NodeCount:   len(cache.Nodes),
 		SelectedLen: len(sel),
+		HiddenCount: len(cache.Hidden),
 		SocksUDP:    cfg.EngineWarpSocksUDP,
 		LastError:   info.LastError,
 		UpdatedAt:   cache.FetchedAt,

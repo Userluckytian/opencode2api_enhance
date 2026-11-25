@@ -61,7 +61,9 @@ export default function OpenCodePage({ toast }: { toast: (msg: string, ok?: bool
   const [freeOnly, setFreeOnly] = useState(true)
   const [freeOnlyDirty, setFreeOnlyDirty] = useState(false)
   const [savingFreeOnly, setSavingFreeOnly] = useState(false)
-  // restartingAt 非 0 = 引擎正在重启，用它驱动状态轮询与「重启中」提示
+  // restartingAt 非 0 = 本页刚点过重启（乐观标记，驱动 2s 轮询等它重新就绪）。
+  // 后端 status.restarting 覆盖「别人触发的重启」（节点池应用、看门狗），
+  // 两者取或在 engineRestarting 里合并。
   const [restartingAt, setRestartingAt] = useState(0)
   const restartingAtRef = useRef(0)
   const probingModelsRef = useRef<Set<string>>(new Set())
@@ -336,6 +338,23 @@ export default function OpenCodePage({ toast }: { toast: (msg: string, ok?: bool
   }, [restartingAt])
 
   const [stateCls, stateText] = stateBadge(status?.state ?? 'stopped', status?.running ?? false)
+  // 重启状态的唯一来源：本地乐观标记（本页点完立刻生效）或后端 restarting
+  // （节点池「应用」、看门狗、其它入口触发的重启也能被看到）。两者取或，
+  // 就不会再出现「下面在重启、上面按钮还能再点一次」。
+  const engineRestarting = restartingAt > 0 || Boolean(status?.restarting)
+  // 出口注册进度：目标 / 就绪 / 预注册 / 冷却。
+  const warpTarget = status?.warp_size ?? 0
+  const warpReady = status?.warp_active ?? 0
+  const warpPreload = status?.warp_preload ?? 0
+  const warpCooling = status?.warp_cooling ?? 0
+  const warpPhase = engineRestarting
+    ? `引擎重启中${warpTarget > 0 ? ` · 出口 ${warpReady}/${warpTarget}` : ''}`
+    : status?.state === 'starting'
+      ? `引擎启动中${warpPreload > 0 ? ` · 预注册 ${warpPreload} 个出口` : ''}`
+      : warpTarget > 0 && warpReady < warpTarget
+        ? `出口注册中 · ${warpReady}/${warpTarget}${warpCooling > 0 ? ` · 冷却 ${warpCooling}` : ''}`
+        : ''
+  const noUsableExit = !engineRestarting && status?.state === 'ready' && warpReady === 0 && warpCooling > 0
   return (
     <div className="p-6 flex flex-col gap-4">
       {/* 工具条 */}
@@ -346,21 +365,31 @@ export default function OpenCodePage({ toast }: { toast: (msg: string, ok?: bool
           <span
             className={clsx(
               'flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium',
-              stateCls,
+              engineRestarting || status?.state === 'starting'
+                ? 'bg-amber-50 text-amber-700'
+                : stateCls,
             )}
           >
             <span
               className={clsx(
                 'w-1.5 h-1.5 rounded-full',
-                status?.running ? 'bg-green-500' : 'bg-zinc-400',
+                engineRestarting || status?.state === 'starting'
+                  ? 'bg-amber-500 animate-pulse'
+                  : status?.running
+                    ? 'bg-green-500'
+                    : 'bg-zinc-400',
               )}
             />
-            {stateText}
+            {engineRestarting ? '重启中' : status?.state === 'starting' ? '启动中' : stateText}
           </span>
-          {status?.warp_active ? (
+          {warpTarget > 0 ? (
             <span className="px-2 py-0.5 rounded-full bg-teal-50 text-teal-700 text-xs font-medium">
-              {status.warp_active} 个出口活跃
+              出口 {warpReady}/{warpTarget}
+              {warpCooling > 0 ? ` · 冷却 ${warpCooling}` : ''}
             </span>
+          ) : null}
+          {warpPhase ? (
+            <span className="text-[11px] text-amber-700">{warpPhase}</span>
           ) : null}
         </div>
         <div className="flex items-center gap-2">
@@ -383,7 +412,7 @@ export default function OpenCodePage({ toast }: { toast: (msg: string, ok?: bool
           ) : (
             <button
               onClick={() => void doAction('start')}
-              disabled={busy !== null || restartingAt > 0 || !status?.bin_exists}
+              disabled={busy !== null || engineRestarting || !status?.bin_exists}
               title={status?.bin_exists ? '' : '引擎未安装：请把 opencode2api-win 放入 bin/ 目录'}
               className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-[13px] text-teal-700 bg-teal-50 hover:bg-teal-100 disabled:opacity-40"
             >
@@ -393,21 +422,21 @@ export default function OpenCodePage({ toast }: { toast: (msg: string, ok?: bool
           )}
           <button
             onClick={() => void doAction('restart')}
-            disabled={busy !== null || restartingAt > 0 || !status?.bin_exists}
-            title={restartingAt > 0 ? '引擎正在重启（WARP 首次注册最长 90s）' : '重启引擎'}
+            disabled={busy !== null || engineRestarting || !status?.bin_exists}
+            title={engineRestarting ? '引擎正在重启（WARP 首次出口注册最长 90s），请等待完成' : '重启引擎'}
             className={clsx(
               'flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-[13px] disabled:opacity-60',
-              restartingAt > 0
+              engineRestarting
                 ? 'text-amber-800 bg-amber-50 border border-amber-200 cursor-default'
                 : 'text-teal-700 bg-teal-50 hover:bg-teal-100',
             )}
           >
-            {busy === 'restart' || restartingAt > 0 ? (
+            {busy === 'restart' || engineRestarting ? (
               <Loader2 size={14} className="animate-spin" />
             ) : (
               <RefreshCw size={14} />
             )}
-            {restartingAt > 0 ? '重启中' : '重启'}
+            {engineRestarting ? '重启中' : '重启'}
           </button>
         </div>
       </div>
@@ -417,14 +446,33 @@ export default function OpenCodePage({ toast }: { toast: (msg: string, ok?: bool
         <ChannelStatusBar status={status} config={config} />
       </div>
 
+      {/* 池子里一个可用出口都没有时，把「为什么」和「怎么办」直接写出来：
+          路由层此时会对每条请求返回 503，不做解释的话用户只能反复重启/点探测。 */}
+      {noUsableExit ? (
+        <div className="rounded-lg bg-amber-50 border border-amber-200 px-3 py-2 text-[12px] text-amber-900">
+          当前没有可用出口（冷却 {warpCooling} 个）：请求会立即返回 503（出口被封 / 无可用出口）。
+          处理：① 等冷却到期；② 换出口代理或注册源后重启引擎，重新拿 /64；
+          ③ 开启下面「WARP 注册节点池」，让注册轮换走不同出口。
+        </div>
+      ) : null}
+
       {/* WARP 注册节点池（订阅 → 本地端口 → engine_warp_registration_proxies） */}
       <div className="order-4">
-        <NodePoolCard toast={toast} />
+        <NodePoolCard
+          toast={toast}
+          // 应用会触发引擎重启：立刻把本页切到「重启中」，顶部按钮同步禁用。
+          onEngineRestarting={() => setRestartingAt(Date.now())}
+          engineRestarting={engineRestarting}
+        />
       </div>
 
       {/* 免费层出口池（WARP）：从设置页整体迁入 */}
       <div className="order-5">
-        <WarpPoolCard toast={toast} />
+        <WarpPoolCard
+          toast={toast}
+          status={status}
+          engineRestarting={engineRestarting}
+        />
       </div>
 
 
@@ -497,10 +545,10 @@ export default function OpenCodePage({ toast }: { toast: (msg: string, ok?: bool
               freeOnly
                 ? 'border-teal-300 bg-teal-50 text-teal-800'
                 : 'border-zinc-200 bg-white text-zinc-600 hover:bg-zinc-50',
-              (savingFreeOnly || restartingAt > 0) && 'opacity-70 pointer-events-none cursor-default',
+              (savingFreeOnly || engineRestarting) && 'opacity-70 pointer-events-none cursor-default',
             )}
             title={
-              restartingAt > 0
+              engineRestarting
                 ? '引擎正在重启，切换完成后再操作（free_only 只在引擎启动时读取）'
                 : '写引擎 models.free_only：只暴露免费模型。判定标准 = 模型 ID 含 free，或元数据显示输入/输出成本均为 0 且未废弃'
             }
@@ -509,14 +557,14 @@ export default function OpenCodePage({ toast }: { toast: (msg: string, ok?: bool
               type="checkbox"
               className="accent-teal-600"
               checked={freeOnly}
-              disabled={savingFreeOnly || restartingAt > 0}
+              disabled={savingFreeOnly || engineRestarting}
               onChange={(e) => void toggleFreeOnly(e.target.checked)}
             />
             只使用免费模型
-            {(savingFreeOnly || restartingAt > 0) && <Loader2 size={11} className="animate-spin" />}
+            {(savingFreeOnly || engineRestarting) && <Loader2 size={11} className="animate-spin" />}
           </label>
           <span className="flex-1" />
-          {restartingAt > 0 && (
+          {engineRestarting && (
             <span className="inline-flex items-center gap-1 text-[11px] text-amber-700 bg-amber-50 border border-amber-200 rounded-md px-2 py-0.5">
               <Loader2 size={10} className="animate-spin" />
               引擎重启中，完成后自动刷新
@@ -539,7 +587,7 @@ export default function OpenCodePage({ toast }: { toast: (msg: string, ok?: bool
 
         {/* 重启窗口内引擎端口是关的，freeTierModels 会返回 transport 错误。
             那不是故障，只是「还没起来」—— 显示原始 dial tcp 文案只会让人以为坏了。 */}
-        {restartingAt > 0 ? (
+        {engineRestarting ? (
           <div className="rounded-lg bg-amber-50 border border-amber-200 px-3 py-2 text-[12px] text-amber-900">
             <span className="inline-flex items-center gap-1.5">
               <Loader2 size={12} className="animate-spin" />
@@ -776,12 +824,15 @@ function ChannelStatusBar({
     cls = 'bg-amber-50 text-amber-800 border-amber-200'
   } else {
     // WARP 出口未就绪：匿名通道走出口代理/本机 IP。
-    // v2.0.9 起免费层没有 key，匿名是唯一通道，所以熔断期间会直接失败——
-    // 这句必须写在提示里，否则用户会把「熔断期失败」误判成 bug。
+    // 2.0.14 起匿名通道不再熔断（阈值 0）：失败会立刻返回真实原因，
+    // 出口恢复即可用，不会再出现「恢复后还要干等一小时」的黑洞。
     lane = 'fallback'
     laneLabel = '匿名直连'
-    const breakerThreshold = config?.engine_anonymous_backoff_threshold
-    laneHint = `WARP 出口未就绪：先走匿名通道（出口代理 / 本机 IP）；连续失败达 ${breakerThreshold ?? 6} 次后匿名通道熔断（1h 起，逐次翻倍至 24h），期间无 key 兜底，请求会直接失败`
+    const breakerThreshold = config?.engine_anonymous_backoff_threshold ?? 0
+    laneHint =
+      breakerThreshold > 0
+        ? `WARP 出口未就绪：先走匿名通道（出口代理 / 本机 IP）；连续失败达 ${breakerThreshold} 次后匿名通道熔断（1h 起，逐次翻倍至 24h），期间无 key 兜底，请求会直接失败`
+        : 'WARP 出口未就绪：先走匿名通道（出口代理 / 本机 IP）；匿名通道不熔断，出口恢复后立即恢复，失败会返回具体原因'
     cls = 'bg-amber-50 text-amber-800 border-amber-200'
   }
 

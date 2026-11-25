@@ -344,10 +344,10 @@ export type ConfigView = {
    */
   engine_channel_order?: ChannelOrder
   /**
-   * 匿名通道熔断阈值（连续失败多少次后熔断）。
+   * 匿名通道熔断阈值。0 = 关闭（2.0.14 起的默认）。
    *
    * 由后端下发，前端文案直接引用 —— 不在前端另写一份常量，
-   * 否则后端调参后面板就会开始说谎。
+   * 否则后端改了策略后面板就会开始说谎。
    */
   engine_anonymous_backoff_threshold?: number
   /** WARP 池空时自动降级为直连（默认 true） */
@@ -554,8 +554,17 @@ export type FreeTierEngineStatus = {
   model_shown: number
   warp_status?: string
   warp_stack?: string
+  /** 目标出口数（引擎 warp.pool_size） */
+  warp_size: number
+  /** 正在预注册的出口数 */
+  warp_preload: number
+  /** 预热/待命出口数 */
+  warp_standby: number
   warp_active: number
   warp_cooling: number
+  /** 管理器正在重启引擎（stop→start→等健康）：驱动「重启中」并禁用重启按钮 */
+  restarting: boolean
+  restart_started_at?: string
   /** WARP 池空时的自动降级状态 */
   warp_fallback: WarpFallbackStatus
   bin_path: string

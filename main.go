@@ -429,6 +429,33 @@ func nodePoolStopHandler(m *manager.Manager) http.HandlerFunc {
 	}
 }
 
+// nodePoolRemoveHandler 从缓存里移除节点（或清空），并记入屏蔽名单。
+func nodePoolRemoveHandler(m *manager.Manager) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			writeErrResp(w, http.StatusMethodNotAllowed, "POST only")
+			return
+		}
+		var req struct {
+			Fingerprints []string `json:"fingerprints"`
+			All          bool     `json:"all"`
+		}
+		if json.NewDecoder(r.Body).Decode(&req) != nil {
+			writeErrResp(w, http.StatusBadRequest, "请求体需含 fingerprints 或 all=true")
+			return
+		}
+		removed, remain, err := m.RemoveNodePoolNodes(req.Fingerprints, req.All)
+		if err != nil {
+			writeErrResp(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		writeJSONResp(w, map[string]any{
+			"status": "ok", "removed": removed, "remain": remain,
+			"node_pool": m.NodePoolStatusOf(),
+		})
+	}
+}
+
 // freeTierEngineHandlers 免费层引擎（40080）状态与启停。
 func freeTierEngineStatusHandler(m *manager.Manager) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
@@ -625,6 +652,7 @@ func registerHTTPRoutes(mux *http.ServeMux, managerInst *manager.Manager, plugin
 	mux.HandleFunc("/api/admin/node-pool/import", loggingMiddleware(requireAuth(nodePoolImportHandler(managerInst))))
 	mux.HandleFunc("/api/admin/node-pool/apply", loggingMiddleware(requireAuth(nodePoolApplyHandler(managerInst))))
 	mux.HandleFunc("/api/admin/node-pool/stop", loggingMiddleware(requireAuth(nodePoolStopHandler(managerInst))))
+	mux.HandleFunc("/api/admin/node-pool/remove", loggingMiddleware(requireAuth(nodePoolRemoveHandler(managerInst))))
 	// 诊断：四服务自检 + 配置/二进制检查
 	mux.HandleFunc("/api/admin/diag", loggingMiddleware(requireAuth(diagHandler(managerInst))))
 	// 失败聚合：从调用日志现算「厂商 × 错误码」
