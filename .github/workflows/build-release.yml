@@ -123,6 +123,7 @@ jobs:
           # 本地补丁（按文件名顺序应用）：
           #   1) registration-proxies：warp.registration_proxies 注册轮换
           #   2) registrar-stats：healthz 暴露每个注册代理的成功/失败计数
+          #   3) penalty-tuning：403 network anomaly 走短冷却 + 注册退避上限 5 分钟
           # 必须在仓库根用 --directory 打补丁：在 git 工作树内 cd 进 engine-src 再
           # git apply，git 会把补丁路径解释为「仓库根相对」，目标落在当前目录之外时
           # 静默跳过并返回 0（Skipped patch ...），最终编出未打补丁的二进制。
@@ -146,6 +147,14 @@ jobs:
           }
           grep -q "RegistrarStat" engine-src/internal/warp/pool.go || {
             echo "::error::registrar-stats patch did not modify engine-src/internal/warp/pool.go"
+            exit 1
+          }
+          grep -q "status == 403 && networkAnomaly(body)" engine-src/internal/warp/pool.go || {
+            echo "::error::penalty-tuning patch missing the 403 network-anomaly classification"
+            exit 1
+          }
+          grep -qE "refillBackoffMax[[:space:]]*=[[:space:]]*5 \* time\.Minute" engine-src/internal/warp/pool.go || {
+            echo "::error::penalty-tuning patch missing the registration backoff budget"
             exit 1
           }
           echo "toolchain: $(go version)"

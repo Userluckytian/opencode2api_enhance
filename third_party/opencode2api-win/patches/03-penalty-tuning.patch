@@ -1,0 +1,26 @@
+diff --git a/internal/warp/pool.go b/internal/warp/pool.go
+index 99fd8bf..7149782 100644
+--- a/internal/warp/pool.go
++++ b/internal/warp/pool.go
+@@ -67,7 +67,7 @@ const refillRetryDelay = 5 * time.Second
+ const (
+ 	refillFailureThreshold = 3
+ 	refillBackoffBase      = 15 * time.Second
+-	refillBackoffMax       = time.Minute
++	refillBackoffMax       = 5 * time.Minute
+ )
+ 
+ // firstDuplicateRetryDelay spaces out first-exit attempts when Cloudflare keeps
+@@ -752,6 +752,12 @@ func classifyPenalty(status int, body []byte) penaltyKind {
+ 	if status != 429 && status != 403 {
+ 		return penaltyQuota
+ 	}
++	// A 403 "network anomaly" is Cloudflare's temporary IP block, not a spent
++	// quota: parking the /64 for 24h throws away a block that recovers in
++	// minutes. Keep it on the short (rate-limit) cooldown instead.
++	if status == 403 && networkAnomaly(body) {
++		return penaltyRateLimit
++	}
+ 	text := strings.ToLower(string(body))
+ 	for _, marker := range []string{"quota", "usage limit", "free usage", "insufficient_quota", "billing", "credit", "额度"} {
+ 		if strings.Contains(text, marker) {

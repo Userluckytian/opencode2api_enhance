@@ -133,6 +133,9 @@ if ($patches.Count -gt 0) {
     if (-not (Select-String -Path $poolFile -Pattern "RegistrarStat" -Quiet)) {
         throw "补丁未生效：$poolFile 里没有 RegistrarStat（面板将看不到每节点注册成败）"
     }
+    if (-not (Select-String -Path $poolFile -Pattern "status == 403 && networkAnomaly\(body\)" -Quiet)) {
+        throw "补丁未生效：$poolFile 里没有 403 network anomaly 短冷却分类"
+    }
 } else {
     Write-Host "[1b/3] 未找到补丁文件，按上游源码构建（节点池将只能写 socks_udp）"
 }

@@ -66,7 +66,15 @@ All rights reserved（明确未授予复制/修改/分发/使用），且配置�
    作用    : 面板可以按「注册代理 = 节点池槽位」显示每个节点的注册中/成功/失败，
              而不是只有一个池子总数。
 
-   适用    : 两个补丁按名称顺序应用后再编译；CI 会把补丁提交进 engine-src，
+   文件 3  : patches/03-penalty-tuning.patch
+   改动    : internal/warp/pool.go（403 network anomaly → 短冷却 penaltyRateLimit；
+             连续重复注册的退避上限 1min → 5min）
+   规模    : 1 文件，+7 行
+   作用    : Cloudflare 的 403「network anomaly」是分钟级临时封禁，此前按 24h
+             额度冷却处理，一个临时封禁就把 /64 废一天；改为 1~5 分钟冷却。
+             连续重复注册的最长退避拉到 5 分钟，避免持续撞注册限流。
+
+   适用    : 三个补丁按名称顺序应用后再编译；CI 会把补丁提交进 engine-src，
              因此 git archive 导出的源码与二进制一致（GPL-3.0 要求）。
 
 4) 构建命令（CI 与本仓库脚本 scripts/fetch-free-tier-engine.ps1 一致）
