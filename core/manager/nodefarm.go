@@ -197,7 +197,7 @@ func buildFarmConfig(cache nodePoolCache, all []PoolNode, slots []PoolNode, port
 	b.WriteString("dns:\n  enable: false\n")
 	b.WriteString("proxies:\n")
 	written := map[string]bool{}
-	for _, n := range slots {
+	for _, n := range all {
 		if written[n.Fingerprint] {
 			continue
 		}
