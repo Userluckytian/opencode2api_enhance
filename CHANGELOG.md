@@ -5,6 +5,7 @@
 ### 修复
 
 - **自动选源只能看到槽位内的 8 个节点**：`buildFarmConfig` 的 `proxies:` 段误用了「槽位」而不是「全部候选」，于是选中超过 8 个节点时，其余节点不在 mihomo 配置里，`/proxies/{name}/delay` 逐个返回 not-found，被误判为「全部不可达」并拒绝应用。现在 `proxies:` 写入全部候选、`listeners:` 只写槽位；新增回归测试 `TestBuildFarmConfigIncludesAllCandidates`。
+- **启动时校验槽位可达**：上次「可达」的节点可能已经挂了。`AutoStartNodePool` 现在启动农场后直接跑一次自动选源，再写注册配置；否则引擎会拿一组死槽位注册、卡在 starting，而定时巡检要等引擎 ready 才运行，形成死锁。实测：把上次的 2 个节点之一改成死端口重启，槽位自动收敛为 1 个可用节点，引擎正常 ready。
 - 实测（50 节点订阅）：修复前 46 个真实节点 4 秒内全判不可达；独立 mihomo 逐节点探测确认 46 个服务器 TCP 都可达，但代理握手全部失败（hysteria2 超时 / vless 报错），说明该订阅本身在当前网络下不可用，与本次 bug 无关。
 
 ## v2.0.17（2026-11-25）

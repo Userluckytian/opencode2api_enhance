@@ -112,8 +112,9 @@ func chooseSlotNodes(candidates []PoolNode, delays map[string]time.Duration, slo
 	return out
 }
 
-// preferredSlotNodes 优先按「上次自动选源的结果」铺槽位（节点还在才用），
-// 不足部分按顺序从候选里补。这样订阅刷新/农场重启不会把好映射冲掉。
+// preferredSlotNodes 只用「上次自动选源的结果」铺槽位（节点还在才用），
+// 不再把其余候选补进来——那些很可能是不可达节点，补进来就前功尽弃。
+// 偏好全部失效时才退回 slotNodes。
 func preferredSlotNodes(candidates []PoolNode, preferred []string, slots int) []PoolNode {
 	if len(candidates) == 0 || slots <= 0 {
 		return nil
@@ -122,7 +123,7 @@ func preferredSlotNodes(candidates []PoolNode, preferred []string, slots int) []
 	for _, n := range candidates {
 		byFP[n.Fingerprint] = n
 	}
-	ordered := make([]PoolNode, 0, len(candidates))
+	ordered := make([]PoolNode, 0, len(preferred))
 	used := map[string]bool{}
 	for _, fp := range preferred {
 		fp = strings.TrimSpace(fp)
@@ -131,21 +132,12 @@ func preferredSlotNodes(candidates []PoolNode, preferred []string, slots int) []
 			used[fp] = true
 		}
 	}
-	for _, n := range candidates {
-		if !used[n.Fingerprint] {
-			ordered = append(ordered, n)
-		}
-	}
 	if len(ordered) == 0 {
-		return nil
+		return slotNodes(candidates, slots)
 	}
 	res := make([]PoolNode, slots)
 	for i := range res {
 		res[i] = ordered[i%len(ordered)]
-	}
-	if len(preferred) == 0 {
-		// 没有偏好时保持原来的「UDP 节点优先 0 号槽」规则
-		return slotNodes(candidates, slots)
 	}
 	return res
 }

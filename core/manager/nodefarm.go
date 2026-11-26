@@ -834,6 +834,14 @@ func (m *Manager) AutoStartNodePool() {
 	if len(info.Ports) == 0 {
 		return
 	}
+	// 启动校验：上次「可达」的槽位节点可能已经挂了。这里直接复用自动选源，
+	// 否则引擎会拿一组死槽位注册、卡在 starting，而巡检要等引擎 ready 才跑。
+	if _, verified, err := m.autoSelectNodeSlots(info); err != nil {
+		log.Printf("node pool autostart: all slot nodes unreachable: %v", err)
+	} else if !verified {
+		log.Printf("node pool autostart: farm has no controller; skip slot validation")
+	}
+	info = m.NodeFarmInfo()
 	if _, err := m.writeEngineRegistration(info.Ports); err != nil {
 		log.Printf("node pool sync failed: %v", err)
 	}
@@ -937,8 +945,8 @@ func (m *Manager) NodePoolStatusOf() NodePoolStatus {
 			unique[n.Fingerprint] = true
 		}
 		warns = append(warns, fmt.Sprintf(
-			"已选 %d 个节点，注册轮换固定 %d 个槽位，实际只用到前 %d 个（其余为备用）",
-			len(sel), len(info.Ports), len(unique)))
+			"注册槽位固定 %d 个，实际只用到 %d 个不同节点（重复填充），其余 %d 个节点备用",
+			len(info.Ports), len(unique), len(sel)-len(unique)))
 	}
 	// 端口漂移：农场崩溃重启后若端口被别的进程占走，会换一组端口，而引擎
 	// 只在启动时读注册表 —— 不提示的话注册会静默走死端口。

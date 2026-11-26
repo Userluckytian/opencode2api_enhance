@@ -202,7 +202,7 @@ export default function NodePoolCard({
       return {
         label: '备用',
         cls: 'bg-zinc-100 text-zinc-500',
-        title: '未进入注册槽位（固定 8 个槽位，按列表顺序取前 8 个节点）',
+        title: '未进入注册槽位（自动选源只挑可达的 8 个节点，其余备用）',
       }
     }
     let attempts = 0
