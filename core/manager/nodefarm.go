@@ -968,7 +968,9 @@ func (m *Manager) NodePoolStatusOf() NodePoolStatus {
 			warns = append(warns, "已配置源 IPv6 前缀：引擎要求它与 SOCKS-UDP 互斥，已跳过握手中继")
 		case !m.engineSupportsRegistrationProxies():
 			warns = append(warns, "当前引擎不支持注册代理轮换（warp.registration_proxies）：只启用 SOCKS-UDP 中继，可用出口会比所选节点少")
-		case len(selected) > 0 && !hasUDP:
+		case len(selected) > 0 && !hasUDP && strings.TrimSpace(effectiveSocksUDP(cfg, true)) == "":
+			// 只有「节点都不支持 UDP 且没有手动中继」才真的握不出去；
+			// 手动中继（如本地 Clash）在场时这条告警是误报。
 			warns = append(warns, "所选节点都不支持 UDP：握手中继不可用，WARP 握手仍会直连并可能失败")
 		case st.SocksUDP == "" && hasUDP:
 			warns = append(warns, "尚未写入握手中继，点一次「应用」生效")
